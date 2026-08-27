@@ -175,10 +175,18 @@ that slip past the structural filter — it matches on the boilerplate
 enough to never hit real content. The match normalizes zero-width
 joiners the decoys insert between letters.
 
-A sample run against a live chapter capture pruned 174 decoy elements
-and surfaced 52 clean text lines; a separate live check against another
-chapter stripped 15 decoy elements and kept 65 clean paragraphs with no
-boilerplate survivors.
+Two independent live-site runs back these numbers — neither figure below
+is invented, and each is attributed to where it was recorded:
+
+- A sample run against `chapter-0-0` (the chapter flagged as "chapters
+  with tricks") pruned 174 decoy elements and surfaced 52 clean text
+  lines — recorded in Riwaq-reader's `docs/store-feature/cenele.md`,
+  the doc this README was ported from.
+- A separate live-site investigation on 2026-08-27, recorded in this
+  repo's `docs/design.md` ("Field findings — 2026-08-27" → cenele.com),
+  re-ran the decoy filter against a live chapter and found 15 decoy
+  elements stripped and 65 clean paragraphs kept, with no boilerplate
+  survivors.
 
 ## URL handling
 

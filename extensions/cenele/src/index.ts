@@ -341,7 +341,7 @@ export interface NovelConfig {
 /** Extract the chapter-list credentials from the novel page's inline
  *  config: `var nhvNovelV2 = {"ajaxurl":"…","nonce":"…","postId":"…",
  *  "chaptersNonce":"…", …};`. Replaced `nhvMangaSingleAjax` when the
- *  site redesigned its novel page (see docs/store-feature/cenele.md). */
+ *  site redesigned its novel page (see this extension's README.md). */
 export function extractNovelConfig(html: string): NovelConfig | null {
   const m = html.match(/var\s+nhvNovelV2\s*=\s*(\{[\s\S]*?\})\s*;/);
   if (!m) return null;
