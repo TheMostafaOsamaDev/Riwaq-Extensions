@@ -1,13 +1,15 @@
 // The Sources subsystem. A "Source" is an installable extension that knows
 // how to browse + scrape a specific website (or family of sites) for
 // novels/books. Every source implements the `Source` interface below; the
-// host (Leaflet) drives them through their lifecycle, persists results
-// into the library, and isolates them from each other.
+// host drives them through their lifecycle, persists results into the
+// library, and isolates them from each other.
 //
-// Compared to the older NovelScraper C# tool, the same scraping logic lives
-// here as a small TS module, but the heavy lifting (HTTP, JS rendering) is
-// delegated to the Rust side through the `SourceHost` bridge — keeping the
-// extension code itself short and reviewable.
+// A source never talks to the network, a rendering engine, or the
+// filesystem directly. Those capabilities — HTTP, JS-rendered page
+// extraction, logging, the UI's current locale, and PDF chapter parsing —
+// arrive on the injected `SourceHost` the host supplies, by whatever means
+// it chooses. That keeps the extension code itself short, reviewable, and
+// portable across hosts.
 //
 // Three layers of data shape:
 //   - NovelCard: cheap stub used in homepage rows + search results
