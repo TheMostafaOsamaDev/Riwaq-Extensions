@@ -163,6 +163,15 @@ Two existing couplings are cut:
   `{ en, ar }`) resolved by `pickDescription(map, locale)`, which falls
   back to `en` and then to the first entry present.
 
+Catalogue metadata is cut from the instance, not just from i18n:
+`Source` no longer carries a `meta: SourceMetadata` field. The pre-split
+app kept metadata on both the manifest and the constructed instance,
+which produced a split brain — views resolved icons via a separate
+`getSourceMeta(id)` registry lookup because the instance's own `meta`
+lacked store-facing fields. The host now builds one `SourceMetadata`
+from the manifest and pairs it with the `Source` instance it
+constructs; an extension itself never declares or returns one.
+
 The package carries a major version. Manifests declare `apiVersion`.
 The host refuses to construct an extension whose major does not match.
 
