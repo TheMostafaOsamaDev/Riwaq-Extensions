@@ -12,6 +12,7 @@
     "skipLibCheck": true,
     "noEmit": true,
     "paths": {
+      "@riwaq/extension-api/testing": ["packages/extension-api/src/testing.ts"],
       "@riwaq/extension-api": ["packages/extension-api/src/index.ts"]
     }
   }
