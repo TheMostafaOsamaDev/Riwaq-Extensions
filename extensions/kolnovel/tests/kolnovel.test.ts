@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import createSource from "../src/index";
-import { parseSearchResults } from "../src/theme";
+import { parseHomeSections, parseSearchResults } from "../src/theme";
 import { createTestHost } from "@riwaq/extension-api/testing";
 
 // Deliberately not `readFileSync(new URL("./fixtures/search.html", import.meta.url), ...)`:
@@ -17,6 +17,7 @@ import { createTestHost } from "@riwaq/extension-api/testing";
 // arithmetic sidesteps it entirely.
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 const searchHtml = readFileSync(join(FIXTURES_DIR, "search.html"), "utf8");
+const homeHtml = readFileSync(join(FIXTURES_DIR, "home.html"), "utf8");
 
 const BASE = "https://kolnovel.com";
 
@@ -63,6 +64,26 @@ describe("parseSearchResults", () => {
     const r = parse(searchHtml, 1);
     expect(r.query).toBe("سيد");
     expect(r.page).toBe(1);
+  });
+});
+
+describe("parseHomeSections", () => {
+  it("resolves a relative viewMoreUrl href to an absolute URL", () => {
+    // The fixture's "view more" anchor deliberately carries a RELATIVE href
+    // (`/series/?status=&order=update`), not an absolute one — that's the
+    // whole point of this test. parseSectionElement resolves viewMoreUrl via
+    // absoluteUrl(href, baseUrl) rather than reading the anchor's DOM `.href`
+    // property, because a DOMParser-produced Document's base URL is
+    // "about:blank": a relative href can't resolve against that, so `.href`
+    // falls back to returning the raw, unresolved attribute string instead
+    // of an absolute URL (see the README's "Home section parsing" note for
+    // why). If this fixture used an absolute href instead, both the fixed
+    // code and the original buggy `.href` read would produce the same
+    // result, and this test would pass either way — proving nothing.
+    const doc = new DOMParser().parseFromString(homeHtml, "text/html");
+    const sections = parseHomeSections(doc, BASE, createTestHost());
+    expect(sections).toHaveLength(1);
+    expect(sections[0].viewMoreUrl).toBe("https://kolnovel.com/series/?status=&order=update");
   });
 });
 

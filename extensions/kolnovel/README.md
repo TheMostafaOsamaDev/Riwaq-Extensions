@@ -116,6 +116,22 @@ is expected to navigate a card click to a novel detail view, not a chapter.
 |--------------|----------------------|-------|
 | `.trendarea` | `.trendlist`         | "Trending" hero list; falls back to the extension's own `trendingFallback` string when the theme omits a heading |
 | `.homehot`   | `.hotoday`           | "Hot updates" big-card row; falls back to `hotUpdatesFallback` |
+
+A `.bixbox` section's optional "view more" link (`.releases .vl`) is
+resolved with `absoluteUrl(href, baseUrl)`, deliberately **not** by reading
+the anchor element's `.href` property. A `DOMParser`-produced `Document`
+has no real page location — its base URL is `about:blank` — so a relative
+`href` there cannot resolve the way it would on a live page; per the
+`HTMLHyperlinkElementUtils` spec, `.href` then falls back to returning the
+raw, unresolved attribute string instead of an absolute URL (some DOM
+implementations, e.g. the happy-dom environment this repo tests under,
+substitute their own fake page location instead — the effect is the same
+kind of wrong URL, just a different wrong URL). This differs from what the
+pre-split app's `kolnovel-theme.ts` did (it read `.href` directly) — that
+was a latent bug carried over from the original app, not a porting mistake,
+and the fix here is deliberate. `tests/kolnovel.test.ts`'s
+`parseHomeSections` suite pins a fixture with a relative `viewMoreUrl` href
+specifically to guard against this being "restored" by a future edit.
 | `.bixbox`    | `.listupd` (`.utao` or `article.bs` cards) | most other sections — completed novels, recommendations, new novels, … Sidebar/blog widgets sharing `.bixbox` are skipped by checking for `.blogbox, .lexa` |
 
 ## Novel-page selectors
