@@ -399,9 +399,18 @@ export function parseVolumes(doc: Document, pageUrl: string, host: SourceHost): 
       const href = a.getAttribute("href") || "";
       const titleEl = a.querySelector(".epl-title");
       const rawTitle = (titleEl ? titleEl.textContent : a.textContent) || "";
+      // Capture the id before incrementing the counter: `id:
+      // runningChapterId++` evaluates (and assigns) before the `title:`
+      // property below it does, so passing `runningChapterId` there
+      // would read the *already-incremented* value — a chapter with
+      // `id: 1` and no usable title text would be labelled "2 - No
+      // Title" instead of "1 - No Title". cenele's equivalent
+      // (parseChapterListHtml, in extensions/cenele/src/index.ts) avoids
+      // this by passing `out.length + 1`, the id it's about to assign.
+      const id = runningChapterId++;
       return {
-        id: runningChapterId++,
-        title: sanitizeChapterTitle(rawTitle, runningChapterId, host),
+        id,
+        title: sanitizeChapterTitle(rawTitle, id, host),
         url: absoluteUrl(href, pageUrl),
         lines: [],
       };
@@ -497,7 +506,7 @@ function extractHiddenClassesFromCss(cssText: string): Set<string> {
   return out;
 }
 
-function collectHiddenClasses(doc: Document): Set<string> {
+export function collectHiddenClasses(doc: Document): Set<string> {
   const out = new Set<string>();
   for (const styleEl of Array.from(doc.querySelectorAll("style"))) {
     const css = styleEl.textContent || "";

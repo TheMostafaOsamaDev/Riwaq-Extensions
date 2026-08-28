@@ -140,6 +140,67 @@ describe("validateManifest", () => {
       /"icon"/,
     );
   });
+
+  // scripts/new-extension.ts scaffolds `name`, `author` and `description.en`
+  // with exactly these "TODO: ..." placeholders (see manifestJson() there).
+  // An accidentally-merged scaffold would otherwise pass every check above
+  // — non-empty strings, a valid https baseUrl, a real icon.png — and
+  // publish a permanently-broken "TODO: Display Name" extension.
+  it('rejects a name still carrying the scaffold\'s "TODO:" placeholder', () => {
+    expect(() =>
+      validateManifest(validRawManifest({ name: "TODO: Display Name" }), "cenele"),
+    ).toThrow(/"name".*TODO:/s);
+  });
+
+  it('rejects an author still carrying the scaffold\'s "TODO:" placeholder', () => {
+    expect(() =>
+      validateManifest(validRawManifest({ author: "TODO: your name" }), "cenele"),
+    ).toThrow(/"author".*TODO:/s);
+  });
+
+  it('rejects a description.en still carrying the scaffold\'s "TODO:" placeholder', () => {
+    expect(() =>
+      validateManifest(
+        validRawManifest({
+          description: { en: "TODO: one-line description shown in the sources list." },
+        }),
+        "cenele",
+      ),
+    ).toThrow(/"description\.en".*TODO:/s);
+  });
+
+  it('rejects a "TODO:" placeholder in a non-English description locale too', () => {
+    expect(() =>
+      validateManifest(
+        validRawManifest({ description: { en: "Fine.", ar: "TODO: ترجمة عربية" } }),
+        "cenele",
+      ),
+    ).toThrow(/"description\.ar".*TODO:/s);
+  });
+
+  it('does not reject the word "todo" when it is not the scaffold\'s "TODO:" marker', () => {
+    // Only the literal scaffold marker is rejected — an ordinary sentence
+    // that happens to contain the word "todo" (no colon, wrong case) must
+    // not be blocked.
+    expect(() =>
+      validateManifest(validRawManifest({ name: "My Todo List Novels" }), "cenele"),
+    ).not.toThrow();
+  });
+
+  it("accepts a fully filled-in manifest scaffolded by new-extension", () => {
+    // The full scaffold shape from scripts/new-extension.ts, but with every
+    // TODO placeholder actually replaced — this must still validate cleanly.
+    expect(() =>
+      validateManifest(
+        validRawManifest({
+          name: "Real Display Name",
+          author: "A Real Author",
+          description: { en: "A real one-line description." },
+        }),
+        "cenele",
+      ),
+    ).not.toThrow();
+  });
 });
 
 describe("loadManifest", () => {

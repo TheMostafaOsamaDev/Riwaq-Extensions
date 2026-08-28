@@ -226,6 +226,33 @@ describe("runBuild failure modes", () => {
     });
   });
 
+  it("fails, naming the extension, when the entry file has no default export", async () => {
+    await withTempDirs(async ({ extensionsDir, distDir }) => {
+      // A named-only `export function createSource` bundles cleanly and
+      // hashes cleanly — the whole point of this test is that runBuild
+      // itself must still refuse it, because the host only ever calls a
+      // module's *default* export.
+      writeFixtureExtension(extensionsDir, "no-default-export", {
+        sourceBody: `export function createSource() {
+  return { id: "no-default-export" };
+}
+`,
+      });
+
+      let error: Error | undefined;
+      try {
+        await runBuild({ extensionsDir, distDir });
+      } catch (err) {
+        error = err as Error;
+      }
+
+      expect(error).toBeDefined();
+      expect(error?.message).toMatch(/no-default-export/);
+      expect(error?.message).toMatch(/default export/);
+      expect(error?.message).toMatch(/createSource/);
+    });
+  });
+
   it("fails, naming the extension and explaining why, when the bundle exceeds 512 KB", async () => {
     await withTempDirs(async ({ extensionsDir, distDir }) => {
       // A literal string this size in the *source* survives minification

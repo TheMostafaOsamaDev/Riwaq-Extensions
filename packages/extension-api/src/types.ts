@@ -127,8 +127,12 @@ export interface SourceNovelMeta {
 
 export interface SourceNovel {
   title: string;
-  /** Best-effort author name. Sources unable to detect it return "Unknown".
-   *  The user can rename via the library's edit dialog post-import. */
+  /** Best-effort author name. Sources unable to detect it return `""`
+   *  (not a literal "Unknown") — both extensions in this repo do this
+   *  deliberately, so the host's own display-time fallback can localize
+   *  the empty case instead of a locale-frozen English string getting
+   *  baked into the novel's persisted data. The user can rename via the
+   *  library's edit dialog post-import. */
   author: string;
   /** Original-language title (e.g. "Master of Gu kol" for the Arabic
    *  KolNovel translation of "Reverend Insanity"). Surfaced in the header
@@ -173,7 +177,12 @@ export interface FetchResponse {
   status: number;
   /** Response body as text. UTF-8 decoded by the host. */
   text: string;
-  /** Response headers, lowercased keys. */
+  /** Response headers, lowercased keys. A `Record<string, string>` holds
+   *  only one value per header name, so multiple `Set-Cookie` headers on
+   *  one response cannot be represented here at all — see the cookie-jar
+   *  requirement on `SourceHost.fetch` below for why that's necessarily
+   *  the host's own job, not something an extension could read out of
+   *  this shape and manage itself even if it wanted to. */
   headers: Record<string, string>;
 }
 
@@ -198,7 +207,26 @@ export interface RenderExtractOptions {
 }
 
 export interface SourceHost {
+  /** A GET/POST/PUT/DELETE/HEAD request through the host's own HTTP
+   *  client.
+   *
+   *  Session/cookie semantics: a host MUST behave as if every `fetch`
+   *  and `fetchBytes` call an extension makes within one session shares
+   *  a single cookie jar — sending cookies the site has previously set
+   *  and storing new ones, the same way a browser tab's requests do.
+   *  Some sites depend on this: extensions/cenele scrapes a WordPress
+   *  nonce off one page and replays it against `admin-ajax.php` in
+   *  later, separate `fetch` calls, and WordPress nonces are
+   *  session-scoped, so this only works if the session cookie set on
+   *  the first request is still being sent on the later ones. An
+   *  extension has no way to manage this itself even if it wanted to:
+   *  `FetchResponse.headers` is a `Record<string, string>`, which cannot
+   *  represent multiple `Set-Cookie` headers on one response, so there
+   *  is no shape here an extension could read a session cookie out of
+   *  and replay by hand. */
   fetch(url: string, options?: FetchOptions): Promise<FetchResponse>;
+  /** Same as `fetch`, but returns raw bytes instead of decoded text —
+   *  for images and PDFs. Subject to the same cookie-jar requirement. */
   fetchBytes(url: string, options?: FetchOptions): Promise<Uint8Array>;
   renderAndExtract<T = unknown>(
     url: string,

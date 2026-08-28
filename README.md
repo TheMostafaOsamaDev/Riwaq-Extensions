@@ -97,9 +97,16 @@ pnpm new-extension my-site
 This scaffolds `extensions/my-site/`: a manifest stub, a placeholder icon, a
 `src/index.ts` with every required `Source` method already wired up and throwing `not
 implemented`, a starter `src/strings.ts`, and a test file already using
-`createTestHost`. It typechecks, tests and builds the moment it's created — run
-`pnpm typecheck && pnpm test && pnpm validate && pnpm build` right now and all four will
-pass, with `my-site` sitting alongside `cenele` and `kolnovel` in the output.
+`createTestHost`. Run `pnpm typecheck && pnpm test` right now and both pass — the
+scaffold compiles, and its stub test file exercises every "not implemented" method.
+
+`pnpm validate` and `pnpm build` deliberately do **not** pass yet: the manifest's
+`name`, `author` and `description` still carry literal `"TODO: ..."` placeholders, and
+`scripts/manifest.ts` refuses any manifest field that still contains one. Without that
+check, an accidentally-merged scaffold would validate, build and publish cleanly as an
+installable extension literally named `"TODO: Display Name"`. Replace those fields with
+real values (step 1 below) and `pnpm validate && pnpm build` pass too, with `my-site`
+sitting alongside `cenele` and `kolnovel` in the output.
 
 From there:
 
@@ -289,11 +296,22 @@ const host = createTestHost({
 });
 ```
 
-Fixtures are captured from the real site, not hand-written, because the whole point of a
-fixture test is to pin down what the live markup actually looks like — a hand-authored
-fixture would only ever prove your parser agrees with your own assumptions about the
-site, which is exactly the case where markup drift goes unnoticed. When cenele or
-kolnovel redesigns a page, the fixture test is what tells you before a user does.
+Fixtures are **derived from** real markup captured from the live site, not invented from
+whole cloth: every element and attribute a fixture contains should be copied verbatim
+from a page the site actually served, then trimmed down to just what your parser reads.
+The verbatim part is what matters, not the trimming — a hand-invented fixture only ever
+proves your parser agrees with its own author's assumptions about the site's markup,
+which is exactly the failure mode a fixture test exists to catch; copying real markup and
+cutting it down still lets a redesign of the parts your parser *does* read show up as a
+failing test, before a user hits it live.
+
+Trimming does give something up: a full, untrimmed capture would also catch a change to
+markup your parser doesn't currently read (e.g. a wrapper element it ignores today that
+later gains significance), which a trimmed fixture by definition cannot. The fixtures
+under `extensions/*/tests/fixtures/` in this repo are exactly this trade-off already
+made — a few-hundred-byte to few-KB skeleton, not the hundreds of KB a real Madara/
+WordPress page actually weighs, but every tag, class and attribute in them was copied
+from a real capture and only re-indented for readability, not invented.
 
 **Read fixture files with `fileURLToPath(import.meta.url)` + `path.join`, never
 `new URL(...)`.** This suite runs under `environment: "happy-dom"` (see
@@ -360,14 +378,26 @@ Every publish replaces the branch's history outright; it isn't an append.
 commit, this branch never accumulates history — there is nothing to diff a bad push
 against, so a tampered commit wouldn't show up as a rewrite the way it would on a normal
 branch. The app downloads and *executes* whatever sits there. Turning on branch
-protection (or a ruleset) for `repo` — restricting who and what can push to it — is the
-cheap mitigation for that, and is worth doing before this repo is relied on by real
-users.
+protection (or a ruleset) for `repo` is the cheap mitigation for that, and is worth doing
+before this repo is relied on by real users — **but the ruleset must explicitly permit
+force pushes from the `github-actions[bot]` identity (or from Actions generally) while
+denying everyone/everything else.** `publish.yml` force-pushes `repo` on every single run
+(see the step above) — a ruleset that blocks force pushes outright fails every publish,
+and the likely next move is a maintainer disabling protection entirely to unblock
+publishing, which is strictly worse than never having turned it on. The goal is "only CI
+can push here, and only by force," not "nothing can force-push here."
 
 **Review policy.** Bundles are built by CI from reviewed source and are never uploaded
 pre-built — a PR is a diff of source code, and what gets published is always CI's own
 build of exactly that source, not something a contributor produced locally and handed
 over.
+
+**`baseUrl` is a label, not a sandbox.** It's validated as an `https:` URL and published
+in the manifest, but nothing in `@riwaq/extension-api` or the host contract scopes
+`host.fetch`, `host.fetchBytes` or `host.renderAndExtract` to it — an extension whose
+manifest declares `baseUrl: "https://cenele.com"` is not prevented from calling
+`host.fetch("https://evil.example")`. Human review of the source diff — what a PR
+actually calls those methods with — is the real control here, not the manifest field.
 
 ## A worked example
 

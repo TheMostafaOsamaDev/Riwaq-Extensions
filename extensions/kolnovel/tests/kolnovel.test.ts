@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import createSource from "../src/index";
-import { parseHomeSections, parseSearchResults } from "../src/theme";
+import {
+  collectHiddenClasses,
+  parseChapterContent,
+  parseHomeSections,
+  parseSearchResults,
+  parseVolumes,
+} from "../src/theme";
 import { createTestHost } from "@riwaq/extension-api/testing";
 
 // Deliberately not `readFileSync(new URL("./fixtures/search.html", import.meta.url), ...)`:
@@ -18,6 +24,7 @@ import { createTestHost } from "@riwaq/extension-api/testing";
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 const searchHtml = readFileSync(join(FIXTURES_DIR, "search.html"), "utf8");
 const homeHtml = readFileSync(join(FIXTURES_DIR, "home.html"), "utf8");
+const chapterHtml = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
 
 const BASE = "https://kolnovel.com";
 
@@ -84,6 +91,139 @@ describe("parseHomeSections", () => {
     const sections = parseHomeSections(doc, BASE, createTestHost());
     expect(sections).toHaveLength(1);
     expect(sections[0].viewMoreUrl).toBe("https://kolnovel.com/series/?status=&order=update");
+  });
+});
+
+describe("parseVolumes", () => {
+  it("labels a no-title chapter with its OWN id, not the next id (regression pin)", () => {
+    // Regression test for an off-by-one: `id: runningChapterId++` (a
+    // postfix increment) evaluates and assigns *before* the `title:`
+    // property below it does, so passing `runningChapterId` there reads
+    // the already-incremented counter — a chapter whose own `id` is 1
+    // would be labelled "2 - No Title" instead of "1 - No Title".
+    //
+    // The theme lists chapters newest-first on the page and parseVolumes
+    // reverses them to oldest-first, so the anchor written LAST here
+    // (the one with no title text) ends up FIRST in the returned
+    // chapters array, with id 1 — exactly the case the bug hits.
+    const html = `
+      <div class="ts-chl-collapsible">Volume 1</div>
+      <div class="ts-chl-collapsible-content">
+        <ul>
+          <li><a href="https://kolnovel.com/chapter-2/">Real Chapter Title</a></li>
+          <li><a href="https://kolnovel.com/chapter-1/"></a></li>
+        </ul>
+      </div>
+    `;
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const volumes = parseVolumes(doc, "https://kolnovel.com/series/x/", createTestHost());
+
+    expect(volumes).toHaveLength(1);
+    const chapters = volumes[0].chapters;
+    expect(chapters).toHaveLength(2);
+    expect(chapters[0]).toEqual({
+      id: 1,
+      title: "1 - No Title",
+      url: "https://kolnovel.com/chapter-1/",
+      lines: [],
+    });
+    expect(chapters[1]).toEqual({
+      id: 2,
+      title: "Real Chapter Title",
+      url: "https://kolnovel.com/chapter-2/",
+      lines: [],
+    });
+  });
+});
+
+// ── chapter-body extraction (static HTML) ───────────────────────────────────
+//
+// The highest-consequence, most theme-fragile code in this extension: over-
+// strip and a user's imported book is silently truncated, under-strip and
+// piracy/ad boilerplate is baked into their EPUB. tests/fixtures/chapter.html
+// exercises every decoy form parseChapterContent's helpers claim to handle
+// (see the file's "chapter-body extraction" header comment and each
+// function's own doc comment in ../src/theme.ts): a rotating hidden CSS
+// class, a hidden inline style, and an embedded ad phrase inside otherwise
+// real text — alongside real-looking chapter paragraphs and a real image.
+
+describe("parseChapterContent", () => {
+  it("keeps every real paragraph and image, in order, strips the ad phrase out of a real paragraph, and drops every decoy paragraph/image entirely", () => {
+    const doc = new DOMParser().parseFromString(chapterHtml, "text/html");
+    const lines = parseChapterContent(doc, "https://kolnovel.com");
+
+    expect(lines).toEqual([
+      { type: "text", content: "مرحبا بكم في الفصل الأول من القصة." },
+      // The paragraph with the hidden rotating CSS class and the
+      // paragraph with the hidden inline style are both absent entirely
+      // — proof they were dropped, not merely reordered.
+      //
+      // This paragraph's ad-boilerplate phrase is stripped out (via
+      // stripIgnored's wildcard pattern) while the real text on either
+      // side of it survives — the paragraph itself is real and must not
+      // be dropped just because it contains the phrase.
+      { type: "text", content: "بداية الفقرة الحقيقية. نهاية الفقرة الحقيقية." },
+      // Repeated verbatim in the fixture; only one copy survives (dedup).
+      { type: "text", content: "الفصل مستمر وسيتحدث البطل عن رحلته." },
+      // The real image is repeated once (dedup keeps one copy); the
+      // wp-post-image avatar and the /ads/ banner are both decorative
+      // and excluded entirely.
+      { type: "image", content: "https://kolnovel.com/wp-content/uploads/2024/02/scene.jpg" },
+    ]);
+  });
+
+  it("falls back to .entry-content when neither #kol_content nor .epcontent is present", () => {
+    const doc = new DOMParser().parseFromString(
+      `<div class="entry-content"><p>نص الفصل هنا.</p></div>`,
+      "text/html",
+    );
+    expect(parseChapterContent(doc, "https://kolnovel.com")).toEqual([
+      { type: "text", content: "نص الفصل هنا." },
+    ]);
+  });
+});
+
+describe("collectHiddenClasses", () => {
+  it("extracts a class name from a rule matching the hidden-paragraph CSS signature", () => {
+    const doc = new DOMParser().parseFromString(
+      `<style>.abcdef0123456789abcdef01 { position:absolute; left:-99999px; width:0.1px; height:0.1px; opacity:0; }</style>`,
+      "text/html",
+    );
+    expect(collectHiddenClasses(doc)).toEqual(new Set(["abcdef0123456789abcdef01"]));
+  });
+
+  it("ignores a rule that is missing one of the three required properties", () => {
+    // Has -99999px and opacity:0, but not 0.1px — an ordinary
+    // off-screen-but-visible-size utility class, not the decoy signature.
+    const doc = new DOMParser().parseFromString(
+      `<style>.abcdef0123456789abcdef01 { position:absolute; left:-99999px; opacity:0; }</style>`,
+      "text/html",
+    );
+    expect(collectHiddenClasses(doc)).toEqual(new Set());
+  });
+
+  it("ignores a class name shorter than the 20-hex-character threshold", () => {
+    const doc = new DOMParser().parseFromString(
+      `<style>.abc123 { position:absolute; left:-99999px; width:0.1px; opacity:0; }</style>`,
+      "text/html",
+    );
+    expect(collectHiddenClasses(doc)).toEqual(new Set());
+  });
+
+  it("returns an empty set when the document has no <style> elements at all", () => {
+    const doc = new DOMParser().parseFromString(`<p>no styles here</p>`, "text/html");
+    expect(collectHiddenClasses(doc)).toEqual(new Set());
+  });
+
+  it("merges hidden classes declared across multiple <style> blocks", () => {
+    const doc = new DOMParser().parseFromString(
+      `<style>.aaaaaaaaaaaaaaaaaaaaaaaa { position:absolute; left:-99999px; width:0.1px; opacity:0; }</style>
+       <style>.bbbbbbbbbbbbbbbbbbbbbbbb { position:absolute; left:-99999px; width:0.1px; opacity:0; }</style>`,
+      "text/html",
+    );
+    expect(collectHiddenClasses(doc)).toEqual(
+      new Set(["aaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbb"]),
+    );
   });
 });
 

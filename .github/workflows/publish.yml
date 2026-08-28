@@ -11,6 +11,20 @@ on:
 permissions:
   contents: write
 
+# Every publish force-pushes a brand-new orphan commit to `repo` (see the
+# step below) — there is no history there to merge, only "whichever push
+# lands last wins". Two publish runs overlapping (e.g. two PRs merged a
+# minute apart) would otherwise race: if the first job happens to finish
+# second, it force-pushes its *older* dist/ over the second job's newer
+# one, silently reverting `repo` with no failed job to notice it from.
+# Queuing same-group runs one at a time removes the race entirely.
+# cancel-in-progress stays false on purpose: cancelling a publish mid
+# force-push is worse than making the next one wait a few seconds for it
+# to finish.
+concurrency:
+  group: publish-repo-branch
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: Build and publish dist/ to the repo branch
@@ -18,6 +32,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # check-version-bump.ts (below) needs the pre-push commit
+          # (`github.event.before`) as a real object to diff against, and
+          # needs to be able to read the `repo` branch's published index
+          # — a shallow clone would silently break both. Same requirement,
+          # same setting, as ci.yml's checkout.
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -42,6 +63,23 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      # Same gate as ci.yml's PR-only check, run again here: ci.yml only
+      # protects the pull_request path, so any change that reaches main
+      # without going through PR CI (a direct push, an admin merge that
+      # skips checks, …) would otherwise republish changed bytes under an
+      # already-published (id, version) pair with nothing to catch it.
+      # PUBLISH_BASE_SHA is the push event's own "before" SHA (the tip of
+      # main immediately before this push) — GITHUB_BASE_REF is a
+      # pull_request-only variable, and by the time this job runs,
+      # origin/main already IS this push's HEAD, so diffing against it
+      # would always see an empty diff. See check-version-bump.ts for how
+      # this is used, and its all-zeros case (a brand-new branch, which
+      # is also necessarily the very-first-publish case below).
+      - name: Check version bumps
+        env:
+          PUBLISH_BASE_SHA: ${{ github.event.before }}
+        run: pnpm exec tsx scripts/check-version-bump.ts
 
       # Plain git, no third-party action: create a fresh orphan `repo`
       # branch in a separate worktree (so main's checkout is untouched),

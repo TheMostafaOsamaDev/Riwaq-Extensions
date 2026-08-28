@@ -7,14 +7,17 @@
 // cannot enforce on its own. This is where that gets enforced instead.
 //
 // Imported via a relative path into the package's source rather than the
-// `@riwaq/extension-api` bare specifier: these scripts run directly under
-// `tsx` (no bundler, no vitest). `tsx` resolves bare specifiers by
-// walking node_modules the same way plain Node does, and this package is
-// not linked there — only tsconfig `paths` and the vitest alias point at
-// it, and both are typecheck/test-time-only mechanisms that tsx never
-// reads (it looks for a file literally named tsconfig.json, and there
-// isn't one at the repo root — only tsconfig.base.json). A relative
-// import sidesteps all of that and needs no workspace-linking at all.
+// `@riwaq/extension-api` bare specifier — not because the bare specifier
+// is unresolvable under `tsx`. Whether it resolves depends on node_modules
+// linking, and nothing in this repo actually declares that dependency: no
+// package.json here — not the root's, not this package's own — lists
+// `@riwaq/extension-api`, so whether pnpm happens to have linked it into
+// node_modules in a given checkout isn't something this script controls
+// or can rely on. The relative import sidesteps that question entirely:
+// it needs no workspace-linking at all, so it can't be broken by an
+// undeclared virtual-store link that happens to resolve in today's
+// node_modules but has no guarantee of surviving a fresh, from-scratch
+// CI install.
 import { API_VERSION } from "../packages/extension-api/src/index";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -68,6 +71,29 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// `scripts/new-extension.ts` scaffolds `name`, `author` and
+// `description.en` with a literal "TODO: ..." placeholder (see its
+// manifestJson()) so the scaffold typechecks, tests and even bundles
+// immediately. Nothing about a leftover placeholder is otherwise
+// syntactically wrong — it's a non-empty string, an https baseUrl still
+// validates, etc — so an accidentally-merged scaffold would otherwise
+// pass `pnpm validate` and `pnpm build` and publish an installable,
+// permanently-broken "TODO: Display Name" extension. This rejects any
+// string field that still contains the same marker, naming the field, so
+// the scaffold fails validation until its author actually fills it in.
+const TODO_MARKER_RE = /TODO:/;
+
+function rejectTodoPlaceholder(source: string, field: string, value: string): void {
+  if (TODO_MARKER_RE.test(value)) {
+    fail(
+      source,
+      field,
+      `still contains a "TODO:" placeholder (${JSON.stringify(value)}) — ` +
+        "replace it with the real value before this extension can be validated or built.",
+    );
+  }
+}
+
 function requireNonEmptyString(
   raw: Record<string, unknown>,
   field: string,
@@ -95,6 +121,7 @@ export function validateManifest(raw: unknown, source: string): ExtensionManifes
   }
 
   const id = requireNonEmptyString(raw, "id", source);
+  rejectTodoPlaceholder(source, "id", id);
   if (!KEBAB_CASE_RE.test(id)) {
     fail(
       source,
@@ -107,6 +134,7 @@ export function validateManifest(raw: unknown, source: string): ExtensionManifes
   }
 
   const version = requireNonEmptyString(raw, "version", source);
+  rejectTodoPlaceholder(source, "version", version);
   if (!SEMVER_RE.test(version)) {
     fail(source, "version", `must be valid semver (e.g. "1.0.0"), got ${JSON.stringify(version)}`);
   }
@@ -121,9 +149,13 @@ export function validateManifest(raw: unknown, source: string): ExtensionManifes
   }
 
   const name = requireNonEmptyString(raw, "name", source);
+  rejectTodoPlaceholder(source, "name", name);
   const language = requireNonEmptyString(raw, "language", source);
+  rejectTodoPlaceholder(source, "language", language);
   const baseUrl = requireNonEmptyString(raw, "baseUrl", source);
+  rejectTodoPlaceholder(source, "baseUrl", baseUrl);
   const author = requireNonEmptyString(raw, "author", source);
+  rejectTodoPlaceholder(source, "author", author);
 
   let isHttps = false;
   try {
@@ -139,8 +171,14 @@ export function validateManifest(raw: unknown, source: string): ExtensionManifes
   if (!isPlainObject(description) || typeof description.en !== "string" || description.en.trim() === "") {
     fail(source, "description", 'must be an object with a required "en" key, e.g. { "en": "..." }');
   }
+  for (const [locale, value] of Object.entries(description)) {
+    if (typeof value === "string") {
+      rejectTodoPlaceholder(source, `description.${locale}`, value);
+    }
+  }
 
   const icon = requireNonEmptyString(raw, "icon", source);
+  rejectTodoPlaceholder(source, "icon", icon);
   if (icon !== "icon.png") {
     fail(source, "icon", `must be "icon.png", got ${JSON.stringify(icon)}`);
   }

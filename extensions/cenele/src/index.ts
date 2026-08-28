@@ -879,7 +879,7 @@ function isNovelHref(href: string): boolean {
 
 // ── chapter-body extraction ────────────────────────────────────────────────
 
-function extractChapterLines(doc: Document): SourceLine[] {
+export function extractChapterLines(doc: Document): SourceLine[] {
   const root =
     doc.querySelector(".reading-content .text-left") ||
     doc.querySelector(".reading-content") ||
@@ -926,7 +926,7 @@ function extractChapterLines(doc: Document): SourceLine[] {
  *  to keep them invisible while still being copy-pasted alongside the
  *  real text. Match on the first cheap signal that hits — none of the
  *  legitimate chapter paragraphs carry any of these. */
-function isDecoyElement(el: Element): boolean {
+export function isDecoyElement(el: Element): boolean {
   if (el.getAttribute("aria-hidden") === "true") return true;
   if (el.getAttribute("data-nosnippet") === "true") return true;
   if (el.getAttribute("role") === "presentation") return true;
@@ -940,7 +940,7 @@ function isDecoyElement(el: Element): boolean {
   return false;
 }
 
-function hasHiddenStyle(el: Element): boolean {
+export function hasHiddenStyle(el: Element): boolean {
   const style = (el.getAttribute("style") || "").toLowerCase().replace(/\s+/g, "");
   if (!style) return false;
   if (!style.includes("position:absolute")) return false;
@@ -963,7 +963,7 @@ function hasHiddenStyle(el: Element): boolean {
  *  appears outside aria-hidden wrappers when the theme rolls a new
  *  variant) get filtered by keyword. The boilerplate phrases here are
  *  unique enough that no real chapter line would match. */
-function looksLikePiracyDecoy(text: string): boolean {
+export function looksLikePiracyDecoy(text: string): boolean {
   // Strip zero-width joiners/spaces the decoys insert between letters
   // to defeat substring matching.
   const normalized = text.replace(/[​-‏‪-‮⁠-⁯︀-️]/g, "");

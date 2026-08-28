@@ -12,6 +12,7 @@
 // throwaway fixture extensions built from an arbitrary temp directory in
 // build.test.ts, which were never `pnpm install`-ed as a workspace member.
 import { build } from "esbuild";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -118,6 +119,51 @@ export function assertNoDuplicateIds(extensions: LoadedExtension[]): void {
   }
 }
 
+/** Confirms the just-written bundle actually has a default export, in a
+ *  genuinely separate `node` subprocess rather than an in-process dynamic
+ *  `import()`. Mirrors build.test.ts's `importDefaultAndCall`: vitest's
+ *  module runner refuses in-process dynamic imports of files outside the
+ *  project root (which is exactly where this runs from when `runBuild` is
+ *  invoked with a temp-dir `distDir`, as build.test.ts does), so a plain
+ *  `import()` here would fail with a confusing "Does the file exist?"
+ *  even though it plainly does. A child `node --input-type=module`
+ *  process has no such restriction, and doubles as proof the bundle is
+ *  valid ESM under plain Node, independent of any bundler-specific
+ *  module runner.
+ *
+ *  Without this, an extension whose src/index.ts exports only a named
+ *  `createSource` (no `default`) bundles cleanly, hashes cleanly, and
+ *  lands in index.min.json — the app then downloads it, evaluates it,
+ *  and finds `mod.default === undefined` at runtime, with nothing here
+ *  having pointed back at the cause. */
+function assertHasDefaultExport(bundlePath: string, id: string): void {
+  const href = pathToFileURL(bundlePath).href;
+  const script = `import(${JSON.stringify(href)}).then(
+    (m) => { console.log(JSON.stringify({ type: typeof m.default })); },
+    (err) => { console.error(err instanceof Error ? err.message : String(err)); process.exit(1); },
+  );`;
+  let stdout: string;
+  try {
+    stdout = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+    });
+  } catch (err) {
+    throw new Error(
+      `Extension "${id}": bundled output (dist/${id}/index.js) failed to load as ESM — ` +
+        `${(err as Error).message}`,
+    );
+  }
+  const { type } = JSON.parse(stdout.trim()) as { type: string };
+  if (type !== "function") {
+    throw new Error(
+      `Extension "${id}": the bundled module has no default export (its default is ${type}, ` +
+        `not a function). Its entry file (src/index.ts) must ` +
+        "`export default function createSource(host)` — a named-only `export function " +
+        "createSource` is not enough; the host loads the module and calls its default export.",
+    );
+  }
+}
+
 async function bundleOne(
   dirName: string,
   manifest: ExtensionManifest,
@@ -165,7 +211,11 @@ async function bundleOne(
 
   const outDir = join(distDir, id);
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, "index.js"), contents);
+  const bundlePath = join(outDir, "index.js");
+  writeFileSync(bundlePath, contents);
+
+  assertHasDefaultExport(bundlePath, id);
+
   copyFileSync(join(dir, "manifest.json"), join(outDir, "manifest.json"));
   copyFileSync(iconSrc, join(outDir, "icon.png"));
 

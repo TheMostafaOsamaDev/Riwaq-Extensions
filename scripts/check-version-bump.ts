@@ -180,20 +180,46 @@ function main(): void {
     return;
   }
 
-  // GITHUB_BASE_REF is set automatically by GitHub Actions on pull_request
-  // runs; "main" is only a fallback for running this by hand locally.
-  const baseRef = process.env.GITHUB_BASE_REF?.trim() || "main";
+  // publish.yml (push to main) has no PR base to diff against —
+  // GITHUB_BASE_REF is a pull_request-only variable, and by the time this
+  // job runs, origin/main already IS this push's HEAD, so a merge-base
+  // against it would always be HEAD itself and every diff would come back
+  // empty. It instead passes the push event's own `before` SHA (the tip
+  // of main immediately before this push) as PUBLISH_BASE_SHA, so
+  // "changed" means "changed by this push", which is the comparison that
+  // actually protects main-side pushes that skip PR CI entirely.
+  const publishBaseSha = process.env.PUBLISH_BASE_SHA?.trim();
 
   let mergeBase: string;
-  try {
-    mergeBase = getMergeBase(REMOTE, baseRef);
-  } catch (err) {
-    console.error(
-      `check-version-bump: could not compute the merge base against ` +
-        `'${REMOTE}/${baseRef}': ${(err as Error).message}`,
-    );
-    process.exitCode = 1;
-    return;
+  if (publishBaseSha) {
+    if (/^0+$/.test(publishBaseSha)) {
+      // The all-zero SHA is what GitHub sends as a push event's `before`
+      // when a ref is newly created (e.g. main's very first push) — there
+      // is no prior commit on this branch to diff against. That state
+      // necessarily also means nothing has ever been published yet
+      // either, which the `published === null` branch above already
+      // handles — this is belt-and-suspenders for the same situation.
+      console.log(
+        "check-version-bump: no prior commit on this branch (first push) — nothing to check.",
+      );
+      return;
+    }
+    mergeBase = publishBaseSha;
+  } else {
+    // GITHUB_BASE_REF is set automatically by GitHub Actions on
+    // pull_request runs; "main" is only a fallback for running this by
+    // hand locally.
+    const baseRef = process.env.GITHUB_BASE_REF?.trim() || "main";
+    try {
+      mergeBase = getMergeBase(REMOTE, baseRef);
+    } catch (err) {
+      console.error(
+        `check-version-bump: could not compute the merge base against ` +
+          `'${REMOTE}/${baseRef}': ${(err as Error).message}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
   }
 
   const changedIds = getChangedExtensionIds(mergeBase);

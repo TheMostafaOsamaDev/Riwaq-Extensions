@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import createSource, {
+  extractChapterLines,
   extractNovelConfig,
+  hasHiddenStyle,
+  isDecoyElement,
+  looksLikePiracyDecoy,
   parseNovelPage,
   searchUrl,
   parseSearchPage,
@@ -22,6 +26,7 @@ import { createTestHost } from "@riwaq/extension-api/testing";
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 const searchHtml = readFileSync(join(FIXTURES_DIR, "search.html"), "utf8");
+const chapterHtml = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
 
 describe("extractNovelConfig", () => {
   it("reads postId and chaptersNonce from nhvNovelV2", () => {
@@ -190,6 +195,166 @@ describe("parseSearchPage", () => {
       new DOMParser().parseFromString(searchHtml, "text/html"), "سيد", 2);
     expect(r.query).toBe("سيد");
     expect(r.page).toBe(2);
+  });
+});
+
+// ── chapter-body extraction ─────────────────────────────────────────────────
+//
+// The highest-consequence, most theme-fragile code in this extension: over-
+// strip and a user's imported book is silently truncated, under-strip and
+// piracy boilerplate is baked into their EPUB. tests/fixtures/chapter.html
+// exercises every decoy form isDecoyElement/looksLikePiracyDecoy claim to
+// handle (see the file-header comment and each function's own doc comment
+// in ../src/index.ts), alongside real-looking chapter paragraphs and a real
+// image, so a regression in either direction shows up here.
+
+describe("extractChapterLines", () => {
+  it("keeps every real paragraph and image, in order, and strips every decoy form", () => {
+    const doc = new DOMParser().parseFromString(chapterHtml, "text/html");
+    const lines = extractChapterLines(doc);
+
+    expect(lines).toEqual([
+      {
+        type: "text",
+        content: "كان يا ما كان، في قديم الزمان، عاش بطل الرواية في قرية صغيرة.",
+      },
+      // The aria-hidden <span> nested inside this <p> is removed by the
+      // first pass, but the real text on either side of it survives —
+      // proving decoys nested inside a real paragraph (not just whole
+      // decoy paragraphs) are handled, per the file's header comment.
+      {
+        type: "text",
+        content: "هذا نص حقيقي يتبعه المزيد من النص الحقيقي.",
+      },
+      // aria-hidden="true" (whole <p>), data-nosnippet="true", the
+      // role="presentation" wrapper (and the real-looking <p> nested
+      // inside it — removed along with its ancestor), the hidden-style-
+      // only <p>, and the translate="no"+hidden-style combo above are
+      // all absent from this array entirely: proof they were stripped,
+      // not merely reordered.
+      //
+      // translate="no" ALONE (no hidden style) is deliberately NOT a
+      // decoy signal — isDecoyElement requires hasHiddenStyle too — so
+      // this paragraph must survive.
+      { type: "text", content: "اسم علم مثل Cenele لا يُترجم." },
+      // The piracy-boilerplate paragraph (no special attributes at all)
+      // is caught by the looksLikePiracyDecoy keyword safety net, not by
+      // isDecoyElement — proof that net runs independently.
+      //
+      // The next real paragraph is repeated twice in the fixture; only
+      // one copy survives (dedup).
+      {
+        type: "text",
+        content: "القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.",
+      },
+      // The real image is repeated once (dedup keeps one copy); the
+      // wp-post-image avatar and the /ads/ banner are both decorative
+      // and excluded entirely.
+      {
+        type: "image",
+        content: "https://cenele.com/wp-content/uploads/2024/01/scene.jpg",
+      },
+    ]);
+  });
+
+  it("falls back to .entry-content when .reading-content is absent", () => {
+    const doc = new DOMParser().parseFromString(
+      `<div class="entry-content"><p>نص الفصل هنا.</p></div>`,
+      "text/html",
+    );
+    expect(extractChapterLines(doc)).toEqual([{ type: "text", content: "نص الفصل هنا." }]);
+  });
+});
+
+describe("isDecoyElement", () => {
+  const el = (html: string): Element =>
+    new DOMParser().parseFromString(html, "text/html").body.firstElementChild!;
+
+  it('flags aria-hidden="true"', () => {
+    expect(isDecoyElement(el(`<p aria-hidden="true">x</p>`))).toBe(true);
+  });
+
+  it('flags data-nosnippet="true"', () => {
+    expect(isDecoyElement(el(`<p data-nosnippet="true">x</p>`))).toBe(true);
+  });
+
+  it('flags role="presentation"', () => {
+    expect(isDecoyElement(el(`<p role="presentation">x</p>`))).toBe(true);
+  });
+
+  it('flags translate="no" combined with a hidden style', () => {
+    expect(
+      isDecoyElement(el(`<p translate="no" style="position:absolute;opacity:0;">x</p>`)),
+    ).toBe(true);
+  });
+
+  it('does NOT flag translate="no" on its own — it must be combined with a hidden style', () => {
+    expect(isDecoyElement(el(`<p translate="no">x</p>`))).toBe(false);
+  });
+
+  it("flags a hidden style on its own, with no other attribute", () => {
+    expect(isDecoyElement(el(`<p style="position:absolute;opacity:0;">x</p>`))).toBe(true);
+  });
+
+  it("does not flag an ordinary paragraph with none of these signals", () => {
+    expect(isDecoyElement(el(`<p class="normal">x</p>`))).toBe(false);
+  });
+});
+
+describe("hasHiddenStyle", () => {
+  const el = (style: string): Element =>
+    new DOMParser().parseFromString(`<p style="${style}">x</p>`, "text/html").body
+      .firstElementChild!;
+
+  it("requires position:absolute — opacity:0 alone is not enough", () => {
+    expect(hasHiddenStyle(el("opacity:0;"))).toBe(false);
+  });
+
+  it.each([
+    ["opacity:0", "opacity:0"],
+    ["width:0", "width:0"],
+    ["width:1px", "width:1px"],
+    ["height:0", "height:0"],
+    ["height:1px", "height:1px"],
+    ["transform:scale(0.0)", "transform:scale(0.0)"],
+    ["filter:blur(5px)", "filter:blur"],
+    ["pointer-events:none", "pointer-events:none"],
+  ])("combined with position:absolute, %s is enough on its own", (style) => {
+    expect(hasHiddenStyle(el(`position:absolute;${style};`))).toBe(true);
+  });
+
+  it("position:absolute with none of the hiding effects is not hidden", () => {
+    expect(hasHiddenStyle(el("position:absolute;top:0;left:0;"))).toBe(false);
+  });
+
+  it("returns false for an element with no style attribute at all", () => {
+    const bare = new DOMParser().parseFromString("<p>x</p>", "text/html").body.firstElementChild!;
+    expect(hasHiddenStyle(bare)).toBe(false);
+  });
+});
+
+describe("looksLikePiracyDecoy", () => {
+  it("matches the مسروقة + فضاء الروايات combination", () => {
+    expect(looksLikePiracyDecoy("هذه الرواية مسروقة من موقع فضاء الروايات")).toBe(true);
+  });
+
+  it("matches the مسروقة + cenele.com combination", () => {
+    expect(looksLikePiracyDecoy("هذه الرواية مسروقة، الأصل على cenele.com")).toBe(true);
+  });
+
+  it("matches the فضاء الروايات + تطبيقنا combination", () => {
+    expect(looksLikePiracyDecoy("حمل تطبيقنا من فضاء الروايات الآن")).toBe(true);
+  });
+
+  it("still matches when zero-width characters are inserted between letters", () => {
+    // Decoys insert zero-width joiners/spaces between letters to defeat
+    // naive substring matching; looksLikePiracyDecoy strips them first.
+    const withZwj = "مسروقة".split("").join("‍");
+    expect(looksLikePiracyDecoy(`${withZwj} من فضاء الروايات`)).toBe(true);
+  });
+
+  it("does not flag ordinary chapter prose", () => {
+    expect(looksLikePiracyDecoy("القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.")).toBe(false);
   });
 });
 
