@@ -51,7 +51,10 @@ export interface ExtensionManifest {
   author: string;
 }
 
-const KEBAB_CASE_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+// Exported so scripts/new-extension.ts can refuse a non-kebab-case id with
+// the exact same rule this validator enforces, instead of a second regex
+// that could quietly drift from this one.
+export const KEBAB_CASE_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 // The canonical semver pattern published at https://semver.org (App A).
 const SEMVER_RE =

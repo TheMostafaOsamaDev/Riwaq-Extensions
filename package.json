@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.base.json",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "dev-repo": "tsx scripts/dev-repo.ts"
+    "dev-repo": "tsx scripts/dev-repo.ts",
+    "new-extension": "tsx scripts/new-extension.ts"
   },
   "devDependencies": {
     "@types/node": "^22.7.0",
