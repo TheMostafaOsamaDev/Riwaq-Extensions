@@ -186,7 +186,8 @@ The shapes these methods pass around, trimmed to their fields (see
 ## Manifest reference
 
 Every extension ships an `extensions/<id>/manifest.json`. `scripts/manifest.ts` is the
-single source of truth for what's accepted — this table mirrors it exactly:
+single source of truth for what's accepted — this table mirrors every rule it enforces,
+plus one call-out below the table for a convention it does *not* enforce.
 
 | Field | Type | Required | Rule | Example |
 |---|---|---|---|---|
@@ -196,9 +197,17 @@ single source of truth for what's accepted — this table mirrors it exactly:
 | `apiVersion` | number | yes | must be exactly `1` (the current `API_VERSION`) | `1` |
 | `language` | string | yes | non-empty BCP-47-ish tag | `"ar"` |
 | `baseUrl` | string | yes | must be an `https:` URL | `"https://cenele.com"` |
-| `icon` | string | yes | must be **literally** `"icon.png"` — a 128×128 PNG next to `manifest.json` | `"icon.png"` |
+| `icon` | string | yes | must be **literally** `"icon.png"` — a PNG file next to `manifest.json` | `"icon.png"` |
 | `description` | object | yes | a locale map; **must include an `en` key** — a description without `en` is rejected outright | `{ "en": "…", "ar": "…" }` |
 | `author` | string | yes | non-empty | `"Riwaq"` |
+
+**128×128 is a convention, not something `validateManifest` checks.** The rule above is
+real: `icon` must literally be the string `"icon.png"`. The *pixel dimensions* of that
+file are never read — a 512×512 (or any other size) `icon.png` passes `pnpm validate` and
+`pnpm build` without complaint. 128×128 is what every extension in this repo actually
+ships, what `pnpm new-extension` generates, and what its own test asserts by decoding the
+`IHDR` chunk — so treat it as the size to use, just don't expect the tooling to catch it
+if you don't.
 
 A real one, `extensions/cenele/manifest.json`:
 
@@ -323,7 +332,7 @@ own tests. `pnpm test:watch` re-runs on save.
   on every PR and fails it if an already-published extension's files changed but its
   manifest `version` didn't move — a stale version means a host that treats `(id,
   version)` as an immutable pair would never see your new code.
-- **Icon is a 128×128 PNG named exactly `icon.png`.**
+- **Icon is a 128×128 PNG named exactly `icon.png`.** Only the filename is validated (see [Manifest reference](#manifest-reference)) — 128×128 is convention, matching what `pnpm new-extension` generates.
 - **Keep bundles small.** `scripts/build.ts` refuses to bundle anything over 512 KB
   minified. Going over almost always means a heavy dependency slipped in that belongs on
   `host` instead — `pdf.js` is the canonical example: PDF parsing is `host.pdf`, never
@@ -401,7 +410,7 @@ export default function createSource(host: SourceHost): Source {
   return {
     canHandle(url) {
       try {
-        return new URL(url).hostname === "example-novels.test";
+        return new URL(url).hostname === new URL(BASE_URL).hostname;
       } catch {
         return false;
       }
@@ -506,14 +515,15 @@ describe("getNovel", () => {
 });
 ```
 
-This `manifest.json`, `getNovel`, the fixture and the test above are exactly what got
-built, typechecked, tested, validated and bundled while writing this README — with
-`getHomeSections`, `search` and `getChapterContent` fully implemented the same way
-(`host.fetch` → `parseHtml` → read) rather than left throwing, so the whole extension
-passed `pnpm build` for real. They're trimmed to one-line stubs above for space; see
-`.superpowers/sdd/plan-01-extensions-repo/task-7-report.md` for the full file this was
-verified against.
+This `manifest.json`, `src/index.ts` exactly as printed above (stubs included), the
+fixture and the test were extracted verbatim into a scratch `extensions/example-novels/`
+directory and run through `pnpm typecheck`, `pnpm test`, `pnpm validate` and `pnpm
+build` — all four passed — before the scratch directory was deleted again. What's on
+this page is what actually compiles, not an earlier, fuller draft that got trimmed for
+space.
 
-For the level of detail a real extension's own `README.md` should carry (AJAX endpoints,
-selector tables, nonce handling, decoy filtering, everything site-specific), read
-`extensions/cenele/README.md` and `extensions/kolnovel/README.md`.
+For a complete extension with every method implemented against a real site — AJAX
+endpoints, selector tables, nonce handling, decoy filtering, everything site-specific —
+read `extensions/cenele/` and `extensions/kolnovel/` in this repo. They're real, working
+extensions, not documentation; their own `README.md`s cover the site-specific detail this
+worked example leaves out.
