@@ -1,0 +1,76 @@
+name: Publish
+
+# Builds dist/ from main and publishes it to the `repo` branch, which
+# GitHub Pages serves — this is the exact code and catalogue the reader
+# app downloads and runs, so every step here is a plain, auditable git
+# command rather than a third-party publish action.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Build and publish dist/ to the repo branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate manifests
+        run: pnpm validate
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # Plain git, no third-party action: create a fresh orphan `repo`
+      # branch in a separate worktree (so main's checkout is untouched),
+      # copy dist/'s contents to its root (not the dist/ directory itself
+      # — index.min.json's "code"/"icon" paths are relative to its own
+      # location, so it and the per-extension folders must be siblings at
+      # the branch root), add .nojekyll so GitHub Pages serves the
+      # extension folders even if any of them start with an underscore,
+      # commit, and force-push. Every publish replaces the branch's
+      # history outright — the branch only needs to reflect the latest
+      # dist/, and the CI check-version-bump.ts only ever reads its tip.
+      - name: Publish dist/ to the repo branch
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          PUBLISH_DIR="$(mktemp -d)"
+          git worktree add --detach "$PUBLISH_DIR"
+
+          git -C "$PUBLISH_DIR" checkout --orphan repo
+          git -C "$PUBLISH_DIR" rm -rf --quiet .
+
+          cp -R dist/. "$PUBLISH_DIR"/
+          touch "$PUBLISH_DIR"/.nojekyll
+
+          git -C "$PUBLISH_DIR" add -A
+          git -C "$PUBLISH_DIR" commit --quiet -m "publish: dist/ from ${{ github.sha }}"
+          git -C "$PUBLISH_DIR" push --force origin HEAD:repo
+
+          git worktree remove "$PUBLISH_DIR" --force

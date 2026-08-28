@@ -1,0 +1,66 @@
+name: CI
+
+# Gates every PR: manifests lint, types check, tests pass, every
+# extension bundles, and (when the `repo` branch already has a published
+# catalogue) any changed extension has a bumped version. Nothing here
+# publishes anything — that's publish.yml, on push to main.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate, typecheck, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # check-version-bump.ts needs the merge base with the PR's base
+          # branch, and needs to be able to read the `repo` branch's
+          # published index — a shallow clone would silently break both
+          # (the merge-base diff, and the version-bump check would pass
+          # vacuously instead of actually comparing anything).
+          fetch-depth: 0
+
+      # Must run before actions/setup-node so `cache: pnpm` below has a
+      # pnpm binary on PATH to resolve the store path with.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Cheap, bundle-free manifest lint first: a contributor with a
+      # malformed manifest gets a precise "field X is wrong" failure in
+      # seconds, instead of a confusing esbuild error minutes later out of
+      # `pnpm build`.
+      - name: Validate manifests
+        run: pnpm validate
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Check version bumps
+        run: pnpm exec tsx scripts/check-version-bump.ts
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
