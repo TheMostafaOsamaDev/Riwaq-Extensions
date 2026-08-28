@@ -362,10 +362,12 @@ own tests. `pnpm test:watch` re-runs on save.
 test`, `pnpm build`, then the version-bump check above. Nothing is published from a PR.
 
 `.github/workflows/publish.yml` runs on every push to `main`: the same build, then a
-plain `git` sequence (no third-party action) that creates a fresh **orphan** commit from
-`dist/`'s contents and force-pushes it to the `repo` branch. GitHub Pages serves that
-branch's root — that is the exact code and catalogue the app downloads and executes.
-Every publish replaces the branch's history outright; it isn't an append.
+plain `git` sequence (no third-party action) that lays `dist/`'s contents over the
+`repo` branch and commits **on top of** it. GitHub Pages serves that branch's root — that
+is the exact code and catalogue the app downloads and executes. Publishing is
+append-only: each run adds one commit, and a run whose `dist/` is byte-identical to the
+published tip is a no-op. Only the first publish, when the branch does not yet exist,
+creates it.
 
 > **One-time setup a maintainer has to do by hand.** After `publish.yml` runs for the
 > first time and the `repo` branch exists, go to **Settings → Pages** and set **Source**
@@ -374,18 +376,24 @@ Every publish replaces the branch's history outright; it isn't an append.
 > until it's done, the branch has commits but GitHub Pages isn't serving them, so the
 > official repo URL 404s and no app can add it.
 
-**Protect the `repo` branch.** Because every publish force-pushes a brand-new orphan
-commit, this branch never accumulates history — there is nothing to diff a bad push
-against, so a tampered commit wouldn't show up as a rewrite the way it would on a normal
-branch. The app downloads and *executes* whatever sits there. Turning on branch
-protection (or a ruleset) for `repo` is the cheap mitigation for that, and is worth doing
-before this repo is relied on by real users — **but the ruleset must explicitly permit
-force pushes from the `github-actions[bot]` identity (or from Actions generally) while
-denying everyone/everything else.** `publish.yml` force-pushes `repo` on every single run
-(see the step above) — a ruleset that blocks force pushes outright fails every publish,
-and the likely next move is a maintainer disabling protection entirely to unblock
-publishing, which is strictly worse than never having turned it on. The goal is "only CI
-can push here, and only by force," not "nothing can force-push here."
+**Protect the `repo` branch.** The app downloads and *executes* whatever sits there, so
+it is worth protecting before real users rely on this repo. Because publishing is
+append-only, the protection is straightforward — create a ruleset on `refs/heads/repo`
+with both **Restrict deletions** and **Block force pushes** (`deletion` and
+`non_fast_forward`), and **no bypass actor is required**. CI's publish is a
+fast-forward, so the rule lets it through while blocking anyone who tries to rewrite the
+branch's history. That is what makes a tampered publish visible: it would have to show up
+as a rewrite, and the rule refuses rewrites.
+
+> Two notes worth knowing before you configure this. First, on a **user-owned** repo you
+> *cannot* add GitHub Actions as a ruleset bypass actor — the API rejects it with
+> "Actor GitHub Actions integration must be part of the ruleset source or owner
+> organization." Bypass actors for integrations are an organization-only feature. That is
+> precisely why publishing is append-only rather than force-pushing: a force-pushing
+> workflow could not be reconciled with a force-push rule here at all. Second, do not
+> enable `non_fast_forward` while an older, force-pushing version of `publish.yml` is
+> still on `main` — the rule and that workflow are mutually exclusive, and the publish
+> would fail on the next push."
 
 **Review policy.** Bundles are built by CI from reviewed source and are never uploaded
 pre-built — a PR is a diff of source code, and what gets published is always CI's own

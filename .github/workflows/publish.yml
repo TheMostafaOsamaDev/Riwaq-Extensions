@@ -11,16 +11,13 @@ on:
 permissions:
   contents: write
 
-# Every publish force-pushes a brand-new orphan commit to `repo` (see the
-# step below) — there is no history there to merge, only "whichever push
-# lands last wins". Two publish runs overlapping (e.g. two PRs merged a
-# minute apart) would otherwise race: if the first job happens to finish
-# second, it force-pushes its *older* dist/ over the second job's newer
-# one, silently reverting `repo` with no failed job to notice it from.
-# Queuing same-group runs one at a time removes the race entirely.
-# cancel-in-progress stays false on purpose: cancelling a publish mid
-# force-push is worse than making the next one wait a few seconds for it
-# to finish.
+# Two publish runs overlapping (e.g. two PRs merged a minute apart) would
+# both build on the same `repo` tip. Since publishing is append-only, the
+# slower one's push is then a non-fast-forward and the remote rejects it —
+# a failed publish rather than a silent revert, but still a publish that
+# did not happen. Queuing same-group runs one at a time removes the race.
+# cancel-in-progress stays false on purpose: cancelling a publish
+# mid-push is worse than making the next one wait a few seconds.
 concurrency:
   group: publish-repo-branch
   cancel-in-progress: false
@@ -81,16 +78,26 @@ jobs:
           PUBLISH_BASE_SHA: ${{ github.event.before }}
         run: pnpm exec tsx scripts/check-version-bump.ts
 
-      # Plain git, no third-party action: create a fresh orphan `repo`
-      # branch in a separate worktree (so main's checkout is untouched),
-      # copy dist/'s contents to its root (not the dist/ directory itself
-      # — index.min.json's "code"/"icon" paths are relative to its own
+      # Plain git, no third-party action: check the `repo` branch out in a
+      # separate worktree (so main's checkout is untouched), lay dist/'s
+      # contents over its root — not the dist/ directory itself, because
+      # index.min.json's "code"/"icon" paths are relative to its own
       # location, so it and the per-extension folders must be siblings at
-      # the branch root), add .nojekyll so GitHub Pages serves the
-      # extension folders even if any of them start with an underscore,
-      # commit, and force-push. Every publish replaces the branch's
-      # history outright — the branch only needs to reflect the latest
-      # dist/, and the CI check-version-bump.ts only ever reads its tip.
+      # the branch root — add .nojekyll so GitHub Pages serves folders even
+      # if one ever starts with an underscore, then commit and push.
+      #
+      # Publishing APPENDS rather than replacing. An earlier version
+      # force-pushed a fresh orphan commit each run, which left the branch
+      # with no history: a tampered publish would have looked identical to a
+      # legitimate one. Committing on top makes the branch append-only, so a
+      # `non_fast_forward` ruleset can be enabled on it with NO bypass actor
+      # — which matters because GitHub only allows the Actions integration
+      # as a bypass actor on org-owned repos, never on a user-owned one, so
+      # a force-pushing workflow could not be protected here at all.
+      #
+      # The tree is cleared before copying so a file dropped from a build
+      # actually disappears from the branch. check-version-bump.ts only ever
+      # reads the tip, so the added history costs it nothing.
       - name: Publish dist/ to the repo branch
         env:
           # Routed through env: rather than interpolated straight into the
@@ -106,16 +113,38 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           PUBLISH_DIR="$(mktemp -d)"
-          git worktree add --detach "$PUBLISH_DIR"
 
-          git -C "$PUBLISH_DIR" checkout --orphan repo
-          git -C "$PUBLISH_DIR" rm -rf --quiet .
+          if git ls-remote --exit-code --heads origin repo >/dev/null 2>&1; then
+            # Build on the existing tip so the push fast-forwards. Full fetch,
+            # not --depth=1: pushing a new commit from a shallow worktree can
+            # be rejected, and this branch only ever holds one small dist/.
+            git fetch --no-tags origin repo
+            # Resolve to a SHA first: FETCH_HEAD is a per-repository ref and
+            # does not resolve from inside the new worktree.
+            PUBLISHED_TIP="$(git rev-parse FETCH_HEAD)"
+            git worktree add --detach "$PUBLISH_DIR" "$PUBLISHED_TIP"
+            git -C "$PUBLISH_DIR" checkout -q -B repo "$PUBLISHED_TIP"
+          else
+            # First publish: nothing to build on, so start the branch here.
+            git worktree add --detach "$PUBLISH_DIR"
+            git -C "$PUBLISH_DIR" checkout -q --orphan repo
+          fi
+
+          # Clear the tree and lay dist/ down fresh, so a file deleted from a
+          # build genuinely disappears from the branch instead of lingering.
+          git -C "$PUBLISH_DIR" rm -rq --ignore-unmatch .
 
           cp -R dist/. "$PUBLISH_DIR"/
           touch "$PUBLISH_DIR"/.nojekyll
 
           git -C "$PUBLISH_DIR" add -A
+
+          if git -C "$PUBLISH_DIR" diff --cached --quiet; then
+            echo "dist/ is byte-identical to the published tip — nothing to publish."
+            exit 0
+          fi
+
           git -C "$PUBLISH_DIR" commit --quiet -m "publish: dist/ from $SOURCE_SHA"
-          git -C "$PUBLISH_DIR" push --force origin HEAD:repo
+          git -C "$PUBLISH_DIR" push origin repo
 
           git worktree remove "$PUBLISH_DIR" --force
