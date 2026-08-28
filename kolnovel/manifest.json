@@ -1,0 +1,14 @@
+{
+  "id": "kolnovel",
+  "name": "ملوك الروايات",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "language": "ar",
+  "baseUrl": "https://kolnovel.com",
+  "icon": "icon.png",
+  "description": {
+    "en": "Arabic translations of web novels from KolNovel.",
+    "ar": "ترجمات عربية لروايات الويب من موقع ملوك الروايات."
+  },
+  "author": "Riwaq"
+}
