@@ -459,7 +459,10 @@ export default function createSource(host: SourceHost): Source {
 
       return {
         title: textOf(doc, "h1.title") ?? "Untitled",
-        author: textOf(doc, ".author") ?? "Unknown",
+        // Empty string when no author is found, not a hardcoded fallback — let the
+        // host's display-time fallback localize the empty case rather than baking
+        // a locale-frozen English string into the user's stored library data.
+        author: textOf(doc, ".author") ?? "",
         language: "en",
         direction: "ltr" as const,
         tags: Array.from(doc.querySelectorAll(".tags a")).map((a) => sanitizeText(a.textContent)),
