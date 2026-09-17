@@ -1,0 +1,14 @@
+{
+  "id": "seanovel",
+  "name": "بحر الروايات",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "language": "ar",
+  "baseUrl": "https://seanovel.org",
+  "icon": "icon.png",
+  "description": {
+    "en": "Korean, Chinese and Japanese web novels translated into Arabic.",
+    "ar": "روايات كورية وصينية ويابانية مترجمة إلى العربية."
+  },
+  "author": "Riwaq"
+}
