@@ -13,18 +13,22 @@
 // promises — cenele's WordPress nonces are session-scoped and break
 // without it.
 import { execFile } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { it } from "vitest";
+import { afterAll, it } from "vitest";
 import type { FetchResponse, Source, SourceHost } from "@riwaq/extension-api";
 
 const execFileAsync = promisify(execFile);
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-const JAR = join(mkdtempSync(join(tmpdir(), "riwaq-probe-")), "cookies.txt");
+const JAR_DIR = mkdtempSync(join(tmpdir(), "riwaq-probe-"));
+const JAR = join(JAR_DIR, "cookies.txt");
+// One jar dir per invocation (mkdtempSync above); remove it once the run is
+// done rather than leaving it behind in the OS tmpdir on every `pnpm probe`.
+afterAll(() => rmSync(JAR_DIR, { recursive: true, force: true }));
 
 async function curl(url: string, opts: { method?: string; headers?: Record<string, string>; body?: string } | undefined) {
   const args = [
@@ -82,14 +86,29 @@ const host: SourceHost = {
   },
 };
 
-const pass = (l: string, d: string) => console.log(`  PASS  ${l} — ${d}`);
-const fail = (l: string, e: unknown) =>
-  console.log(`  FAIL  ${l} — ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`);
-
 const ID = process.env.PROBE_ID ?? "cenele";
 const QUERY = process.env.PROBE_QUERY ?? "سيد";
 
 it(`probes ${ID} against its live site`, { timeout: 300_000 }, async () => {
+  // Every method below is try/caught so one failure doesn't stop the rest
+  // from being probed — but that means nothing here throws on its own, and
+  // an `it()` body that resolves without throwing is a vitest PASS
+  // regardless of what the printed lines above it say. `failed` plus the
+  // `finish()` check at every exit point is what makes the process exit
+  // code (and vitest's own pass/fail) track the printed PASS/FAIL lines
+  // instead of going green no matter what the site did.
+  const failed: string[] = [];
+  const pass = (l: string, d: string) => console.log(`  PASS  ${l} — ${d}`);
+  const fail = (l: string, e: unknown) => {
+    failed.push(l);
+    console.log(`  FAIL  ${l} — ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`);
+  };
+  const finish = () => {
+    if (failed.length > 0) {
+      throw new Error(`${failed.length} method(s) failed: ${failed.join(", ")}`);
+    }
+  };
+
   const mod = await import(`../extensions/${ID}/src/index.ts`);
   const source: Source = mod.default(host);
   console.log(`\n=== ${ID} — live probe ===`);
@@ -112,7 +131,10 @@ it(`probes ${ID} against its live site`, { timeout: 300_000 }, async () => {
     fail("search", e);
   }
 
-  if (!novelUrl) return console.log("  SKIP  getNovel — no novel URL discovered");
+  if (!novelUrl) {
+    console.log("  SKIP  getNovel — no novel URL discovered");
+    return finish();
+  }
   console.log(`  ----  novel: ${novelUrl}`);
 
   let novel: Awaited<ReturnType<Source["getNovel"]>>;
@@ -124,7 +146,8 @@ it(`probes ${ID} against its live site`, { timeout: 300_000 }, async () => {
         `tags=${novel.tags.length} meta=${novel.meta.length} cover=${novel.coverUrl ? "yes" : "no"}`,
     );
   } catch (e) {
-    return fail("getNovel", e);
+    fail("getNovel", e);
+    return finish();
   }
 
   let chapter = novel.volumes.flatMap((v) => v.chapters)[0];
@@ -137,13 +160,35 @@ it(`probes ${ID} against its live site`, { timeout: 300_000 }, async () => {
       fail("getVolumeChapters", e);
     }
   }
-  if (!chapter) return console.log("  SKIP  getChapterContent — no chapter available");
 
-  try {
-    const lines = await source.getChapterContent(chapter);
-    const text = lines.filter((l) => l.type === "text");
-    pass("getChapterContent", `${lines.length} lines, ${text.reduce((n, l) => n + l.content.length, 0)} chars`);
-  } catch (e) {
-    fail("getChapterContent", e);
+  if (!chapter) {
+    console.log("  SKIP  getChapterContent — no chapter available");
+  } else {
+    try {
+      const lines = await source.getChapterContent(chapter);
+      const text = lines.filter((l) => l.type === "text");
+      pass("getChapterContent", `${lines.length} lines, ${text.reduce((n, l) => n + l.content.length, 0)} chars`);
+    } catch (e) {
+      fail("getChapterContent", e);
+    }
   }
+
+  // Optional, and stateful rather than a plain parse: cenele's
+  // searchChapters depends on per-novel state (mangaId + a chapters
+  // nonce) that only getNovel seeds, and throws its own "called before
+  // getNovel" error if that state is missing. A fixture test can never
+  // exercise that ordering dependency — only a live, sequential run like
+  // this one calls getNovel and searchChapters in the same session.
+  if (typeof source.searchChapters === "function") {
+    try {
+      const results = await source.searchChapters(novelUrl, QUERY);
+      pass("searchChapters", `${results.length} chapters`);
+    } catch (e) {
+      fail("searchChapters", e);
+    }
+  } else {
+    console.log("  SKIP  searchChapters — not implemented by this source");
+  }
+
+  finish();
 });

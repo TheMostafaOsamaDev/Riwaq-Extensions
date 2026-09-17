@@ -339,7 +339,10 @@ Fixture tests catch a parser regression; they can never catch the site itself ch
 underneath the extension. `scripts/probe.ts` is a separate harness for that: it drives a
 real extension's `Source` against its live site through a network-backed `SourceHost`
 and prints a PASS/FAIL line per method actually exercised (`getHomeSections`, `search`,
-`getNovel`, `getVolumeChapters` when the novel needs it, `getChapterContent`).
+`getNovel`, `getVolumeChapters` when the novel needs it, `getChapterContent`, and
+`searchChapters` when the source implements it). If any of those fail, the harness
+throws — naming which ones — so the process exit code always matches what the printed
+lines say; it does not silently exit 0 just because the `it()` block itself resolved.
 
 ```bash
 PROBE_ID=cenele pnpm probe
@@ -352,7 +355,7 @@ site currently serves, and is not something CI should run on every PR. Use it by
 when you suspect a site has changed, or after touching an extension's parsing to sanity
 check it against the real thing before you write (or update) its fixtures.
 
-Two things about it are easy to mistake for bugs:
+Three things about it are easy to mistake for bugs:
 
 - **It shells out to `curl` instead of using `fetch`.** Under `happy-dom` (needed for
   `DOMParser`), the global `fetch` is happy-dom's own CORS-enforcing implementation and
@@ -366,6 +369,18 @@ Two things about it are easy to mistake for bugs:
   Extensions only ever *read* the parsed tree — cenele reads its config out of a
   script's `textContent`, it never runs it — so disabling evaluation changes nothing an
   extension can observe.
+- **`probe.config.ts` also sets `handleDisabledFileLoadingAsSuccess`.** Live pages also
+  carry `<script src="...">` tags. With file loading disabled (above) but this flag
+  off, happy-dom's default is to *dispatch an error event* for each one it refuses to
+  load — and that dispatch throws, because the document these extensions parse into
+  (a bare `DOMParser` document, not a real browser tab) has no `defaultView` for the
+  error path to fall back to. Left unset, a live page with several such tags turns into
+  a wall of unhandled-rejection noise and a non-zero exit even when every probed method
+  passed. The flag makes the disabled load report a synthetic `load` event instead,
+  which is exactly as inert as the error would have been — nothing here ever executes
+  the script either way. See the comment beside it in `probe.config.ts` for the exact
+  failure this works around, and the `@ts-expect-error` next to it (vitest's vendored
+  happy-dom types don't know this field yet, even though the installed happy-dom does).
 
 ## Rules
 
