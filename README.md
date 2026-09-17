@@ -333,6 +333,40 @@ const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 `pnpm test` runs every extension's suite plus the contract package's and the scripts'
 own tests. `pnpm test:watch` re-runs on save.
 
+### Probing a live site (contributor tooling)
+
+Fixture tests catch a parser regression; they can never catch the site itself changing
+underneath the extension. `scripts/probe.ts` is a separate harness for that: it drives a
+real extension's `Source` against its live site through a network-backed `SourceHost`
+and prints a PASS/FAIL line per method actually exercised (`getHomeSections`, `search`,
+`getNovel`, `getVolumeChapters` when the novel needs it, `getChapterContent`).
+
+```bash
+PROBE_ID=cenele pnpm probe
+PROBE_ID=cenele PROBE_QUERY="سيد" pnpm probe
+```
+
+It runs under its own `scripts/probe.config.ts`, not the main `vitest.config.ts` —
+`pnpm test` never collects it, because it hits the network, depends on whatever the live
+site currently serves, and is not something CI should run on every PR. Use it by hand
+when you suspect a site has changed, or after touching an extension's parsing to sanity
+check it against the real thing before you write (or update) its fixtures.
+
+Two things about it are easy to mistake for bugs:
+
+- **It shells out to `curl` instead of using `fetch`.** Under `happy-dom` (needed for
+  `DOMParser`), the global `fetch` is happy-dom's own CORS-enforcing implementation and
+  refuses every cross-origin read. `curl`'s `-b`/`-c` flags also give it a real
+  cookie-jar, which is exactly the session semantics `SourceHost.fetch` promises —
+  cenele scrapes a session-scoped WordPress nonce off one page and replays it against
+  `admin-ajax.php` later, and that breaks without a shared jar.
+- **Script evaluation is disabled in `probe.config.ts`.** Live pages carry ad/analytics
+  tags and the site's own bundles; happy-dom executes inline `<script>` on insert, and
+  that code throws outside a real browser, surfacing as a bogus parse failure.
+  Extensions only ever *read* the parsed tree — cenele reads its config out of a
+  script's `textContent`, it never runs it — so disabling evaluation changes nothing an
+  extension can observe.
+
 ## Rules
 
 - **Capability only via `host`.** No `fetch`/`XMLHttpRequest`, no `window`, no Node or
