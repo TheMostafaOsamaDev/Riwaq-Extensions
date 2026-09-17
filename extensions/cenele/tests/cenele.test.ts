@@ -34,15 +34,15 @@ const homeHtml = readFileSync(join(FIXTURES_DIR, "home.html"), "utf8");
 describe("extractNovelConfig", () => {
   it("reads postId and chaptersNonce from nhvNovelV2", () => {
     expect(extractNovelConfig(novelHtml)).toEqual({
-      postId: "32235",
-      chaptersNonce: "6d7f45aa72",
+      postId: "114932",
+      chaptersNonce: "1ef880db28",
     });
   });
 
   it("prefers chaptersNonce over the section nonce", () => {
-    // nhvNovelV2.nonce is 0367ecdfde and belongs to nhv_novel_v2_section,
+    // nhvNovelV2.nonce is 8b20962872 and belongs to nhv_novel_v2_section,
     // NOT to the chapters AJAX. Picking it would 403 every chapter fetch.
-    expect(extractNovelConfig(novelHtml)?.chaptersNonce).not.toBe("0367ecdfde");
+    expect(extractNovelConfig(novelHtml)?.chaptersNonce).not.toBe("8b20962872");
   });
 
   it("returns null when the config global is absent", () => {
@@ -58,24 +58,24 @@ describe("extractNovelConfig", () => {
 const parse = () =>
   parseNovelPage(
     new DOMParser().parseFromString(novelHtml, "text/html"),
-    "https://cenele.com/cont/pursuit/",
+    "https://cenele.com/cont/create-heaven-riwya/",
   );
 
 describe("parseNovelPage", () => {
   it("reads title, original title and cover", () => {
     const n = parse();
-    expect(n.title).toBe("السعي وراء الحقيقة");
-    expect(n.originalTitle).toBe("Pursuit of the Truth");
+    expect(n.title).toBe("انشاء القوانين السماوية");
+    expect(n.originalTitle).toBe("Create heavenly laws");
     expect(n.coverUrl).toBe(
-      "https://cenele.com/wp-content/uploads/2021/12/cover-768x1024.webp",
+      "https://cenele.com/wp-content/uploads/2026/08/139e19c5-bfa6-468f-8694-ee4b00437657-768x1024.webp",
     );
   });
 
   it("keeps genres and tags as separate lists", () => {
     const n = parse();
     expect(n.tags).toEqual([
-      "أكشن", "بالغ", "زيانشيا", "غموض", "فنون قتالية", "للكبار", "مأساة", "مظلمة", "نفسي",
-      "إنتقال العالم", "الانتقال الزمني", "الانتقام", "الزراعة", "الشخصية لا ترحم", "الكيمياء", "الوقت القديم", "تطور شخصية", "خلفية عائلة غامضة", "داو", "غدر الأحباء", "من ضعيف إلى قوي",
+      "أكشن", "خيال", "خيال علمي", "شوانهوان", "غموض", "فانتازيا", "فنون قتالية", "قوى خارقة", "مغامرة",
+      "صينية", "مغامرات",
     ]);
   });
 
@@ -92,33 +92,34 @@ describe("parseNovelPage", () => {
     expect(n.meta).toContainEqual({ label: "النوع", value: "صينية" });
     expect(n.meta).toContainEqual({
       label: "المؤلف",
-      value: "Er Gen",
-      url: "https://cenele.com/cont-author/er-gen/",
+      value: "It's not Sunday",
+      url: "https://cenele.com/cont-author/its-not-sunday/",
     });
   });
 
   it("lifts the author out of the meta rows", () => {
-    expect(parse().author).toBe("Er Gen");
+    expect(parse().author).toBe("It's not Sunday");
   });
 
   it("reads the synopsis", () => {
-    expect(parse().description).toContain("سجن أبدي");
+    expect(parse().description).toContain("تقنيات سامية؟");
   });
 
   it("excludes heading boilerplate from the synopsis", () => {
-    // The synopsis container holds an <h2> (title repeated) and trailing
-    // <h3> (promotional copy). These must not appear in the stored description.
+    // The synopsis container holds an <h2> (title repeated, once before and
+    // once after the paragraphs — an Arabic heading and an English one).
+    // These must not appear in the stored description.
     const n = parse();
-    expect(n.description).not.toContain("قصة رواية السعي وراء الحقيقة");
-    expect(n.description).not.toContain("الكتاب الثاني في سلسلة إير جين");
+    expect(n.description).not.toContain("رواية إنشاء القوانين السماوية");
+    expect(n.description).not.toContain("رواية Create heavenly laws");
     // The actual paragraph content should still be present
-    expect(n.description).toContain("سجن أبدي");
+    expect(n.description).toContain("تقنيات سامية؟");
   });
 
   it("carries the chapter credentials through", () => {
     const n = parse();
-    expect(n.mangaId).toBe("32235");
-    expect(n.chaptersNonce).toBe("6d7f45aa72");
+    expect(n.mangaId).toBe("114932");
+    expect(n.chaptersNonce).toBe("1ef880db28");
   });
 
   it("throws a page-identifying error when the config is missing", () => {
@@ -159,7 +160,7 @@ describe("parseSearchPage", () => {
     );
 
   it("returns one card per result row", () => {
-    expect(parsed().cards).toHaveLength(2);
+    expect(parsed().cards).toHaveLength(12);
   });
 
   it("reads url, title, cover, original title and genres", () => {
@@ -167,16 +168,20 @@ describe("parseSearchPage", () => {
       url: "https://cenele.com/cont/lord-of-wishes/",
       title: "سيد التمني",
       coverUrl:
-        "https://cenele.com/wp-content/uploads/2026/06/wishes-193x278.jpg",
+        "https://cenele.com/wp-content/uploads/2026/06/IMG_%D9%A2%D9%A0%D9%A2%D9%A6%D9%A0%D9%A3%D9%A1%D9%A7_%D9%A0%D9%A9%D9%A1%D9%A2%D9%A3%D9%A4-193x278.jpg",
       subtitle: "رواية Lord of Wishes",
-      badges: ["أكشن", "فانتازيا"],
+      badges: ["أكشن", "دراما", "رعب", "غموض", "فانتازيا"],
     });
   });
 
   it("omits optional fields a row doesn't carry", () => {
-    const second = parsed().cards[1];
-    expect(second.subtitle).toBeUndefined();
-    expect(second.badges).toBeUndefined();
+    // Row 2 ("عودة السيد الشامل الأسطوري") carries genre badges but no
+    // "Alternative" (original-title) block — the live fixture's real
+    // example of an optional field being absent.
+    const third = parsed().cards[2];
+    expect(third.title).toBe("عودة السيد الشامل الأسطوري");
+    expect(third.subtitle).toBeUndefined();
+    expect(third.badges).toBeDefined();
   });
 
   it("reports hasMore from the older-posts link", () => {
@@ -261,54 +266,153 @@ describe("parseHomeSections", () => {
 //
 // The highest-consequence, most theme-fragile code in this extension: over-
 // strip and a user's imported book is silently truncated, under-strip and
-// piracy boilerplate is baked into their EPUB. tests/fixtures/chapter.html
-// exercises every decoy form isDecoyElement/looksLikePiracyDecoy claim to
-// handle (see the file-header comment and each function's own doc comment
-// in ../src/index.ts), alongside real-looking chapter paragraphs and a real
-// image, so a regression in either direction shows up here.
+// piracy boilerplate is baked into their EPUB.
+//
+// tests/fixtures/chapter.html is a live capture (chapter 1 of
+// create-heaven-riwya, 2026-09-18) — real prose, real decoys, not hand-
+// written. Two things about it are worth knowing before touching this
+// block:
+//
+// 1. As of this capture, EVERY decoy the live theme emits is a `<section
+//    data-nosnippet="true">`/`<span aria-hidden="true">` that sits as a
+//    SIBLING of the real `<p>` elements, never nested inside one and never
+//    a `<p>` itself (sampled across 11 chapters over 2 novels — see the
+//    README's "Chapter-body decoy stripping" section). extractChapterLines
+//    only ever reads `p, img`, so removing or not removing these siblings
+//    makes zero difference to its output on any chapter sampled during
+//    this refresh — the fixture proves the site still ships decoy markup
+//    and that none of its (still tatweel-obfuscated) boilerplate leaks
+//    into a real line, but it can't prove the nested-inside-a-<p> or
+//    whole-<p> removal paths, because nothing live currently exercises
+//    them. The synthetic test below keeps those paths covered.
+// 2. This capture is what surfaced a real bug during this refresh: three
+//    separate, unrelated one-word paragraphs in this chapter are all
+//    exactly "لكن…" ("But…"). The old whole-chapter `Set`-based dedup
+//    collapsed all three into one, silently dropping two real lines of
+//    prose. extractChapterLines now only dedups against the IMMEDIATELY
+//    PRECEDING line (see its own comment) — the fix this capture justified.
 
 describe("extractChapterLines", () => {
-  it("keeps every real paragraph and image, in order, and strips every decoy form", () => {
+  it("keeps every real chapter paragraph, in order, with no decoy boilerplate leaking through", () => {
+    // Non-vacuous check: the fixture must still carry decoy markup, even
+    // though (per the file-header comment above) it doesn't happen to be
+    // markup that changes this chapter's output.
+    const dataNosnippetCount = (chapterHtml.match(/data-nosnippet="true"/g) || []).length;
+    const ariaHiddenCount = (chapterHtml.match(/aria-hidden="true"/g) || []).length;
+    expect(dataNosnippetCount).toBeGreaterThan(0);
+    expect(ariaHiddenCount).toBeGreaterThan(0);
+
     const doc = new DOMParser().parseFromString(chapterHtml, "text/html");
     const lines = extractChapterLines(doc);
 
-    expect(lines).toEqual([
-      {
-        type: "text",
-        content: "كان يا ما كان، في قديم الزمان، عاش بطل الرواية في قرية صغيرة.",
-      },
-      // The aria-hidden <span> nested inside this <p> is removed by the
-      // first pass, but the real text on either side of it survives —
-      // proving decoys nested inside a real paragraph (not just whole
-      // decoy paragraphs) are handled, per the file's header comment.
-      {
-        type: "text",
-        content: "هذا نص حقيقي يتبعه المزيد من النص الحقيقي.",
-      },
-      // aria-hidden="true" (whole <p>), data-nosnippet="true", the
+    // 217 <p> elements in .reading-content .text-left, all real; a
+    // regression that starts over- or under-extracting moves this count.
+    expect(lines).toHaveLength(217);
+    expect(lines.every((l) => l.type === "text")).toBe(true);
+
+    // Real prose survives, in order, at both ends and in the middle.
+    expect(lines[0]).toEqual({
+      type: "text",
+      content: "الفصل الأول: التجنيد الإجباري",
+    });
+    expect(lines[Math.floor(lines.length / 2)]).toEqual({
+      type: "text",
+      content: "كانت حاكمة الحكمة واحدة من الحاكمات الثلاث العظيمات لتحالف البشر العالمي.",
+    });
+    expect(lines[lines.length - 1]).toEqual({
+      type: "text",
+      content: "الترجمة: القارئ الأبدي",
+    });
+
+    // The short one-word paragraph "لكن…" ("But…") genuinely repeats three
+    // times at unrelated points in this chapter — proof the fix in point 2
+    // of the file-header comment above keeps non-adjacent repeats, not
+    // just that it exists.
+    expect(lines.filter((l) => l.content === "لكن…")).toHaveLength(3);
+
+    // None of the stripped decoy boilerplate — nor its tatweel-obfuscated
+    // form — leaks into the output.
+    for (const line of lines) {
+      expect(looksLikePiracyDecoy(line.content)).toBe(false);
+      expect(line.content).not.toContain("يسرق");
+    }
+  });
+
+  // Synthetic (not a live capture): the live site sampled during this
+  // refresh never nests a decoy inside a real <p>, never ships a whole-<p>
+  // decoy, and never leaves an unhidden keyword-only decoy paragraph (see
+  // the file-header comment) — so this snippet is what keeps
+  // extractChapterLines's actual removal-and-dedup integration covered:
+  // a decoy nested inside a real paragraph, a whole aria-hidden <p>, a
+  // role="presentation" wrapper removed along with the real-looking <p>
+  // nested inside it, a hidden-style-only <p>, translate="no" ALONE
+  // surviving (it's not a decoy signal on its own), the keyword safety net
+  // catching a plain piracy paragraph isDecoyElement wouldn't flag, and
+  // adjacent-vs-non-adjacent text/image dedup.
+  it("integration: nested/whole-paragraph decoy removal, the keyword safety net, and adjacent-only dedup all still cooperate", () => {
+    const doc = new DOMParser().parseFromString(
+      `<div class="reading-content"><div class="text-left">
+        <p>هذا نص حقيقي <span aria-hidden="true">نص مخفي داخل الفقرة</span> يتبعه المزيد من النص الحقيقي.</p>
+        <p aria-hidden="true">هذا النص كله مخفي ولا يجب أن يظهر إطلاقاً.</p>
+        <p data-nosnippet="true">فقرة مخفية أخرى عبر data-nosnippet.</p>
+        <div role="presentation"><p>فقرة كاملة داخل عنصر role="presentation" يجب حذفها بالكامل.</p></div>
+        <p style="position:absolute;opacity:0;">فقرة مخفية عبر الأنماط المباشرة فقط.</p>
+        <p translate="no">اسم علم مثل Cenele لا يُترجم.</p>
+        <p>رواياتنا مسروقة من موقع فضاء الروايات، حمل تطبيقنا الآن.</p>
+        <p>القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.</p>
+        <p>القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.</p>
+        <p>سطر منتصف الفصل.</p>
+        <p>القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.</p>
+        <img src="https://cenele.com/wp-content/uploads/2024/01/scene.jpg" alt="scene">
+        <img src="https://cenele.com/wp-content/uploads/2024/01/scene.jpg" alt="scene duplicate">
+        <img class="wp-post-image" src="https://cenele.com/wp-content/uploads/2024/01/avatar.jpg" alt="decorative">
+        <img src="https://cenele.com/ads/banner.jpg" alt="ad">
+        <img src="https://cenele.com/wp-content/uploads/2024/01/other.jpg" alt="a different real image">
+        <img src="https://cenele.com/wp-content/uploads/2024/01/scene.jpg" alt="scene again, non-adjacent">
+      </div></div>`,
+      "text/html",
+    );
+
+    expect(extractChapterLines(doc)).toEqual([
+      // The nested aria-hidden <span> is removed by the first pass; the
+      // real text on either side of it survives in one paragraph.
+      { type: "text", content: "هذا نص حقيقي يتبعه المزيد من النص الحقيقي." },
+      // The whole aria-hidden <p>, the data-nosnippet <p>, the
       // role="presentation" wrapper (and the real-looking <p> nested
-      // inside it — removed along with its ancestor), the hidden-style-
-      // only <p>, and the translate="no"+hidden-style combo above are
-      // all absent from this array entirely: proof they were stripped,
-      // not merely reordered.
+      // inside it — removed along with its ancestor), and the
+      // hidden-style-only <p> are all absent entirely: proof they were
+      // stripped, not merely reordered.
       //
       // translate="no" ALONE (no hidden style) is deliberately NOT a
       // decoy signal — isDecoyElement requires hasHiddenStyle too — so
       // this paragraph must survive.
       { type: "text", content: "اسم علم مثل Cenele لا يُترجم." },
-      // The piracy-boilerplate paragraph (no special attributes at all)
-      // is caught by the looksLikePiracyDecoy keyword safety net, not by
-      // isDecoyElement — proof that net runs independently.
+      // The piracy-boilerplate paragraph has no special attributes at
+      // all — caught by looksLikePiracyDecoy, not isDecoyElement.
       //
-      // The next real paragraph is repeated twice in the fixture; only
-      // one copy survives (dedup).
+      // The next paragraph repeats twice back to back — adjacent dedup
+      // keeps one copy — then a middle line, then the SAME text a third
+      // time, non-adjacent this time, which must survive (see the fix
+      // described in the file-header comment: dedup is adjacency-only).
+      { type: "text", content: "القصة مستمرة والبطل يواصل رحلته نحو الحقيقة." },
+      { type: "text", content: "سطر منتصف الفصل." },
+      { type: "text", content: "القصة مستمرة والبطل يواصل رحلته نحو الحقيقة." },
+      // The real image repeats back to back — adjacent dedup keeps one
+      // copy; the wp-post-image avatar and the /ads/ banner are both
+      // decorative and excluded entirely (and don't count as the
+      // "previous image" for adjacency, since they're filtered before
+      // ever being considered). A different real image then plays the
+      // same role the middle text line played above, so the final
+      // repeat of the first image is genuinely non-adjacent in the KEPT
+      // output and must survive.
       {
-        type: "text",
-        content: "القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.",
+        type: "image",
+        content: "https://cenele.com/wp-content/uploads/2024/01/scene.jpg",
       },
-      // The real image is repeated once (dedup keeps one copy); the
-      // wp-post-image avatar and the /ads/ banner are both decorative
-      // and excluded entirely.
+      {
+        type: "image",
+        content: "https://cenele.com/wp-content/uploads/2024/01/other.jpg",
+      },
       {
         type: "image",
         content: "https://cenele.com/wp-content/uploads/2024/01/scene.jpg",
@@ -450,13 +554,14 @@ describe("createSource (end-to-end via createTestHost)", () => {
     expect(result.query).toBe("سيد");
     expect(result.page).toBe(1);
     expect(result.hasMore).toBe(true);
-    expect(result.cards).toHaveLength(2);
+    expect(result.cards).toHaveLength(12);
     expect(result.cards[0]).toEqual({
       url: "https://cenele.com/cont/lord-of-wishes/",
       title: "سيد التمني",
-      coverUrl: "https://cenele.com/wp-content/uploads/2026/06/wishes-193x278.jpg",
+      coverUrl:
+        "https://cenele.com/wp-content/uploads/2026/06/IMG_%D9%A2%D9%A0%D9%A2%D9%A6%D9%A0%D9%A3%D9%A1%D9%A7_%D9%A0%D9%A9%D9%A1%D9%A2%D9%A3%D9%A4-193x278.jpg",
       subtitle: "رواية Lord of Wishes",
-      badges: ["أكشن", "فانتازيا"],
+      badges: ["أكشن", "دراما", "رعب", "غموض", "فانتازيا"],
     });
   });
 

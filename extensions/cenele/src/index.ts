@@ -945,16 +945,25 @@ export function extractChapterLines(doc: Document): SourceLine[] {
 
   const items = root.querySelectorAll("p, img");
   const lines: SourceLine[] = [];
-  const seenText = new Set<string>();
-  const seenImage = new Set<string>();
+  // Dedup against the immediately-preceding line of the same type only —
+  // NOT "seen anywhere in the chapter". The bug this guards against is the
+  // site occasionally rendering the exact same <p>/<img> twice in a row
+  // (a copy-paste artifact in its markup); a live chapter can legitimately
+  // repeat a short line — "لكن…" ("But…") as its own one-word paragraph,
+  // e.g. — several times at unrelated points in the narrative, and a
+  // whole-chapter Set previously collapsed those into one, silently
+  // dropping real prose. Adjacency-only catches the actual site glitch
+  // without discarding a real repeated beat that isn't adjacent.
+  let lastText: string | null = null;
+  let lastImage: string | null = null;
   for (const el of Array.from(items)) {
     if (el.tagName === "IMG") {
       const img = el as HTMLImageElement;
       if (isDecorativeImage(img)) continue;
       const src = absoluteImageSrc(img);
       if (!src) continue;
-      if (seenImage.has(src)) continue;
-      seenImage.add(src);
+      if (src === lastImage) continue;
+      lastImage = src;
       lines.push({ type: "image", content: src });
       continue;
     }
@@ -963,8 +972,8 @@ export function extractChapterLines(doc: Document): SourceLine[] {
     const text = paragraphText(p);
     if (text.length === 0) continue;
     if (looksLikePiracyDecoy(text)) continue;
-    if (seenText.has(text)) continue;
-    seenText.add(text);
+    if (text === lastText) continue;
+    lastText = text;
     lines.push({ type: "text", content: text });
   }
   return lines;
