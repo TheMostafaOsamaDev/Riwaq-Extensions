@@ -36,6 +36,7 @@ import {
   absoluteUrl,
   parseHtml,
   sanitizeText,
+  type Locale,
   type NovelCard,
   type Source,
   type SourceChapter,
@@ -104,7 +105,7 @@ export default function createSource(host: SourceHost): Source {
       host.log("info", "getHomeSections");
       const resp = await host.fetch(BASE_URL + "/");
       const doc = parseHtml(resp.text);
-      return parseHomeSections(doc);
+      return parseHomeSections(doc, host.locale);
     },
 
     async search(query, page) {
@@ -754,29 +755,47 @@ function extractVolumeShells(_doc: Document): VolumeShell[] {
 
 // ── homepage parsing ───────────────────────────────────────────────────────
 
-function parseHomeSections(doc: Document): SourceSection[] {
+export function parseHomeSections(doc: Document, locale: Locale = "ar"): SourceSection[] {
   const sections: SourceSection[] = [];
-  // Walk each themed nhv-section in document order. We support four
-  // shapes the live site renders; unrecognized sections (theme A/B
-  // tests, ad blocks) are silently skipped.
-  let idx = 0;
-  for (const sec of Array.from(doc.querySelectorAll("section.nhv-section"))) {
-    const id = `home-${idx}`;
-    const title = sanitizeText(sec.querySelector(".nhv-title")?.textContent);
-    if (!title) continue;
-    let cards: NovelCard[] = [];
+  // Walk the themed sections in document order. Most live under
+  // `section.nhv-section`; the gems leaderboard is a bare
+  // `section.nhv-gems-lb` outside that family (its own child theme
+  // plugin, not the "nhv-section" shell the others share). We support
+  // five shapes the live site has rendered; unrecognized sections
+  // (theme A/B tests, ad blocks, the app-store hero) are silently
+  // skipped. Ids are the section's own class name, not a document-order
+  // index — stable across a run where, say, "popular" has no cards
+  // today and "gems" does, so the store can cache/key on them safely.
+  for (const sec of Array.from(doc.querySelectorAll("section.nhv-section, section.nhv-gems-lb"))) {
+    const heading = sanitizeText(sec.querySelector(".nhv-title")?.textContent);
+    let id: string;
+    let title = heading;
+    let cards: NovelCard[];
     if (sec.classList.contains("nhv-popular")) {
+      id = "popular";
       cards = parsePopularCards(sec);
     } else if (sec.classList.contains("nhv-newseries")) {
+      id = "newseries";
+      title = heading || strings(locale)("sectionNewSeries");
       cards = parseNewseriesCards(sec);
     } else if (sec.classList.contains("nhv-manual")) {
+      id = "manual";
       cards = parseManualCards(sec);
     } else if (sec.classList.contains("nhv-newreleases")) {
+      id = "newreleases";
       cards = parseNewreleasesCards(sec);
+    } else if (sec.classList.contains("nhv-gems-lb")) {
+      // The gems leaderboard ships its own <h2> heading, not the
+      // .nhv-title the other sections use — this fallback is the one
+      // that's actually live, not just defensive.
+      id = "gems";
+      title = heading || strings(locale)("sectionGems");
+      cards = parseGemsRows(sec);
+    } else {
+      continue;
     }
-    if (cards.length === 0) continue;
+    if (!title || cards.length === 0) continue;
     sections.push({ id, title, cards });
-    idx++;
   }
   return sections;
 }
@@ -855,6 +874,35 @@ function parseNewreleasesCards(sec: Element): NovelCard[] {
       title: sanitizeText(title?.textContent),
       coverUrl: pickImageSrc(img),
       subtitle: latest ? sanitizeText(latest.textContent) : undefined,
+    });
+  }
+  return out;
+}
+
+/** The gems leaderboard: ranked rows, each an `a.nhv-gems-lb__identity`
+ *  anchor to a /cont/ novel. Its cover is `img.nhv-gems-lb__novel-cover`
+ *  itself — unlike the other branches' `img.nhv-prog-img`, the class sits
+ *  directly on the <img>, not on a wrapper — so `pickImageSrc` still
+ *  applies unchanged, just against a different selector. Rank and gem
+ *  count are deliberately dropped: NovelCard has no field for either, and
+ *  folding them into the subtitle would put a number where a translated
+ *  title belongs. The identity anchor's own text also carries a "boosted
+ *  novel" label glued on with no separator (`<small>` right after the
+ *  `<strong>` title, no whitespace between), so the title is read from
+ *  the `<strong>` specifically rather than the anchor's full textContent. */
+function parseGemsRows(sec: Element): NovelCard[] {
+  const out: NovelCard[] = [];
+  for (const row of Array.from(sec.querySelectorAll(".nhv-gems-lb__row--novel"))) {
+    const link = row.querySelector(".nhv-gems-lb__identity") as HTMLAnchorElement | null;
+    const href = link?.getAttribute("href") || "";
+    if (!isNovelHref(href)) continue;
+    const title = sanitizeText(link?.querySelector("strong")?.textContent ?? link?.textContent);
+    if (!title) continue;
+    const img = row.querySelector("img.nhv-gems-lb__novel-cover") as HTMLImageElement | null;
+    out.push({
+      url: absoluteUrl(href, BASE_URL),
+      title,
+      coverUrl: pickImageSrc(img),
     });
   }
   return out;

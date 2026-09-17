@@ -8,10 +8,12 @@ import createSource, {
   hasHiddenStyle,
   isDecoyElement,
   looksLikePiracyDecoy,
+  parseHomeSections,
   parseNovelPage,
   searchUrl,
   parseSearchPage,
 } from "../src/index";
+import { parseHtml } from "@riwaq/extension-api";
 import { createTestHost } from "@riwaq/extension-api/testing";
 
 // Deliberately not `readFileSync(new URL("./fixtures/novel.html", import.meta.url), ...)`:
@@ -27,6 +29,7 @@ const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 const searchHtml = readFileSync(join(FIXTURES_DIR, "search.html"), "utf8");
 const chapterHtml = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
+const homeHtml = readFileSync(join(FIXTURES_DIR, "home.html"), "utf8");
 
 describe("extractNovelConfig", () => {
   it("reads postId and chaptersNonce from nhvNovelV2", () => {
@@ -195,6 +198,62 @@ describe("parseSearchPage", () => {
       new DOMParser().parseFromString(searchHtml, "text/html"), "سيد", 2);
     expect(r.query).toBe("سيد");
     expect(r.page).toBe(2);
+  });
+});
+
+// ── homepage sections ────────────────────────────────────────────────────
+//
+// tests/fixtures/home.html is a live capture of https://cenele.com/. Two of
+// the sections it renders — the "nhv-newseries" slider and the
+// "nhv-gems-lb" leaderboard — list real novels that getHomeSections has to
+// surface, alongside the "nhv-newreleases" row it already handled.
+
+describe("parseHomeSections", () => {
+  it("parses the new-series slider as its own section", () => {
+    const sections = parseHomeSections(parseHtml(homeHtml));
+    const newseries = sections.find((s) => s.id === "newseries");
+    expect(newseries).toBeDefined();
+    expect(newseries!.cards.length).toBeGreaterThan(0);
+    for (const card of newseries!.cards) {
+      expect(card.url).toMatch(/^https:\/\/cenele\.com\/cont\//);
+      expect(card.title).not.toBe("");
+    }
+  });
+
+  it("parses the gems leaderboard as its own section", () => {
+    const sections = parseHomeSections(parseHtml(homeHtml));
+    const gems = sections.find((s) => s.id === "gems");
+    expect(gems).toBeDefined();
+    // The live board lists six ranked novels — that's the real count in
+    // the captured fixture (matches the live site's board size).
+    expect(gems!.cards).toHaveLength(6);
+    expect(gems!.cards[0].url).toMatch(/^https:\/\/cenele\.com\/cont\//);
+  });
+
+  it("drops the gem count and rank from the gems card titles", () => {
+    // The identity anchor's textContent glues a "boosted novel" label
+    // directly onto the title with no separator — proof the parser reads
+    // just the <strong> rather than falling through to the raw text.
+    const gems = parseHomeSections(parseHtml(homeHtml)).find((s) => s.id === "gems")!;
+    for (const card of gems.cards) {
+      expect(card.title).not.toMatch(/\d/);
+      expect(card.title).not.toContain("معززة");
+    }
+  });
+
+  it("falls back to the synthesized heading when the gems section ships no .nhv-title", () => {
+    // The live gems markup's own heading is a bare <h2>, not .nhv-title,
+    // so this is the actually-exercised path, not a defensive no-op.
+    const gems = parseHomeSections(parseHtml(homeHtml)).find((s) => s.id === "gems")!;
+    expect(gems.title).toBe("لوحة الجواهر");
+  });
+
+  it("never emits a section with zero cards", () => {
+    // An empty section renders as a bare heading over blank space in the
+    // Store, which reads as a bug rather than as "nothing here today".
+    for (const s of parseHomeSections(parseHtml(homeHtml))) {
+      expect(s.cards.length).toBeGreaterThan(0);
+    }
   });
 });
 
