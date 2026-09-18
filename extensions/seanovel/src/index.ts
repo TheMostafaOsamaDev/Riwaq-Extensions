@@ -81,7 +81,7 @@ const chapterUrl = (slug: string, id: number) => `${BASE_URL}/novels/${slug}/cha
 export function slugFromUrl(url: string): string {
   const m = new URL(url).pathname.match(/^\/novels\/([^/]+)/);
   if (!m) {
-    throw new SourceUrlError(`Sea Novel: ${url} is not a novel page URL.`);
+    throw new SourceUrlError(`seanovel: ${url} is not a novel page URL.`);
   }
   return decodeURIComponent(m[1]);
 }
@@ -95,7 +95,7 @@ function parseJsonResponse(resp: FetchResponse, endpoint: string): unknown {
   try {
     return JSON.parse(resp.text);
   } catch {
-    throw new Error(`Sea Novel: ${endpoint} did not return JSON (status ${resp.status}).`);
+    throw new Error(`seanovel: ${endpoint} did not return JSON (status ${resp.status}).`);
   }
 }
 
@@ -129,7 +129,7 @@ export default function createSource(host: SourceHost): Source {
       const resp = await host.fetch(`${BASE_URL}/api/novels`);
       const rows = parseJsonResponse(resp, "/api/novels");
       if (!Array.isArray(rows)) {
-        throw new Error("Sea Novel: /api/novels did not return a list of novels.");
+        throw new Error("seanovel: /api/novels did not return a list of novels.");
       }
       return rows as CatalogueRow[];
     })();
@@ -170,9 +170,20 @@ export default function createSource(host: SourceHost): Source {
     },
 
     async search(query: string, page = 1): Promise<SourceSearchResult> {
-      host.log("info", `search(${query}) page ${page}`);
+      const trimmed = query.trim();
+      // An empty query is a real, correct empty result — there is nothing
+      // to search for — not "every novel on the site". `"".toLowerCase()`
+      // is a substring of every string, so without this guard the filter
+      // below matched the entire catalogue and handed back its first
+      // PAGE_SIZE rows dressed up as search hits, with `hasMore: true`.
+      // cenele and sunovels both return a hollow result here without
+      // touching the network; this matches them.
+      if (!trimmed) {
+        return { cards: [], hasMore: false, query: trimmed, page };
+      }
+      host.log("info", `search(${trimmed}) page ${page}`);
       const rows = await fetchCatalogue();
-      const q = query.toLowerCase();
+      const q = trimmed.toLowerCase();
       const matches = rows.filter(
         (r) =>
           (r.title_ar ?? "").toLowerCase().includes(q) ||
@@ -187,7 +198,7 @@ export default function createSource(host: SourceHost): Source {
       return {
         cards: pageRows.map(cardFor),
         hasMore: matches.length > start + PAGE_SIZE,
-        query,
+        query: trimmed,
         page,
       };
     },
@@ -205,7 +216,7 @@ export default function createSource(host: SourceHost): Source {
       // would otherwise reach `data.origin` etc. below and throw a raw,
       // unbranded TypeError.
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        throw new Error(`Sea Novel: /api/novel/${slug} did not return a novel object.`);
+        throw new Error(`seanovel: /api/novel/${slug} did not return a novel object.`);
       }
       const data = parsed as NovelDetailRow;
 
@@ -234,7 +245,7 @@ export default function createSource(host: SourceHost): Source {
       if (data.chapters_count !== undefined && chapters.length !== data.chapters_count) {
         host.log(
           "warn",
-          `Sea Novel: /api/novel/${slug} claims chapters_count=${data.chapters_count} but returned ${chapters.length} chapters.`,
+          `seanovel: /api/novel/${slug} claims chapters_count=${data.chapters_count} but returned ${chapters.length} chapters.`,
         );
       }
 
@@ -272,13 +283,16 @@ export default function createSource(host: SourceHost): Source {
     },
 
     async getChapterContent(chapter: SourceChapter): Promise<SourceLine[]> {
-      host.log("info", `getChapterContent(${chapter.id})`);
+      // debug, not info: importing a 1,500-chapter novel calls this once
+      // per chapter, and per-chapter progress at info buries everything
+      // else in the log. Same level cenele and kolnovel use.
+      host.log("debug", `getChapterContent(${chapter.id})`);
       const resp = await host.fetch(chapter.url);
       const doc = parseHtml(resp.text);
       const root = doc.querySelector("article.reader-content");
       if (!root) {
         throw new Error(
-          `Sea Novel: no chapter body (article.reader-content) at ${chapter.url}. ` +
+          `seanovel: no chapter body (article.reader-content) at ${chapter.url}. ` +
             `The site layout may have changed.`,
         );
       }
@@ -296,7 +310,7 @@ export default function createSource(host: SourceHost): Source {
         if (content) lines.push({ type: "text", content });
       }
       if (lines.length === 0) {
-        throw new Error(`Sea Novel: chapter body at ${chapter.url} parsed to zero lines.`);
+        throw new Error(`seanovel: chapter body at ${chapter.url} parsed to zero lines.`);
       }
       return lines;
     },

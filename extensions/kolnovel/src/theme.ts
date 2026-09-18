@@ -419,7 +419,7 @@ export function parseNovelPage(
   // would deny the user a novel the site itself renders.
   if (!title) {
     throw new Error(
-      `KolNovel: couldn't find a novel title on ${pageUrl} (h1.entry-title is missing or ` +
+      `kolnovel: couldn't find a novel title on ${pageUrl} (h1.entry-title is missing or ` +
         "empty) — the layout may have changed, or this page was blocked/errored despite " +
         "an HTTP 200.",
     );

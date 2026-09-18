@@ -28,6 +28,16 @@ import type { SourceHost, SourceVolume } from "@riwaq/extension-api";
 // own `import.meta.url` (no relative resolution involved) plus plain path-segment
 // arithmetic sidesteps it entirely.
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
+/** This extension's own manifest id. Errors are prefixed with it (never
+ *  with a display name) because CONTRIBUTING.md's bug-report section asks
+ *  users for the id — reading it from the manifest here means renaming the
+ *  id without updating the error strings fails this suite. */
+const MANIFEST_ID = (
+  JSON.parse(readFileSync(join(FIXTURES_DIR, "..", "..", "manifest.json"), "utf8")) as {
+    id: string;
+  }
+).id;
+
 const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 const searchHtml = readFileSync(join(FIXTURES_DIR, "search.html"), "utf8");
 const chapterHtml = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
@@ -701,6 +711,13 @@ describe("createSource (end-to-end via createTestHost)", () => {
       subtitle: "رواية Lord of Wishes",
       badges: ["أكشن", "دراما", "رعب", "غموض", "فانتازيا"],
     });
+  });
+
+  it("prefixes a thrown error with the manifest id, not a display name", () => {
+    const doc = new DOMParser().parseFromString("<html><body></body></html>", "text/html");
+    expect(() => parseNovelPage(doc, "https://cenele.com/cont/x/")).toThrow(
+      new RegExp(`^${MANIFEST_ID}: `),
+    );
   });
 
   it("canHandle() accepts cenele.com URLs and rejects other hosts", () => {

@@ -90,8 +90,15 @@ export default function createSource(host: SourceHost): Source {
     },
 
     async search(query) {
-      const url = `${BASE_URL}/?${new URLSearchParams({ s: query })}`;
-      host.log("info", `search(${query}) → ${url}`);
+      const trimmed = query.trim();
+      // An empty query is a real, correct empty result — nothing to search
+      // for — not a reason to fetch the site's own "no search term" page.
+      // Every extension in this repo answers it the same way.
+      if (!trimmed) {
+        return { cards: [], hasMore: false, query: trimmed, page: 1 };
+      }
+      const url = `${BASE_URL}/?${new URLSearchParams({ s: trimmed })}`;
+      host.log("info", `search(${trimmed}) → ${url}`);
       const resp = await host.fetch(url);
       // KolNovel renders every match on one page, and BOTH `?s=<q>&paged=<N>`
       // and `/page/<N>/?s=<q>` return HTTP 500 on this host (verified against
@@ -102,7 +109,7 @@ export default function createSource(host: SourceHost): Source {
       // than trusted from the DOM. A true value would offer a "Load more"
       // control whose click could only ever refetch the same page.
       return {
-        ...parseSearchResults(parseHtml(resp.text), BASE_URL, query, 1),
+        ...parseSearchResults(parseHtml(resp.text), BASE_URL, trimmed, 1),
         hasMore: false,
       };
     },
@@ -142,7 +149,7 @@ export default function createSource(host: SourceHost): Source {
       imageStore.clear();
       const postId = extractPostId(chapter.url);
       if (!postId) {
-        throw new Error(`KolNovel: couldn't find a post id in chapter URL: ${chapter.url}`);
+        throw new Error(`kolnovel: couldn't find a post id in chapter URL: ${chapter.url}`);
       }
       const pdfUrl = await requestPdfUrl(host, postId, chapter.url);
       const bytes = await host.fetchBytes(pdfUrl);
@@ -167,7 +174,7 @@ export default function createSource(host: SourceHost): Source {
       // user has when reporting it.
       if (pdfLines.length === 0) {
         throw new Error(
-          `KolNovel: extracted no content for ${chapter.url} — the chapter page had no ` +
+          `kolnovel: extracted no content for ${chapter.url} — the chapter page had no ` +
             "readable HTML body and its downloaded PDF produced no lines.",
         );
       }
@@ -227,26 +234,26 @@ async function requestPdfUrl(
     json = JSON.parse(resp.text) as { error?: number; url?: string } | null;
   } catch {
     throw new Error(
-      `KolNovel: the PDF token endpoint returned non-JSON for ${chapterUrl} ` +
+      `kolnovel: the PDF token endpoint returned non-JSON for ${chapterUrl} ` +
         `(HTTP ${resp.status}).`,
     );
   }
   if (json === null || typeof json !== "object") {
     throw new Error(
-      `KolNovel: the PDF token endpoint returned JSON that is not an object for ${chapterUrl} ` +
+      `kolnovel: the PDF token endpoint returned JSON that is not an object for ${chapterUrl} ` +
         `(HTTP ${resp.status}).`,
     );
   }
   if (json.error !== 0) {
     const code = json.error === undefined ? "absent" : String(json.error);
     throw new Error(
-      `KolNovel: the PDF token endpoint refused post ${postId} for ${chapterUrl} ` +
+      `kolnovel: the PDF token endpoint refused post ${postId} for ${chapterUrl} ` +
         `(error code ${code}). The site answers 403 here for a post id it does not accept.`,
     );
   }
   if (!json.url) {
     throw new Error(
-      `KolNovel: the PDF token endpoint reported success for post ${postId} ` +
+      `kolnovel: the PDF token endpoint reported success for post ${postId} ` +
         `(${chapterUrl}) but returned no download url.`,
     );
   }
@@ -282,7 +289,7 @@ function assertPdf(bytes: Uint8Array, chapterUrl: string): void {
     bytes[3] === 0x46; // F
   if (!ok) {
     throw new Error(
-      `KolNovel: the tokenized download for ${chapterUrl} was not a PDF — expected a ` +
+      `kolnovel: the tokenized download for ${chapterUrl} was not a PDF — expected a ` +
         `%PDF header, got ${describeBytes(bytes)}. The site serves an HTML loader or ` +
         "login page here when the token has expired or the chapter is members-only.",
     );

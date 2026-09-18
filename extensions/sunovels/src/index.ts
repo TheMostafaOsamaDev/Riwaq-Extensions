@@ -77,7 +77,7 @@ const HOSTS = new Set(["sunovels.com", "www.sunovels.com"]);
 /** Both `/novel/<slug>` and `/novel/<slug>/<n>` yield <slug>. */
 export function slugFromUrl(url: string): string {
   const m = new URL(url).pathname.match(/^\/novel\/([^/]+)/);
-  if (!m) throw new SourceUrlError(`Sun Novels: ${url} is not a novel page URL.`);
+  if (!m) throw new SourceUrlError(`sunovels: ${url} is not a novel page URL.`);
   return decodeURIComponent(m[1]);
 }
 
@@ -147,7 +147,7 @@ export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage 
   // but both `h1` and `h3` are themselves empty.
   if (!title) {
     throw new Error(
-      `Sun Novels: couldn't find a novel title on ${pageUrl} (.main-head is missing or empty) — the layout may have changed, or this wasn't a real novel page.`,
+      `sunovels: couldn't find a novel title on ${pageUrl} (.main-head is missing or empty) — the layout may have changed, or this wasn't a real novel page.`,
     );
   }
 
@@ -197,7 +197,7 @@ export function parseChapterRows(doc: Document, slug: string, pageUrl: string): 
   const list = doc.querySelector(".chaptersList");
   if (!list) {
     throw new Error(
-      `Sun Novels: couldn't find the chapter list on ${pageUrl} (.chaptersList is missing) — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+      `sunovels: couldn't find the chapter list on ${pageUrl} (.chaptersList is missing) — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
     );
   }
   const out: SourceChapter[] = [];
@@ -243,7 +243,7 @@ export function parseChapterLines(doc: Document, chapterUrl: string): SourceLine
   const root = doc.querySelector(".chapter-content");
   if (!root) {
     throw new Error(
-      `Sun Novels: couldn't find the chapter body (.chapter-content) on ${chapterUrl} — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+      `sunovels: couldn't find the chapter body (.chapter-content) on ${chapterUrl} — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
     );
   }
 
@@ -263,7 +263,7 @@ export function parseChapterLines(doc: Document, chapterUrl: string): SourceLine
   // containers.
   if (lines.length === 0) {
     throw new Error(
-      `Sun Novels: chapter body (.chapter-content) at ${chapterUrl} parsed to zero lines of real text.`,
+      `sunovels: chapter body (.chapter-content) at ${chapterUrl} parsed to zero lines of real text.`,
     );
   }
 
@@ -472,14 +472,14 @@ function coverMapOrWarn(html: string, pageUrl: string, host: SourceHost): Map<st
     if (coverMap.size === 0) {
       host.log(
         "warn",
-        `Sun Novels: found no cover images in the RSC payload on ${pageUrl} — every card here will have coverUrl: undefined.`,
+        `sunovels: found no cover images in the RSC payload on ${pageUrl} — every card here will have coverUrl: undefined.`,
       );
     }
     return coverMap;
   } catch (err) {
     host.log(
       "warn",
-      `Sun Novels: failed to read covers out of the RSC payload on ${pageUrl}: ${err instanceof Error ? err.message : String(err)}`,
+      `sunovels: failed to read covers out of the RSC payload on ${pageUrl}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return new Map();
   }
@@ -579,14 +579,14 @@ export function parseHomeSections(doc: Document, pageUrl: string, host: SourceHo
     if (!title) {
       host.log(
         "warn",
-        `Sun Novels: skipped a home section on ${pageUrl} with no title (.section-header h3 missing or empty).`,
+        `sunovels: skipped a home section on ${pageUrl} with no title (.section-header h3 missing or empty).`,
       );
       continue;
     }
     const body = sec.querySelector(".section-body");
     const cards = body ? collectNovelCards(body) : [];
     if (cards.length === 0) {
-      host.log("warn", `Sun Novels: skipped home section "${title}" on ${pageUrl} — parsed to zero cards.`);
+      host.log("warn", `sunovels: skipped home section "${title}" on ${pageUrl} — parsed to zero cards.`);
       continue;
     }
     const viewMoreHref = sec
@@ -602,7 +602,7 @@ export function parseHomeSections(doc: Document, pageUrl: string, host: SourceHo
 
   if (sections.length === 0) {
     throw new Error(
-      `Sun Novels: no home sections found on ${pageUrl} (section.home-section is missing, or every section had no title or no cards) — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+      `sunovels: no home sections found on ${pageUrl} (section.home-section is missing, or every section had no title or no cards) — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
     );
   }
   return sections;
@@ -640,7 +640,7 @@ export function parseSearchResults(doc: Document, pageUrl: string): NovelCard[] 
   const list = doc.querySelector(".searchSection ul.grid-list");
   if (!list) {
     throw new Error(
-      `Sun Novels: couldn't find the search results grid (.searchSection ul.grid-list) on ${pageUrl} — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+      `sunovels: couldn't find the search results grid (.searchSection ul.grid-list) on ${pageUrl} — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
     );
   }
   return collectNovelCards(list);
@@ -784,7 +784,9 @@ export default function createSource(host: SourceHost): Source {
 
       for (let page = 0; page < totalPages; page++) {
         const url = chapterPageUrl(slug, page);
-        host.log("info", `getVolumeChapters(${novelUrl}) page ${page}/${totalPages - 1}`);
+        // debug, not info: a 1,582-chapter novel walks ~32 pages here, and
+        // per-page progress at info buries everything else in the log.
+        host.log("debug", `getVolumeChapters(${novelUrl}) page ${page}/${totalPages - 1}`);
         const resp = await host.fetch(url);
         // parseChapterRows throws (rather than returning []) when the
         // container is missing entirely — a blocked/errored page, not a
@@ -803,7 +805,9 @@ export default function createSource(host: SourceHost): Source {
     },
 
     async getChapterContent(chapter: SourceChapter): Promise<SourceLine[]> {
-      host.log("info", `getChapterContent(${chapter.url})`);
+      // debug, not info: one call per chapter of the import. Same level
+      // cenele and kolnovel use.
+      host.log("debug", `getChapterContent(${chapter.url})`);
       const resp = await host.fetch(chapter.url);
       return parseChapterLines(parseHtml(resp.text), chapter.url);
     },

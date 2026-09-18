@@ -21,6 +21,16 @@ import { createTestHost } from "@riwaq/extension-api/testing";
 // resolution involved) plus plain path-segment arithmetic sidesteps it entirely
 // — see extensions/cenele/tests/cenele.test.ts for the same pattern.
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
+/** This extension's own manifest id. Errors are prefixed with it (never
+ *  with a display name) because CONTRIBUTING.md's bug-report section asks
+ *  users for the id — reading it from the manifest here means renaming the
+ *  id without updating the error strings fails this suite. */
+const MANIFEST_ID = (
+  JSON.parse(readFileSync(join(FIXTURES_DIR, "..", "..", "manifest.json"), "utf8")) as {
+    id: string;
+  }
+).id;
+
 const novelsFixture = readFileSync(join(FIXTURES_DIR, "novels.json"), "utf8");
 const novelFixture = readFileSync(join(FIXTURES_DIR, "novel.json"), "utf8");
 
@@ -262,6 +272,22 @@ describe("search", () => {
     // Every match was seen exactly once across all pages: no duplicates,
     // no gaps, and the walk actually terminates (hasMore eventually false).
     expect(seenUrls.size).toBe(totalMatches);
+  });
+
+  it("returns a hollow result without fetching anything when the query is empty", async () => {
+    // `"".toLowerCase()` is a substring of every string, so filtering on an
+    // empty query used to match the ENTIRE catalogue and hand back its
+    // first PAGE_SIZE rows presented as search results, with hasMore: true.
+    // Every extension in this repo answers an empty query the same way now.
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(createTestHost({ calls }));
+    expect(await source.search("   ")).toEqual({
+      cards: [],
+      hasMore: false,
+      query: "",
+      page: 1,
+    });
+    expect(calls).toHaveLength(0);
   });
 
   it("returns an empty result rather than throwing when nothing matches", async () => {
@@ -533,7 +559,7 @@ describe("malformed API responses", () => {
       createTestHost({ responses: { "/api/novels": "<html>please enable JavaScript</html>" } }),
     );
     await expect(source.getHomeSections()).rejects.toThrow(
-      "Sea Novel: /api/novels did not return JSON (status 200).",
+      "seanovel: /api/novels did not return JSON (status 200).",
     );
   });
 
@@ -542,7 +568,7 @@ describe("malformed API responses", () => {
       createTestHost({ responses: { "/api/novel/x": "Service Unavailable" } }),
     );
     await expect(source.getNovel("https://seanovel.org/novels/x")).rejects.toThrow(
-      "Sea Novel: /api/novel/x did not return JSON (status 200).",
+      "seanovel: /api/novel/x did not return JSON (status 200).",
     );
   });
 
@@ -557,7 +583,7 @@ describe("malformed API responses", () => {
     };
     const source = createSource(host);
     await expect(source.getHomeSections()).rejects.toThrow(
-      "Sea Novel: /api/novels did not return JSON (status 503).",
+      "seanovel: /api/novels did not return JSON (status 503).",
     );
   });
 
@@ -571,7 +597,7 @@ describe("malformed API responses", () => {
       createTestHost({ responses: { "/api/novels": JSON.stringify({ error: "blocked" }) } }),
     );
     await expect(source.getHomeSections()).rejects.toThrow(
-      "Sea Novel: /api/novels did not return a list of novels.",
+      "seanovel: /api/novels did not return a list of novels.",
     );
   });
 
@@ -584,7 +610,7 @@ describe("malformed API responses", () => {
       createTestHost({ responses: { "/api/novel/x": JSON.stringify(null) } }),
     );
     await expect(source.getNovel("https://seanovel.org/novels/x")).rejects.toThrow(
-      "Sea Novel: /api/novel/x did not return a novel object.",
+      "seanovel: /api/novel/x did not return a novel object.",
     );
   });
 
@@ -597,7 +623,7 @@ describe("malformed API responses", () => {
       createTestHost({ responses: { "/api/novel/x": JSON.stringify([{ slug: "x" }]) } }),
     );
     await expect(source.getNovel("https://seanovel.org/novels/x")).rejects.toThrow(
-      "Sea Novel: /api/novel/x did not return a novel object.",
+      "seanovel: /api/novel/x did not return a novel object.",
     );
   });
 });
@@ -753,5 +779,26 @@ describe("getChapterContent", () => {
         lines: [],
       }),
     ).rejects.toThrow(/zero lines|chapter body/i);
+  });
+});
+
+describe("diagnostics", () => {
+  it("prefixes a thrown error with the manifest id, not a display name", () => {
+    expect(() => slugFromUrl("https://seanovel.org/about")).toThrow(
+      new RegExp(`^${MANIFEST_ID}: `),
+    );
+  });
+
+  it("logs per-chapter progress at debug, never at info", async () => {
+    // One call per chapter of an import; at info a 1,500-chapter novel
+    // emits 1,500 lines and buries everything else.
+    const logs: Array<{ level: string; message: string }> = [];
+    const source = createSource({
+      ...chapterHost(),
+      log: (level, message) => logs.push({ level, message }),
+    });
+    await source.getChapterContent({ id: 1, title: "c", url: CHAPTER_URL, lines: [] });
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.some((l) => l.level === "info")).toBe(false);
   });
 });

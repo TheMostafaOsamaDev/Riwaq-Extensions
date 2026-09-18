@@ -209,7 +209,7 @@ export default function createSource(host: SourceHost): Source {
         const ajax = extractNovelConfig(resp.text);
         if (!ajax) {
           throw new Error(
-            "Cenele: couldn't find nhvNovelV2 config — site layout may have changed.",
+            "cenele: couldn't find nhvNovelV2 config — site layout may have changed.",
           );
         }
         const meta = await fetchVolumeMeta(host, ajax.postId, ajax.chaptersNonce);
@@ -257,7 +257,7 @@ export default function createSource(host: SourceHost): Source {
       }
       if (!entry) {
         throw new Error(
-          `Cenele: couldn't resolve volume ${volume.id} — meta lookup mismatch.`,
+          `cenele: couldn't resolve volume ${volume.id} — meta lookup mismatch.`,
         );
       }
 
@@ -287,7 +287,7 @@ export default function createSource(host: SourceHost): Source {
         // rendered alongside the volumes accordion, which itself comes
         // from getNovel), but guard with a clear message.
         throw new Error(
-          "Cenele: searchChapters called before getNovel — internal state is missing.",
+          "cenele: searchChapters called before getNovel — internal state is missing.",
         );
       }
       const items = await callChapterSearch(
@@ -337,7 +337,7 @@ export default function createSource(host: SourceHost): Source {
       // parseChapterLines and seanovel's getChapterContent.
       if (lines.length === 0) {
         throw new Error(
-          `Cenele: chapter body at ${chapter.url} parsed to zero lines — the page ` +
+          `cenele: chapter body at ${chapter.url} parsed to zero lines — the page ` +
             "carried no readable paragraphs (the layout may have changed, or this " +
             "response was blocked/errored despite an HTTP 200).",
         );
@@ -481,7 +481,7 @@ async function fetchVolumeMeta(
   const parsed = safeJson<ChaptersPageResponse>(resp.text);
   if (!parsed || !parsed.success || !parsed.volumes) {
     throw new Error(
-      "Cenele: meta_only chapters request failed — server returned no volumes.",
+      "cenele: meta_only chapters request failed — server returned no volumes.",
     );
   }
   return parsed.volumes.map((v) => ({
@@ -515,7 +515,7 @@ async function fetchVolumeChapters(
     const parsed = safeJson<ChaptersPageResponse>(resp.text);
     if (!parsed || !parsed.success) {
       throw new Error(
-        `Cenele: failed to fetch chapters page ${page} for volume ${volume}.`,
+        `cenele: failed to fetch chapters page ${page} for volume ${volume}.`,
       );
     }
     const chunk = parseChapterListHtml(parsed.html, host);
@@ -614,7 +614,7 @@ async function callChapterSearch(
   });
   const parsed = safeJson<ChapterSearchResponse>(resp.text);
   if (!parsed || !parsed.success || !parsed.items) {
-    throw new Error("Cenele: chapter search returned an unexpected response.");
+    throw new Error("cenele: chapter search returned an unexpected response.");
   }
   return parsed.items.map((item) => {
     // Reuse the same prefix-+-subtitle composition as the volume
@@ -665,7 +665,7 @@ export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage 
   const config = extractNovelConfig(html);
   if (!config) {
     throw new Error(
-      `Cenele: couldn't find nhvNovelV2 config on ${pageUrl}. The site layout may have changed, or this isn't a novel page.`,
+      `cenele: couldn't find nhvNovelV2 config on ${pageUrl}. The site layout may have changed, or this isn't a novel page.`,
     );
   }
 

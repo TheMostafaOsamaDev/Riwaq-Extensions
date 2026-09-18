@@ -395,6 +395,18 @@ Three things about it are easy to mistake for bugs:
 - **Search is Enter-only.** Implement `search(query, page)`; there is no suggest/
   autocomplete method anywhere in the interface, and adding one yourself does nothing —
   the app never calls it.
+- **Prefix every thrown error with the manifest `id`.** `throw new Error(\`cenele: …\`)`,
+  not the site's display name — `CONTRIBUTING.md`'s bug-report section asks users for the
+  id, and an error branded "Sea Novel:" for `seanovel` sends them looking for something
+  that isn't in the catalogue. Each extension's test suite reads the id straight out of
+  its own `manifest.json` and asserts on it, so renaming one fails the build.
+- **An empty search query is a hollow result, not a request.** `search("")` returns
+  `{ cards: [], hasMore: false, query: "", page: <n> }` without calling the site. There is
+  nothing to search for; returning the front of the catalogue instead makes "no query" look
+  like a result set the user asked for.
+- **Per-chapter and per-page progress logs at `debug`, not `info`.** Importing a
+  1,500-chapter novel calls `getChapterContent` 1,500 times. One-per-user-action calls
+  (`getHomeSections`, `search`, `getNovel`) are the ones that belong at `info`.
 - **Bump the version on every code change.** `scripts/check-version-bump.ts` runs in CI
   on every PR and fails it if an already-published extension's files changed but its
   manifest `version` didn't move — a stale version means a host that treats `(id,

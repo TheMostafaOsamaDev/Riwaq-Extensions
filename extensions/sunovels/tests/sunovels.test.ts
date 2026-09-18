@@ -39,6 +39,16 @@ const chapterHtml = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
 // `section.home-section` rows actually live. See the src/index.ts file
 // header and the README for why the brief's own "library.html" fixture
 // name doesn't back getHomeSections here.
+/** This extension's own manifest id. Errors are prefixed with it (never
+ *  with a display name) because CONTRIBUTING.md's bug-report section asks
+ *  users for the id — reading it from the manifest here means renaming the
+ *  id without updating the error strings fails this suite. */
+const MANIFEST_ID = (
+  JSON.parse(readFileSync(join(FIXTURES_DIR, "..", "..", "manifest.json"), "utf8")) as {
+    id: string;
+  }
+).id;
+
 const homeHtml = readFileSync(join(FIXTURES_DIR, "home.html"), "utf8");
 // A real capture of `/search?title=<query>` — backs `search`/
 // `parseSearchResults`. Captured, and committed, UNSTRIPPED (full <head>,
@@ -1668,5 +1678,28 @@ describe("BASE_URL", () => {
   // with it, far from where the typo was introduced.
   it("is exactly the site's https origin, no trailing slash", () => {
     expect(BASE_URL).toBe("https://sunovels.com");
+  });
+});
+
+describe("diagnostics", () => {
+  it("prefixes a thrown error with the manifest id, not a display name", () => {
+    expect(() => slugFromUrl("https://sunovels.com/about")).toThrow(
+      new RegExp(`^${MANIFEST_ID}: `),
+    );
+  });
+
+  it("logs per-chapter and per-page progress at debug, never at info", async () => {
+    // A 1,582-chapter novel walks ~32 chapter-list pages and then calls
+    // getChapterContent once per chapter; at info that buries every other
+    // line in the log.
+    const logs: Array<{ level: string; message: string }> = [];
+    const chapterUrl = "https://sunovels.com/novel/abd-alzil/1";
+    const source = createSource({
+      ...createTestHost({ responses: { [chapterUrl]: chapterHtml } }),
+      log: (level, message) => logs.push({ level, message }),
+    });
+    await source.getChapterContent({ id: 1, title: "c", url: chapterUrl, lines: [] });
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.some((l) => l.level === "info")).toBe(false);
   });
 });
