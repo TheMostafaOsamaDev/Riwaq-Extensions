@@ -5,20 +5,31 @@ export default defineConfig({
     // Extension parsers need DOMParser; the whole suite is parser tests.
     environment: "happy-dom",
     include: ["packages/**/*.test.ts", "extensions/**/*.test.ts", "scripts/**/*.test.ts"],
-    // A fixture captured straight off a live page (an extension's own
-    // <script> chunk loaders, ad iframes, and — for a Next.js site — inline
-    // Suspense-boundary replacement scripts) is not inert under happy-dom
-    // the way it is in a real browser's DOMParser: happy-dom EXECUTES an
-    // inline <script> the moment it's parsed into a Document, even a
-    // detached one from `new DOMParser().parseFromString(...)`, and that
-    // execution throws (`Cannot read properties of null`) because the
-    // parsed document has no defaultView for the script to find its own
-    // elements against. Extensions in this repo only ever READ the parsed
-    // tree (e.g. cenele reads nhvNovelV2 out of a script's textContent, it
-    // never runs it; sunovels regexes chaptersCount out of one the same
-    // way) — so turning evaluation off changes nothing any extension can
-    // observe, and lets a fixture be captured and committed as a genuine,
-    // unedited live page instead of hand-stripped to dodge this.
+    // A fixture captured straight off a live page carries an external
+    // <script src> / <link> for every ads, analytics and framework chunk,
+    // plus (for a Next.js site) inline Suspense-replacement scripts and ad
+    // <iframe>s. None of that is inert under happy-dom the way it is in a
+    // real browser's DOMParser, and the two hazards are SEPARATE — measured
+    // against all four unstripped fixtures on happy-dom 15.11.7:
+    //
+    //   drop handleDisabledFileLoadingAsSuccess  -> 98 unhandled rejections
+    //   drop disableJavaScriptEvaluation         ->  0 errors, all parse
+    //
+    // So the thing that actually kills a run is the ERROR EVENT dispatched
+    // for each disabled external load, not inline evaluation: a throwing
+    // inline script is caught rather than fatal. handleDisabledFileLoading-
+    // AsSuccess is what fixes that, by making the disabled load report a
+    // synthetic "load" instead.
+    //
+    // disableJavaScriptEvaluation earns its place for a different reason:
+    // it stops an inline script from RUNNING and mutating the tree under
+    // test (a Next.js payload's `$RC(...)` rewrites Suspense boundaries in
+    // place). Every extension here only ever READS the parsed tree — cenele
+    // reads nhvNovelV2 out of a script's textContent, sunovels regexes
+    // chaptersCount out of one — and turning evaluation off leaves
+    // textContent fully readable, so nothing any extension can observe
+    // changes. Together they let a fixture be committed as a genuine,
+    // unedited live capture instead of hand-stripped to dodge the harness.
     environmentOptions: {
       happyDOM: {
         settings: {

@@ -371,7 +371,7 @@ card, in the page's inline RSC payload** — confirmed live on both `/` and
 as captured):
 
 ```
-{\"href\":\"/novel/reverend-insanity\",\"children\":[[\"$\",\"$L17\",null,
+{\"href\":\"/novel/reverend-insanity\",\"children\":[[\"$\",\"$L25\",null,
 {\"src\":\"/uploads/thumbnail_Gu_Daoist_Master_328fe7f8b7.jpg\",...}
 ```
 

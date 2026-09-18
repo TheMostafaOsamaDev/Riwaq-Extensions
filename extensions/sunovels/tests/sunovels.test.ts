@@ -1165,6 +1165,28 @@ describe("parseSearchResults", () => {
     const url = searchUrl("عبد");
     expect(() => parseSearchResults(doc, url)).toThrow(/grid-list/i);
   });
+
+  it("collects from the results grid only, not from the whole page", () => {
+    // The test above pins the GUARD — that a bare grid-list is refused.
+    // This pins the COLLECTION, which the guard cannot: every /novel/
+    // anchor in search.html happens to sit inside the grid, so that
+    // fixture cannot tell `collectNovelCards(list)` from
+    // `collectNovelCards(doc)`. A real page has novel links in its header
+    // and sidebar too, and those are not search results.
+    const doc = parseHtml(
+      `<html><body>` +
+        `<header><a href="/novel/header-link"><h4>Header Link</h4></a></header>` +
+        `<div class="searchSection"><ul class="grid-list">` +
+        `<li class="list-item"><a href="/novel/real-hit"><h4>Real Hit</h4></a></li>` +
+        `</ul></div>` +
+        `<footer><a href="/novel/footer-link"><h4>Footer Link</h4></a></footer>` +
+        `</body></html>`,
+    );
+    const cards = parseSearchResults(doc, searchUrl("x"));
+    expect(cards.map((c) => c.url)).toEqual([
+      "https://sunovels.com/novel/real-hit",
+    ]);
+  });
 });
 
 describe("search", () => {
@@ -1227,10 +1249,19 @@ describe("search", () => {
   // results at all, it only parses and returns them, however the query
   // was cased.
   it("passes the query straight through to the URL, cased exactly as given", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
     const source = createSource(
-      createTestHost({ responses: { [searchUrl("MiXeDcAsE")]: searchEmptyHtml } }),
+      createTestHost({
+        responses: { [searchUrl("MiXeDcAsE")]: searchEmptyHtml },
+        calls,
+      }),
     );
     const r = await source.search("MiXeDcAsE");
+    // A LITERAL, not `searchUrl("MiXeDcAsE")`. Comparing the recorded URL
+    // against the very function that built it is a tautology: a mutant
+    // that lowercased inside searchUrl would change both sides equally
+    // and pass. (Confirmed — the first version of this assertion did.)
+    expect(calls[0].url).toBe("https://sunovels.com/search?title=MiXeDcAsE");
     expect(r.query).toBe("MiXeDcAsE");
   });
 
