@@ -1,0 +1,14 @@
+{
+  "id": "sunovels",
+  "name": "شمس الروايات",
+  "version": "1.0.6",
+  "apiVersion": 1,
+  "language": "ar",
+  "baseUrl": "https://sunovels.com",
+  "icon": "icon.png",
+  "description": {
+    "en": "Arabic translated and original web novels, updated daily.",
+    "ar": "روايات ويب مترجمة ومؤلفة بالعربية، بتحديثات يومية."
+  },
+  "author": "Riwaq"
+}

@@ -1,0 +1,594 @@
+// Sun Novels (شمس الروايات) source — sunovels.com. An Arabic site hosting
+// translated and original web novels.
+//
+// Unlike its sibling extensions/cenele or extensions/kolnovel, this site
+// has no JSON API to speak of: every `/api/*` path 404s and its `/dev`
+// route is a changelog, not documentation. Everything here is scraped
+// from server-rendered HTML.
+//
+// A trap worth recording before anyone reaches for `document.querySelector`
+// on this site: a novel page's FIRST `<h1>` is the site name, not the
+// novel's title (`h1 -> ["شمس الروايات", "Shadow Slave"]`, `h3 ->
+// ["عبد الظل"]`). An unscoped `querySelector("h1")` would title every card
+// after the website. Selectors that reach for the novel's own headings
+// scope to `.main-head h1` / `.main-head h3` for exactly this reason — and
+// on THIS site `h1` is the original-language title and `h3` is the Arabic
+// one, the inverse of extensions/seanovel. Do not carry that assumption
+// across.
+//
+// `canHandle`, `slugFromUrl`, `getNovel`, `getVolumeChapters`,
+// `getChapterContent`, `getHomeSections` and `search` are all implemented.
+//
+// `getHomeSections` reads the homepage (`/`) — NOT `/library` — because
+// `/` is the page that actually carries titled `section.home-section`
+// blocks (e.g. "أشهر الروايات", "روايات كورية", "أحدث الفصول"); `/library`
+// itself is one flat, paginated grid with no section concept at all. See
+// parseHomeSections below and the README.
+//
+// `search` hits the site's own `/search` page with `?title=<query>` — the
+// one param shape (of five tried, driving the live search FORM rather than
+// guessing at names) that actually renders results server-side. It's a
+// single request: the results page has no pagination of its own (no
+// numeric pager, `&page=` has no effect), so `hasMore` is always `false`,
+// the same convention extensions/kolnovel uses for the identical shape.
+// See searchUrl/parseSearchResults below and the README for the other four
+// params tried and what each one returned.
+//
+// Every card grid this site renders — home sections, /library, search
+// results alike — serves its cover images lazy-loaded: the STATIC markup
+// `host.fetch` sees always carries `src="/placeholder.gif"` for a card's
+// `<img>`. The real `/uploads/...` path IS present, per card, in the
+// page's inline Next.js RSC payload (confirmed live: 111/111 homepage
+// hrefs paired with a payload entry, 54 of them carrying a real cover
+// path; 4/4 on a search result) — but extracting it would mean parsing
+// that payload's React Flight wire format, not just querying the DOM,
+// and is not implemented here. See the README's "cover gap" section for
+// the exact evidence and what a follow-up would need to do.
+import {
+  absoluteUrl,
+  parseHtml,
+  sanitizeText,
+  SourceUrlError,
+  type NovelCard,
+  type Source,
+  type SourceChapter,
+  type SourceHost,
+  type SourceLine,
+  type SourceNovel,
+  type SourceSearchResult,
+  type SourceSection,
+  type SourceVolume,
+} from "@riwaq/extension-api";
+import { strings } from "./strings";
+
+/** The chapter-list tab serves exactly 50 rows per page — measured
+ *  directly against the live site, scoped to `.chaptersList`. */
+const PER_PAGE = 50;
+
+// Exported so the later tasks that build getHomeSections/search/getNovel/
+// getChapterContent against this manifest's baseUrl (all landing in this
+// same file) have one source of truth for it, matching how it's used here.
+export const BASE_URL = "https://sunovels.com";
+const HOSTS = new Set(["sunovels.com", "www.sunovels.com"]);
+
+/** Both `/novel/<slug>` and `/novel/<slug>/<n>` yield <slug>. */
+export function slugFromUrl(url: string): string {
+  const m = new URL(url).pathname.match(/^\/novel\/([^/]+)/);
+  if (!m) throw new SourceUrlError(`Sun Novels: ${url} is not a novel page URL.`);
+  return decodeURIComponent(m[1]);
+}
+
+/** The site streams a Next.js RSC payload inline (a `self.__next_f.push(...)`
+ *  script whose argument is itself a JSON-escaped string), and that payload
+ *  — not the rendered markup anywhere on the page — carries the novel's
+ *  authoritative chapter count. Regexing the raw HTML for it is cheaper and
+ *  more robust than trying to locate and JSON.parse the right push() call.
+ *
+ *  Critically, this is NOT the same number as the highest chapter number
+ *  the novel has: chapter numbering is sparse (this extension's example
+ *  novel reports 1582 chapters whose newest is numbered 1611), so nothing
+ *  downstream may assume `chaptersCount` chapters means chapters `1..count`
+ *  exist, or that this count equals the last chapter's number.
+ *
+ *  Residual assumption: this takes the FIRST `chaptersCount` match
+ *  anywhere in the raw HTML, unscoped to this novel's own RSC payload
+ *  chunk. Every fixture captured so far has exactly one occurrence, so
+ *  this hasn't been shown wrong — but if a future page ever streams a
+ *  second novel's data alongside this one (a "related novels" rail with
+ *  its own count, say), this would need to scope to the chunk that also
+ *  contains this novel's own slug/title instead of matching blindly. */
+export function parseChaptersCount(html: string): number {
+  const m = html.match(/chaptersCount\\?":\s*(\d+)/);
+  return m ? Number.parseInt(m[1], 10) : 0;
+}
+
+interface ParsedNovelPage {
+  title: string;
+  originalTitle?: string;
+  coverUrl?: string;
+  tags: string[];
+}
+
+/** Scoped to `.main-head h1` / `.main-head h3` rather than a bare
+ *  `h1`/`h3` — a novel page's FIRST `<h1>` is the site's own name
+ *  ("شمس الروايات" — rendered in the header's nav, outside `.main-head`
+ *  entirely), not the novel's title. An unscoped `querySelector("h1")`
+ *  would title every card after the website instead of the novel. Do NOT
+ *  "simplify" these back to bare `h1`/`h3` selectors.
+ *
+ *  On THIS site `h1` is the ORIGINAL-language title and `h3` is the
+ *  Arabic one — the inverse of extensions/seanovel, where `h1` is Arabic.
+ *  Getting this backwards produces a plausible-looking card that is
+ *  simply wrong: both fields are real title strings, so nothing type-checks
+ *  or throws to catch the swap.
+ *
+ *  `pageUrl` is used only to name the offending page in the error below —
+ *  it plays no part in parsing. */
+export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage {
+  const originalTitle = sanitizeText(doc.querySelector(".main-head h1")?.textContent) || undefined;
+  const arabicTitle = sanitizeText(doc.querySelector(".main-head h3")?.textContent);
+  // The Arabic title is the primary `title` field; fall back to the
+  // original when a novel's page has no h3 at all (an Arabic-original
+  // novel with nothing to translate FROM, going by this site's own
+  // pairing convention above).
+  const title = arabicTitle || originalTitle || "";
+
+  // A missing `.main-head` — a layout change, an anti-bot interstitial or
+  // an error page served with HTTP 200, a redirect that lands somewhere
+  // else entirely — must not silently produce a structurally valid but
+  // empty SourceNovel: that's indistinguishable from a real novel that
+  // legitimately has no title, which never happens on this site. Refuse
+  // loudly instead, the same way slugFromUrl refuses a non-novel URL.
+  // Checking the derived `title` (rather than re-querying `.main-head`
+  // separately) also catches the rarer case where the container exists
+  // but both `h1` and `h3` are themselves empty.
+  if (!title) {
+    throw new Error(
+      `Sun Novels: couldn't find a novel title on ${pageUrl} (.main-head is missing or empty) — the layout may have changed, or this wasn't a real novel page.`,
+    );
+  }
+
+  const coverSrc = doc.querySelector("figure.cover img")?.getAttribute("src") || undefined;
+  const coverUrl = coverSrc ? absoluteUrl(coverSrc, BASE_URL) : undefined;
+
+  const tags = Array.from(doc.querySelectorAll("a.tag"))
+    .map((a) => sanitizeText(a.textContent))
+    .filter((s) => s.length > 0);
+
+  return { title, originalTitle, coverUrl, tags };
+}
+
+/** `page` is 0-indexed — the site's own pagination starts at 0, and a
+ *  1-indexed guess would silently skip the first fifty chapters of every
+ *  novel. Measured directly against the live site, scoped to
+ *  `.chaptersList`: `page=0` returns chapters 1-50, `page=1` returns
+ *  51-100. */
+export function chapterPageUrl(slug: string, page: number): string {
+  return `${BASE_URL}/novel/${slug}?activeTab=chapters&page=${page}`;
+}
+
+/** Rows are read from `.chaptersList` ONLY. The page header links the
+ *  first and newest chapters on EVERY page (a `nav.header-links` pair
+ *  plus a `.intro` "last chapter you read" link) — collecting anchors
+ *  from the whole document instead of this container would duplicate
+ *  those into all ~32 pages of a long novel. `seen` also de-duplicates
+ *  within this one page's rows, defensively, though the site has not
+ *  been observed to repeat a row inside `.chaptersList` itself.
+ *
+ *  A MISSING container and an EMPTY one are deliberately told apart:
+ *
+ *  - `.chaptersList` present but with no matching rows means this page
+ *    genuinely has no more chapters (the real end of the list) — return
+ *    `[]`, and `getVolumeChapters`'s loop stops there, as intended.
+ *  - `.chaptersList` absent entirely means this response is not a
+ *    chapter-listing page at all — the same 200-status "blocked" shape
+ *    `getNovel`'s own tests exercise for `.main-head`. Returning `[]`
+ *    here would be indistinguishable from a real end-of-list to
+ *    `getVolumeChapters`, silently truncating the chapter list at
+ *    whichever page happened to be blocked (a transient anti-bot
+ *    response or CDN hiccup on page 12 of 32 would quietly cut a
+ *    1500+-chapter novel down to ~550, with nothing anywhere saying so).
+ *    Throw instead, naming the offending page URL — the same principle
+ *    as `parseNovelPage`'s guard on a missing `.main-head`. */
+export function parseChapterRows(doc: Document, slug: string, pageUrl: string): SourceChapter[] {
+  const list = doc.querySelector(".chaptersList");
+  if (!list) {
+    throw new Error(
+      `Sun Novels: couldn't find the chapter list on ${pageUrl} (.chaptersList is missing) — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+    );
+  }
+  const out: SourceChapter[] = [];
+  const seen = new Set<string>();
+  for (const a of Array.from(list.querySelectorAll(`a[href^="/novel/${slug}/"]`))) {
+    const href = a.getAttribute("href");
+    if (!href || seen.has(href)) continue;
+    const num = Number.parseInt(href.split("/").pop() ?? "", 10);
+    if (!Number.isFinite(num)) continue;
+    const title = sanitizeText(a.querySelector(".chapter-title")?.textContent ?? a.textContent);
+    if (!title) continue;
+    seen.add(href);
+    out.push({ id: num, title, url: absoluteUrl(href, BASE_URL), lines: [] });
+  }
+  return out;
+}
+
+/** Scoped to `.chapter-content` — the chapter body container on a chapter
+ *  page.
+ *
+ *  The site salts every real paragraph in `.chapter-content` with a
+ *  matching decoy sibling, `<p class="d-none">` — a scraper trap, not
+ *  real content, invisible on the rendered page (`d-none` is a
+ *  `display: none` utility class) but sitting right in the markup a
+ *  naive `querySelectorAll("p")` would collect right along with the real
+ *  text. In the fixture captured for this task the split was close to
+ *  1:1 (94 real paragraphs to 95 decoys): an implementation that didn't
+ *  filter these out wouldn't just add a little noise, it would roughly
+ *  double the chapter's line count and interleave garbage into every
+ *  other line. Every real paragraph observed on this site so far is a
+ *  bare `<p>` with no attributes at all, so `classList.contains("d-none")`
+ *  cleanly tells the two apart without needing to inspect content.
+ *
+ *  A handful of real (non-decoy) paragraphs are themselves genuinely
+ *  empty (`<p></p>`, a blank-line spacer between scenes) — sanitizeText
+ *  plus the `if (content)` check below drops those the same way a
+ *  missing textContent would, so they never surface as blank lines the
+ *  reader would render as visible gaps.
+ *
+ *  `chapterUrl` names the offending page in both error messages below;
+ *  it plays no part in parsing. */
+export function parseChapterLines(doc: Document, chapterUrl: string): SourceLine[] {
+  const root = doc.querySelector(".chapter-content");
+  if (!root) {
+    throw new Error(
+      `Sun Novels: couldn't find the chapter body (.chapter-content) on ${chapterUrl} — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+    );
+  }
+
+  const lines: SourceLine[] = [];
+  for (const p of Array.from(root.querySelectorAll("p"))) {
+    if (p.classList.contains("d-none")) continue; // decoy paragraph — see above
+    const content = sanitizeText(p.textContent);
+    if (content) lines.push({ type: "text", content });
+  }
+
+  // A container that's present but yields no real text lines (every
+  // paragraph was a decoy, or the real ones were all empty) is the same
+  // failure mode as a missing container entirely: the reader would
+  // silently render a blank chapter, indistinguishable from the site
+  // legitimately having nothing here. Refuse loudly instead, the same
+  // way parseNovelPage and parseChapterRows already do for their own
+  // containers.
+  if (lines.length === 0) {
+    throw new Error(
+      `Sun Novels: chapter body (.chapter-content) at ${chapterUrl} parsed to zero lines of real text.`,
+    );
+  }
+
+  return lines;
+}
+
+// ── home sections + search: shared card extraction ─────────────────────
+
+/** Placeholder `src` every lazy-loaded cover image on this site's card
+ *  grids carries in the server-rendered HTML, before client JS swaps in
+ *  the real image. It is NOT a real cover — see the comment on
+ *  `parseCardAnchor` below for why nothing here can do better than this
+ *  without executing JS. */
+const LAZY_PLACEHOLDER_SRC = "/placeholder.gif";
+
+/** Builds one `NovelCard` from a single `a[href^="/novel/"]` anchor, or
+ *  returns null if this anchor cannot contribute a card on its own.
+ *
+ *  Two facts drive this, both measured against the live homepage:
+ *
+ *  - A **chapter** link (`/novel/<slug>/<n>`) has three path segments,
+ *    not two; `href` is checked for exactly two so chapter anchors (the
+ *    homepage's "أحدث الفصول"/"latest chapters" rail links each novel's
+ *    newest chapter alongside the novel itself) are never mistaken for a
+ *    card.
+ *  - Some cards are split across TWO anchors sharing the same href: that
+ *    same "أحدث الفصول" rail wraps its cover image in one bare
+ *    `<a class="cover" href="...">` with no heading at all, and the
+ *    title in a SEPARATE `<a href="...">` immediately after it. An
+ *    anchor with no heading inside it cannot name a card — returning
+ *    null here (rather than a card with an empty title) lets the caller
+ *    skip it and pick up the sibling anchor that DOES carry the heading
+ *    instead, rather than emitting a title-less card.
+ *
+ *  Cover images on every card grid this site renders are lazy-loaded:
+ *  the static HTML `host.fetch` sees always carries
+ *  `src="/placeholder.gif"` (confirmed against the live homepage and
+ *  /library — none of their card images resolve to a real `/uploads/...`
+ *  path without running client JS), unlike a novel's own detail page
+ *  whose hero cover is not lazy. Treating the placeholder as "no cover"
+ *  (`undefined`, same as a card whose anchor has no `<img>` at all) is
+ *  deliberate: NovelCard.coverUrl documents that some layouts don't
+ *  surface a cover, and a real image is worth waiting for over shipping
+ *  every card with the literal placeholder gif. */
+export function parseCardAnchor(a: Element): NovelCard | null {
+  const href = a.getAttribute("href");
+  if (!href) return null;
+  const segments = href.split(/[?#]/)[0].split("/").filter(Boolean);
+  if (segments.length !== 2 || segments[0] !== "novel") return null;
+
+  const title = sanitizeText(a.querySelector("h2, h3, h4")?.textContent);
+  if (!title) return null;
+
+  const coverSrc = a.querySelector("img")?.getAttribute("src") || undefined;
+  const coverUrl =
+    coverSrc && coverSrc !== LAZY_PLACEHOLDER_SRC ? absoluteUrl(coverSrc, BASE_URL) : undefined;
+
+  return { url: absoluteUrl(href, BASE_URL), title, coverUrl };
+}
+
+/** Collects one `NovelCard` per distinct novel `href` under `root`, in
+ *  document order. `seen` is keyed by the card's own (absolutised) URL,
+ *  not the raw `href`, and is only marked once `parseCardAnchor` actually
+ *  produces a card — an anchor that returns null (see above) never
+ *  blocks its sibling anchor for the same novel from contributing the
+ *  card afterwards. */
+export function collectNovelCards(root: ParentNode): NovelCard[] {
+  const seen = new Set<string>();
+  const cards: NovelCard[] = [];
+  for (const a of Array.from(root.querySelectorAll('a[href^="/novel/"]'))) {
+    const card = parseCardAnchor(a);
+    if (!card || seen.has(card.url)) continue;
+    seen.add(card.url);
+    cards.push(card);
+  }
+  return cards;
+}
+
+/** Scoped to `section.home-section` — the homepage renders each themed
+ *  row ("أشهر الروايات", "روايات إثارة", "روايات يابانية", "روايات كورية",
+ *  "أحدث الفصول" as of this task) as one of these, in document order.
+ *  `/library` (the page a naive reading of "browse novels" might reach
+ *  for) is a DIFFERENT page entirely: one flat, paginated grid with no
+ *  section headings of its own — see the file header and README. Each
+ *  section's own title comes from `.section-header h3`, deliberately
+ *  scoped rather than a bare `h3`: a card inside "أحدث الفصول" also uses
+ *  `<h3>` for its own title (see parseCardAnchor), and an unscoped
+ *  `sec.querySelector("h3")` would happen to still find the section's own
+ *  heading first by document order today, but only by luck — a future
+ *  markup change that moved the section header after its body would
+ *  silently retitle every "أحدث الفصول" section after its first card.
+ *  `viewMoreUrl` reads the section header's own "المزيد" (more) link,
+ *  when the section has one (e.g. "أحدث الفصول" doesn't).
+ *
+ *  A page with NO recognizable sections at all — a layout change, an
+ *  anti-bot interstitial, or an error page served with HTTP 200 — must
+ *  not silently produce `[]`: that's indistinguishable from every
+ *  section legitimately having no cards, which the live site has never
+ *  been observed to do. Refuse loudly instead, naming the offending
+ *  page, the same principle `parseNovelPage`/`parseChapterRows`/
+ *  `parseChapterLines` already apply to their own containers.
+ *
+ *  A single BAD section — present, but with no title or that parsed to
+ *  zero cards — is a different, more survivable failure: dropping it
+ *  keeps the rest of the homepage usable instead of taking down every
+ *  other row over one markup change to a single rail. It is NOT silent,
+ *  though — `host.log("warn", ...)` names which section was skipped and
+ *  why, so a layout drift shows up in logs instead of just quietly
+ *  shrinking the homepage with nothing anywhere saying so. `host` is
+ *  threaded in for exactly this (this function is otherwise a pure DOM
+ *  reader) — the same shape `extensions/kolnovel`'s own
+ *  `parseHomeSections(doc, baseUrl, host)` already takes. */
+export function parseHomeSections(doc: Document, pageUrl: string, host: SourceHost): SourceSection[] {
+  const sections: SourceSection[] = [];
+  let idx = 0;
+  for (const sec of Array.from(doc.querySelectorAll("section.home-section"))) {
+    const title = sanitizeText(sec.querySelector(".section-header h3")?.textContent);
+    if (!title) {
+      host.log(
+        "warn",
+        `Sun Novels: skipped a home section on ${pageUrl} with no title (.section-header h3 missing or empty).`,
+      );
+      continue;
+    }
+    const body = sec.querySelector(".section-body");
+    const cards = body ? collectNovelCards(body) : [];
+    if (cards.length === 0) {
+      host.log("warn", `Sun Novels: skipped home section "${title}" on ${pageUrl} — parsed to zero cards.`);
+      continue;
+    }
+    const viewMoreHref = sec
+      .querySelector('.section-header a[href^="/library"]')
+      ?.getAttribute("href");
+    sections.push({
+      id: `home-${idx}`,
+      title,
+      cards,
+      viewMoreUrl: viewMoreHref ? absoluteUrl(viewMoreHref, BASE_URL) : undefined,
+    });
+    idx++;
+  }
+
+  if (sections.length === 0) {
+    throw new Error(
+      `Sun Novels: no home sections found on ${pageUrl} (section.home-section is missing, or every section had no title or no cards) — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+    );
+  }
+  return sections;
+}
+
+// ── search ───────────────────────────────────────────────────────────────
+
+/** The site's own search form posts here as `?title=<query>` — found by
+ *  driving the live search input directly (`fill` + `Enter`) and reading
+ *  the URL it produced, not by guessing at a param name. `q`/`query`/`s`/
+ *  `term` (the brief's own candidate list) were all tried first and each
+ *  rendered the identical empty `<ul class="grid-list"></ul>` shell
+ *  server-side regardless of value — see the README for that evidence.
+ *  `title` is the one that actually returns matching novel cards from a
+ *  plain `host.fetch`, no client JS required. */
+export function searchUrl(query: string): string {
+  return `${BASE_URL}/search?${new URLSearchParams({ title: query })}`;
+}
+
+/** Rows are read from `.searchSection ul.grid-list` — scoped past the bare
+ *  `ul.grid-list` selector `/library` also uses, since a page that failed
+ *  to render the search section at all should still be told apart from
+ *  one that rendered it empty, the same distinction every other
+ *  container in this file draws (see `parseChapterRows`, whose own
+ *  comment describes this exact failure mode almost word for word): a
+ *  MISSING grid means this response isn't really a search-results page
+ *  (blocked/errored despite an HTTP 200) and must throw, naming the URL.
+ *  A grid that's PRESENT but empty is the real, correct "nothing on the
+ *  site matched this query" result (confirmed live: a query with no
+ *  matches renders exactly this) and must return `[]`, never throw —
+ *  that distinction is the whole reason `search()` below can return
+ *  `cards: []` instead of rejecting when a query genuinely matches
+ *  nothing. */
+export function parseSearchResults(doc: Document, pageUrl: string): NovelCard[] {
+  const list = doc.querySelector(".searchSection ul.grid-list");
+  if (!list) {
+    throw new Error(
+      `Sun Novels: couldn't find the search results grid (.searchSection ul.grid-list) on ${pageUrl} — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+    );
+  }
+  return collectNovelCards(list);
+}
+
+export default function createSource(host: SourceHost): Source {
+  return {
+    // The novel page's chapter list lives behind a paginated tab (50 rows
+    // per page, dozens of pages for a long-running novel) rather than
+    // being inlined in getNovel's response — see Task 3's getVolumeChapters.
+    // getNovel instead returns one pseudo-volume with the total count so
+    // the UI can render a "(N chapters)" badge and the right number of
+    // skeleton rows before anything is expanded.
+    hasLazyVolumes: true,
+
+    canHandle(url: string): boolean {
+      try {
+        return HOSTS.has(new URL(url).hostname);
+      } catch {
+        return false;
+      }
+    },
+
+    async getHomeSections(): Promise<SourceSection[]> {
+      const url = `${BASE_URL}/`;
+      host.log("info", "getHomeSections");
+      const resp = await host.fetch(url);
+      return parseHomeSections(parseHtml(resp.text), url, host);
+    },
+
+    /** A single request to `/search?title=<query>` — see the file header
+     *  for why `title` and not one of the other four params tried. The
+     *  results page has no pagination of its own at all (no numeric
+     *  pager anywhere in the markup, and live requests with `&page=<n>`
+     *  tacked on return byte-identical results) — the same shape
+     *  extensions/kolnovel's own search hits (every match on one page,
+     *  no working "load more"), so `page` is ignored entirely and
+     *  `hasMore` is hardcoded `false` rather than trusted from anything
+     *  on the page. There is nothing here to memoise: each query is one
+     *  cheap, independent request, not a multi-page scan. */
+    async search(query: string): Promise<SourceSearchResult> {
+      const trimmed = query.trim();
+      // An empty query is not "no results" in the refuse-loudly sense
+      // this extension otherwise applies to a failed parse — it is a
+      // real, correct empty result (nothing to search for), so it
+      // returns a hollow SourceSearchResult on purpose rather than
+      // hitting the site for nothing.
+      if (!trimmed) {
+        return { cards: [], hasMore: false, query: trimmed, page: 1 };
+      }
+      const url = searchUrl(trimmed);
+      host.log("info", `search(${trimmed}) -> ${url}`);
+      const resp = await host.fetch(url);
+      const cards = parseSearchResults(parseHtml(resp.text), url);
+      return { cards, hasMore: false, query: trimmed, page: 1 };
+    },
+
+    async getNovel(url: string): Promise<SourceNovel> {
+      const slug = slugFromUrl(url);
+      host.log("info", `getNovel(${url})`);
+      const resp = await host.fetch(url);
+      const parsed = parseNovelPage(parseHtml(resp.text), url);
+
+      return {
+        title: parsed.title,
+        // The page does not surface an author anywhere in its rendered
+        // markup (verified against the live site) — "" is the deliberate
+        // contract for "unknown", never a literal "Unknown"; the host
+        // localises the empty case at display time.
+        author: "",
+        originalTitle: parsed.originalTitle,
+        language: "ar",
+        direction: "rtl",
+        coverUrl: parsed.coverUrl,
+        tags: parsed.tags,
+        meta: [],
+        volumes: [
+          {
+            id: 1,
+            title: strings(host.locale)("allChapters"),
+            chapters: [],
+            chapterCount: parseChaptersCount(resp.text),
+            // Carries the slug forward for getVolumeChapters (Task 3) to
+            // rebuild the paginated chapter-list URL from, since our own
+            // 1-based `id` has no relation to the site's own addressing.
+            key: slug,
+          },
+        ],
+      };
+    },
+
+    /** Walks the paginated `.chaptersList` tab from page 0, sequentially
+     *  (never concurrently — 32 requests fired at once at a third-party
+     *  site invites rate-limiting for no gain on a list the user is
+     *  waiting to scroll), and stops as soon as a page yields no rows.
+     *
+     *  Page count is derived from `volume.chapterCount`
+     *  (`Math.ceil(count / PER_PAGE)`, at least 1) rather than a
+     *  hardcoded number — that count drifts daily as the site adds
+     *  chapters, and chapter numbering itself is sparse (this
+     *  extension's example novel has 1582 chapters whose newest is
+     *  numbered 1611). This bounds the OVER-counting case: nothing here
+     *  may assume the real list runs out exactly where `chapterCount`
+     *  predicts, so the empty-page stop (see `parseChapterRows`) is what
+     *  actually terminates the loop, not reaching the computed page
+     *  count. It does NOT cover the opposite, UNDER-counting case — if
+     *  the site has grown past what `chapterCount` reported (stale by
+     *  the time this runs), the loop never attempts the later pages at
+     *  all, and nothing here signals that under-fetch either.
+     *
+     *  The slug comes from `volume.key` (set by getNovel) rather than
+     *  re-deriving it from `novelUrl`, since `key` is the value this
+     *  source's own getNovel stashed there for exactly this call — see
+     *  the comment on that assignment. `slugFromUrl(novelUrl)` is kept
+     *  only as a fallback for a volume whose `key` is somehow absent. */
+    async getVolumeChapters(novelUrl: string, volume: SourceVolume): Promise<SourceChapter[]> {
+      const slug = volume.key || slugFromUrl(novelUrl);
+      const totalPages = Math.max(1, Math.ceil((volume.chapterCount ?? 0) / PER_PAGE));
+      const seen = new Set<string>();
+      const chapters: SourceChapter[] = [];
+
+      for (let page = 0; page < totalPages; page++) {
+        const url = chapterPageUrl(slug, page);
+        host.log("info", `getVolumeChapters(${novelUrl}) page ${page}/${totalPages - 1}`);
+        const resp = await host.fetch(url);
+        // parseChapterRows throws (rather than returning []) when the
+        // container is missing entirely — a blocked/errored page, not a
+        // genuine end of list — so that failure propagates out of this
+        // call instead of being silently treated as "no more chapters".
+        const rows = parseChapterRows(parseHtml(resp.text), slug, url);
+        if (rows.length === 0) break;
+        for (const c of rows) {
+          if (seen.has(c.url)) continue;
+          seen.add(c.url);
+          chapters.push(c);
+        }
+      }
+
+      return chapters;
+    },
+
+    async getChapterContent(chapter: SourceChapter): Promise<SourceLine[]> {
+      host.log("info", `getChapterContent(${chapter.url})`);
+      const resp = await host.fetch(chapter.url);
+      return parseChapterLines(parseHtml(resp.text), chapter.url);
+    },
+  };
+}
