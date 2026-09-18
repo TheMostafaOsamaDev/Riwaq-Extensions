@@ -40,10 +40,13 @@
 // `<img>`. The real `/uploads/...` path IS present, per card, in the
 // page's inline Next.js RSC payload (confirmed live: 111/111 homepage
 // hrefs paired with a payload entry, 54 of them carrying a real cover
-// path; 4/4 on a search result) — but extracting it would mean parsing
-// that payload's React Flight wire format, not just querying the DOM,
-// and is not implemented here. See the README's "cover gap" section for
-// the exact evidence and what a follow-up would need to do.
+// path; 4/4 on a search result) — `parseCoverMap` below reads it straight
+// out of the raw response text with a bounded regex (the same technique
+// `parseChaptersCount` already uses on this same payload), rather than
+// doing a real JSON.parse of the Flight wire format — and `getHomeSections`/
+// `search` apply it to every card they return, keyed by the card's own
+// href. See parseCoverMap's own comment and the README's "cover gap"
+// section for the exact evidence this was built from.
 import {
   absoluteUrl,
   parseHtml,
@@ -339,6 +342,149 @@ export function collectNovelCards(root: ParentNode): NovelCard[] {
   return cards;
 }
 
+// ── cover extraction from the inline RSC payload ────────────────────────
+
+/** Matches one `\"href\":\"/novel/<slug>\"` occurrence exactly as it sits
+ *  in the raw response text — i.e. still JSON-string-escaped, because
+ *  this text is itself the argument of a `self.__next_f.push(...)` call,
+ *  not something already unescaped. Confirmed against home.html: every
+ *  occurrence of this shape is escaped this way; there is no unescaped
+ *  `"href":"/novel/` anywhere on the page (the rendered DOM anchors use
+ *  `href="/novel/..."`, a completely different, non-JSON shape, so the
+ *  two can never be confused). */
+const PAYLOAD_HREF_RE = /\\"href\\":\\"(\/novel\/[^"\\]*)\\"/g;
+
+/** Matches the FIRST real cover path inside whatever window it's given —
+ *  see parseCoverMap below for how that window is chosen per href. */
+const PAYLOAD_SRC_RE = /\\"src\\":\\"(\/uploads\/[^"\\]*)\\"/;
+
+/** Reads every card's cover straight out of the page's inline Next.js RSC
+ *  payload, keyed by the card's own (absolutized) URL — the one thing the
+ *  static, lazy-loaded DOM markup can never supply (see the file header
+ *  and `parseCardAnchor`'s own comment on `LAZY_PLACEHOLDER_SRC`).
+ *
+ *  How a cover is associated with its card, established directly against
+ *  home.html and search.html rather than assumed: every occurrence of
+ *  `\"href\":\"/novel/<slug>\"` in the payload owns, at most, ONE nearby
+ *  `\"src\":\"/uploads/...\"` — and that `src`, when it exists, is always
+ *  emitted strictly BETWEEN this href occurrence and whichever `href`
+ *  token comes textually NEXT in the payload, never further out. Two
+ *  shapes were observed to produce this:
+ *
+ *   - An ordinary grid card: one `href` object whose own `children` opens
+ *     with the `$L25` image element carrying `src`, immediately followed
+ *     by the title. The `src` sits a few dozen characters after `href`.
+ *   - The homepage's "أحدث الفصول" rail, which — exactly like the DOM it
+ *     renders (see `parseCardAnchor`) — splits ONE novel across TWO
+ *     separate payload objects sharing the identical `href`: a
+ *     `"className":"cover"` object carrying only the image (with `src`),
+ *     immediately followed by a second, plain object carrying only the
+ *     title (no `src` at all). Whichever of the pair
+ *     is scanned first, this function's own per-occurrence loop (below)
+ *     keeps looking at LATER occurrences of the same href until one
+ *     actually yields a `src`, rather than latching onto the first
+ *     occurrence regardless of whether it had one — so it doesn't matter
+ *     which of the two anchors the payload happens to emit first.
+ *
+ *  This is a bounded regex walk over the raw text, not a real parse of
+ *  the Flight wire format — `parseChaptersCount` already established
+ *  that as an acceptable technique against this exact payload, for the
+ *  same reason: a real parse would mean reimplementing enough of
+ *  Next.js's `self.__next_f.push` chunk-reassembly and `$L<n>` reference
+ *  resolution to walk a full parsed tree, for a value (a cosmetic cover
+ *  image) that this extension can safely ship as `undefined` on any
+ *  format drift. The bounded window — never look past the next `href`
+ *  token — is what keeps this from degrading into "nearest src anywhere
+ *  on the page", which would risk stitching a totally unrelated card's
+ *  image onto this one; verified exhaustively (not sampled) against both
+ *  real fixtures: every slug this resolves a cover for is also a slug
+ *  `collectNovelCards` actually renders as a card, and vice versa (52/52
+ *  distinct cards on the homepage, 4/4 on a search result — see the test
+ *  suite's own fixture-derived counts, not a hardcoded figure here).
+ *
+ *  A three-segment href (`/novel/<slug>/<n>`, a chapter link — the same
+ *  shape `parseCardAnchor` itself excludes) never becomes a map key, even
+ *  if a `src` happens to sit in its own window: chapter-rail entries are
+ *  not cards, and letting one in could only ever shadow — never help —
+ *  the novel's own real card entry.
+ *
+ *  A slug with no `src` anywhere in ANY of its occurrences' windows keeps
+ *  no entry in the returned map at all. Callers must treat "no entry" the
+ *  same way `parseCardAnchor` treats a placeholder or missing `<img>`:
+ *  `coverUrl: undefined`, never a thrown error and never a dropped card —
+ *  a cover is decorative, a card is not. */
+export function parseCoverMap(html: string): Map<string, string> {
+  const matches = Array.from(html.matchAll(PAYLOAD_HREF_RE));
+  const map = new Map<string, string>();
+  for (let i = 0; i < matches.length; i++) {
+    const href = matches[i][1];
+    const segments = href.split("/").filter(Boolean);
+    if (segments.length !== 2) continue; // a chapter href, not a card
+
+    // Keyed by the card's own ABSOLUTE url — same shape as NovelCard.url
+    // — rather than the raw relative `href`, so callers (`withCover`) can
+    // look this up with the exact value a card already carries instead
+    // of re-deriving a relative path from it. Checked (and compared
+    // against below) in this same absolute form — comparing the MAP's
+    // own keys against the raw relative `href` here would make this
+    // guard a no-op, since the map never holds a relative key.
+    const absHref = absoluteUrl(href, BASE_URL);
+    if (map.has(absHref)) continue; // an earlier occurrence already resolved a src
+
+    const windowStart = matches[i].index! + matches[i][0].length;
+    const windowEnd = i + 1 < matches.length ? matches[i + 1].index! : html.length;
+    const srcMatch = PAYLOAD_SRC_RE.exec(html.slice(windowStart, windowEnd));
+    if (srcMatch) {
+      map.set(absHref, absoluteUrl(srcMatch[1], BASE_URL));
+    }
+  }
+  return map;
+}
+
+/** Applies `coverMap` to a card that doesn't already have a `coverUrl` of
+ *  its own (defensive — every card `collectNovelCards` produces today has
+ *  none, see `LAZY_PLACEHOLDER_SRC`, but this never overwrites a real one
+ *  if that ever changes). A miss is not an error: it leaves `coverUrl`
+ *  exactly as it was (`undefined`), never drops the card. */
+function withCover(card: NovelCard, coverMap: Map<string, string>): NovelCard {
+  return card.coverUrl ? card : { ...card, coverUrl: coverMap.get(card.url) };
+}
+
+/** Ruling: a cover is decorative, a card is not — the one place in this
+ *  extension where "refuse loudly" does NOT apply. `parseCoverMap` is a
+ *  bounded regex over plain text and cannot itself throw on any string
+ *  input, but this still wraps it in `try`/`catch` as defense-in-depth
+ *  against a payload shape change breaking that assumption; either way,
+ *  the caller gets back a plain (possibly empty) map, never a rejection.
+ *
+ *  An empty map — the payload carried no image at all, whether because
+ *  the page was blocked/errored despite an HTTP 200, or a future layout
+ *  change moved the `src`/`href` pairing this depends on — is logged
+ *  once via `host.log("warn", ...)`, naming the page, so silently
+ *  cover-less cards show up somewhere instead of just being a quieter
+ *  homepage with nothing anywhere saying so. Callers only reach for this
+ *  when there is at least one card to decorate; an empty results page
+ *  (a genuine "nothing matched" search) has nothing to warn about and
+ *  skips this entirely — see `search` below. */
+function coverMapOrWarn(html: string, pageUrl: string, host: SourceHost): Map<string, string> {
+  try {
+    const coverMap = parseCoverMap(html);
+    if (coverMap.size === 0) {
+      host.log(
+        "warn",
+        `Sun Novels: found no cover images in the RSC payload on ${pageUrl} — every card here will have coverUrl: undefined.`,
+      );
+    }
+    return coverMap;
+  } catch (err) {
+    host.log(
+      "warn",
+      `Sun Novels: failed to read covers out of the RSC payload on ${pageUrl}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return new Map();
+  }
+}
+
 /** Scoped to `section.home-section` — the homepage renders each themed
  *  row ("أشهر الروايات", "روايات إثارة", "روايات يابانية", "روايات كورية",
  *  "أحدث الفصول" as of this task) as one of these, in document order.
@@ -471,7 +617,15 @@ export default function createSource(host: SourceHost): Source {
       const url = `${BASE_URL}/`;
       host.log("info", "getHomeSections");
       const resp = await host.fetch(url);
-      return parseHomeSections(parseHtml(resp.text), url, host);
+      const sections = parseHomeSections(parseHtml(resp.text), url, host);
+      // parseHomeSections never returns a section with zero cards (see its
+      // own comment), so every section reaching this point has at least
+      // one card to decorate — coverMapOrWarn is worth calling exactly
+      // once here, not once per section, and re-parses the same response
+      // text `parseHomeSections` already read rather than issuing another
+      // request.
+      const coverMap = coverMapOrWarn(resp.text, url, host);
+      return sections.map((s) => ({ ...s, cards: s.cards.map((c) => withCover(c, coverMap)) }));
     },
 
     /** A single request to `/search?title=<query>` — see the file header
@@ -498,7 +652,19 @@ export default function createSource(host: SourceHost): Source {
       host.log("info", `search(${trimmed}) -> ${url}`);
       const resp = await host.fetch(url);
       const cards = parseSearchResults(parseHtml(resp.text), url);
-      return { cards, hasMore: false, query: trimmed, page: 1 };
+      // A genuine "nothing matched" result has no cards to decorate at
+      // all — skip coverMapOrWarn entirely rather than warning about a
+      // missing cover payload on a page that was never going to have one.
+      if (cards.length === 0) {
+        return { cards, hasMore: false, query: trimmed, page: 1 };
+      }
+      const coverMap = coverMapOrWarn(resp.text, url, host);
+      return {
+        cards: cards.map((c) => withCover(c, coverMap)),
+        hasMore: false,
+        query: trimmed,
+        page: 1,
+      };
     },
 
     async getNovel(url: string): Promise<SourceNovel> {

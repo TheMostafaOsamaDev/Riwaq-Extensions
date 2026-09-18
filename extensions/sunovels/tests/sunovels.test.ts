@@ -10,6 +10,7 @@ import createSource, {
   parseChapterLines,
   parseChapterRows,
   parseChaptersCount,
+  parseCoverMap,
   parseHomeSections,
   parseNovelPage,
   parseSearchResults,
@@ -154,6 +155,19 @@ const SEARCH_FIRST_CARD_TITLE = (() => {
 // fixture's own card count, not a hardcoded number.
 const EXPECTED_SEARCH_CARD_COUNT = new Set(
   Array.from(searchHtml.matchAll(/href="(\/novel\/[^"/?#]+)"/g)).map((m) => m[1]),
+).size;
+
+// Independently derived: the distinct set of `/uploads/...` cover paths
+// that appear ANYWHERE in each fixture's raw text (a plain, unwindowed
+// substring scan — deliberately NOT parseCoverMap's own windowed,
+// dedupe-by-href walk), used below only as a sanity floor (">0") and to
+// cross-check parseCoverMap's own map size against a genuinely different
+// computation over the same text, not against itself.
+const HOME_DISTINCT_UPLOAD_SRCS = new Set(
+  Array.from(homeHtml.matchAll(/\\"src\\":\\"(\/uploads\/[^"\\]*)\\"/g)).map((m) => m[1]),
+).size;
+const SEARCH_DISTINCT_UPLOAD_SRCS = new Set(
+  Array.from(searchHtml.matchAll(/\\"src\\":\\"(\/uploads\/[^"\\]*)\\"/g)).map((m) => m[1]),
 ).size;
 
 describe("sunovels: createSource", () => {
@@ -933,6 +947,119 @@ describe("collectNovelCards / parseCardAnchor", () => {
   });
 });
 
+describe("parseCoverMap", () => {
+  it("pairs an ordinary card's href with the src nested inside its own children", () => {
+    const html = `{\\"href\\":\\"/novel/combo\\",\\"children\\":[[\\"$\\",\\"$L25\\",null,{\\"src\\":\\"/uploads/combo-cover.jpg\\"}],[\\"$\\",\\"h4\\",null,{\\"children\\":\\"Combo\\"}]]}]`;
+    const map = parseCoverMap(html);
+    expect(map.get(`${BASE_URL}/novel/combo`)).toBe(`${BASE_URL}/uploads/combo-cover.jpg`);
+  });
+
+  // The "أحدث الفصول" rail's real shape: the SAME href appears twice, once
+  // in a cover-only anchor (with src, no title) and once in a title-only
+  // anchor (with no src) — matching this site's split-anchor DOM
+  // (parseCardAnchor's own comment). The cover-only occurrence comes
+  // FIRST here, exactly as it does in home.html.
+  it("resolves a cover from a split cover-only/title-only pair, cover first", () => {
+    const html =
+      `[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/split\\",\\"className\\":\\"cover\\",\\"children\\":[\\"$\\",\\"$L25\\",null,{\\"src\\":\\"/uploads/split-cover.jpg\\"}]}]` +
+      `[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/split\\",\\"children\\":[\\"$\\",\\"h3\\",null,{\\"children\\":\\"Split\\"}]}]`;
+    const map = parseCoverMap(html);
+    expect(map.get(`${BASE_URL}/novel/split`)).toBe(`${BASE_URL}/uploads/split-cover.jpg`);
+  });
+
+  // The opposite order — title-only first, cover-only second — is not
+  // observed live, but parseCoverMap's own comment claims it doesn't
+  // matter which of the pair comes first. This pins that claim: latching
+  // onto the FIRST occurrence regardless of whether it had a src would
+  // wrongly leave this href cover-less.
+  it("still resolves the cover when the title-only occurrence comes before the cover-only one", () => {
+    const html =
+      `[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/split2\\",\\"children\\":[\\"$\\",\\"h3\\",null,{\\"children\\":\\"Split2\\"}]}]` +
+      `[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/split2\\",\\"className\\":\\"cover\\",\\"children\\":[\\"$\\",\\"$L25\\",null,{\\"src\\":\\"/uploads/split2-cover.jpg\\"}]}]`;
+    const map = parseCoverMap(html);
+    expect(map.get(`${BASE_URL}/novel/split2`)).toBe(`${BASE_URL}/uploads/split2-cover.jpg`);
+  });
+
+  // The core "no naive nearest-src adjacency" case the task calls out by
+  // name: an EARLIER href with no cover of its own must not pick up a
+  // LATER, unrelated card's src just because it's the nearest one in the
+  // text. The bounded window (stop at the next href token) is what a
+  // simple "find the nearest /uploads/ src anywhere after this href"
+  // implementation would get wrong.
+  it("does not let a cover-less card pick up the next card's own src", () => {
+    const html =
+      `[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/no-cover-card\\",\\"children\\":[\\"$\\",\\"h3\\",null,{\\"children\\":\\"No Cover Card\\"}]}]` +
+      `[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/has-cover-card\\",\\"children\\":[[\\"$\\",\\"$L25\\",null,{\\"src\\":\\"/uploads/has-cover.jpg\\"}]]}]`;
+    const map = parseCoverMap(html);
+    expect(map.has(`${BASE_URL}/novel/no-cover-card`)).toBe(false);
+    expect(map.get(`${BASE_URL}/novel/has-cover-card`)).toBe(`${BASE_URL}/uploads/has-cover.jpg`);
+  });
+
+  it("keeps no entry for a href with no src anywhere in its own window", () => {
+    const html = `{\\"href\\":\\"/novel/no-cover\\",\\"children\\":[\\"$\\",\\"h3\\",null,{\\"children\\":\\"No Cover\\"}]}]`;
+    expect(parseCoverMap(html).has(`${BASE_URL}/novel/no-cover`)).toBe(false);
+  });
+
+  // The de-dupe guard is keyed on the map's own (absolute) keys, not the
+  // raw relative `href` string — a mismatch there would make the guard a
+  // no-op and let a LATER occurrence silently overwrite an already
+  // resolved cover. Forces the same href to appear three times, with two
+  // DIFFERENT src values, so only a real de-dupe (first resolved src
+  // wins) can make this pass — a no-op guard would report the LAST one.
+  it("keeps the first resolved cover when the same href repeats with a different src later", () => {
+    const html =
+      `[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/repeat\\",\\"children\\":[[\\"$\\",\\"$L25\\",null,{\\"src\\":\\"/uploads/first.jpg\\"}]]}]` +
+      `[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/repeat\\",\\"children\\":[\\"$\\",\\"h3\\",null,{\\"children\\":\\"Repeat\\"}]}]` +
+      `[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/repeat\\",\\"children\\":[[\\"$\\",\\"$L25\\",null,{\\"src\\":\\"/uploads/second.jpg\\"}]]}]`;
+    const map = parseCoverMap(html);
+    expect(map.get(`${BASE_URL}/novel/repeat`)).toBe(`${BASE_URL}/uploads/first.jpg`);
+  });
+
+  // A chapter href (three path segments — the same shape parseCardAnchor
+  // itself excludes) must never become a map key, even when a src sits
+  // right in its own window — a chapter-rail entry is not a card, and
+  // letting it in could only ever shadow a novel's own real card entry.
+  it("excludes a three-segment (chapter) href even when a src sits right next to it", () => {
+    const html = `{\\"href\\":\\"/novel/some-slug/12\\",\\"children\\":[[\\"$\\",\\"$L25\\",null,{\\"src\\":\\"/uploads/chapter-thumb.jpg\\"}]]}]`;
+    expect(parseCoverMap(html).size).toBe(0);
+  });
+
+  it("returns an empty map, never throws, for text with no RSC payload at all", () => {
+    expect(() => parseCoverMap("<html><body><p>Access denied.</p></body></html>")).not.toThrow();
+    expect(parseCoverMap("<html><body><p>Access denied.</p></body></html>").size).toBe(0);
+    expect(parseCoverMap("").size).toBe(0);
+  });
+
+  describe("against the real fixtures", () => {
+    it("resolves a cover for every card home.html actually renders, matching the fixture's own distinct-cover count", () => {
+      expect(HOME_DISTINCT_UPLOAD_SRCS).toBeGreaterThan(0);
+      const map = parseCoverMap(homeHtml);
+      const cards = collectNovelCards(parseHtml(homeHtml).body);
+      expect(cards.length).toBeGreaterThan(0);
+      // Cross-checked against collectNovelCards — a pre-existing,
+      // independently tested DOM reader — rather than re-deriving the
+      // same figure a second time by hand.
+      expect(map.size).toBe(cards.length);
+      expect(map.size).toBe(HOME_DISTINCT_UPLOAD_SRCS);
+      for (const card of cards) {
+        expect(map.get(card.url)).toMatch(/^https:\/\/sunovels\.com\/uploads\//);
+      }
+    });
+
+    it("resolves a cover for every card search.html actually renders", () => {
+      expect(SEARCH_DISTINCT_UPLOAD_SRCS).toBeGreaterThan(0);
+      const map = parseCoverMap(searchHtml);
+      const cards = collectNovelCards(parseHtml(searchHtml).body);
+      expect(cards.length).toBeGreaterThan(0);
+      expect(map.size).toBe(cards.length);
+      expect(map.size).toBe(SEARCH_DISTINCT_UPLOAD_SRCS);
+      for (const card of cards) {
+        expect(map.get(card.url)).toMatch(/^https:\/\/sunovels\.com\/uploads\//);
+      }
+    });
+  });
+});
+
 // A minimal SourceHost for parseHomeSections's direct tests — real
 // createTestHost() would do, but its own `log()` is a hardcoded no-op
 // with no way to observe what was logged (see @riwaq/extension-api's
@@ -1105,6 +1232,86 @@ describe("getHomeSections", () => {
     );
     await expect(source.getHomeSections()).rejects.toThrow(/home section/i);
   });
+
+  // The actual fix this task exists for: every card the real fixture
+  // renders must come back with a real `/uploads/...` coverUrl, not
+  // `undefined` — and the count of distinct covered novels must match
+  // the fixture's own independently-derived cover count
+  // (HOME_DISTINCT_UPLOAD_SRCS), not a hand-typed number. A novel
+  // repeated across two rails is counted once here (coverage is keyed
+  // by URL), matching how HOME_DISTINCT_UPLOAD_SRCS itself counts
+  // distinct src VALUES, not raw occurrences.
+  it("sets a real /uploads/ coverUrl on every card, matching the fixture's own cover count", async () => {
+    expect(HOME_DISTINCT_UPLOAD_SRCS).toBeGreaterThan(0);
+    const source = createSource(createTestHost({ responses: { [HOME_KEY]: homeHtml } }));
+    const cards = (await source.getHomeSections()).flatMap((s) => s.cards);
+    const distinctUrls = new Set(cards.map((c) => c.url));
+    const distinctUrlsWithCover = new Set(
+      cards.filter((c) => c.coverUrl !== undefined).map((c) => c.url),
+    );
+    expect(distinctUrlsWithCover.size).toBe(distinctUrls.size); // every card, none left undefined
+    expect(distinctUrlsWithCover.size).toBe(HOME_DISTINCT_UPLOAD_SRCS);
+    for (const c of cards) {
+      expect(c.coverUrl).toMatch(/^https:\/\/sunovels\.com\/uploads\//);
+    }
+  });
+
+  // Ruling 2: a missing cover must keep the card, with coverUrl left
+  // undefined — never dropped, never a thrown error. Forces a page with
+  // TWO cards where only one slug has a matching payload entry, proving
+  // both halves at once: the payload-backed card gets a real cover, and
+  // its cover-less sibling survives with coverUrl: undefined.
+  it("keeps a card whose slug has no payload entry, with coverUrl left undefined", async () => {
+    const payload =
+      `<script>self.__next_f.push([1,"[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/has-cover\\",` +
+      `\\"children\\":[[\\"$\\",\\"$L25\\",null,{\\"src\\":\\"/uploads/has-cover.jpg\\"}],` +
+      `[\\"$\\",\\"h4\\",null,{\\"children\\":\\"Has Cover\\"}]]}]"])</script>`;
+    const html =
+      `<html><body>` +
+      `<section dir="rtl" class="home-section">` +
+      `<div class="section-header"><h3>Rail</h3></div>` +
+      `<div class="section-body">` +
+      `<a href="/novel/has-cover"><h4>Has Cover</h4><img src="/placeholder.gif"/></a>` +
+      `<a href="/novel/no-payload-entry"><h4>No Payload Entry</h4><img src="/placeholder.gif"/></a>` +
+      `</div></section>${payload}</body></html>`;
+    const source = createSource(createTestHost({ responses: { [HOME_KEY]: html } }));
+    const cards = (await source.getHomeSections()).flatMap((s) => s.cards);
+    expect(cards).toHaveLength(2); // neither card was dropped
+    const hasCover = cards.find((c) => c.url === `${BASE_URL}/novel/has-cover`);
+    const noPayload = cards.find((c) => c.url === `${BASE_URL}/novel/no-payload-entry`);
+    expect(hasCover?.coverUrl).toBe(`${BASE_URL}/uploads/has-cover.jpg`);
+    expect(noPayload?.coverUrl).toBeUndefined();
+  });
+
+  // Ruling 1: a payload that carries NO covers at all (blocked/errored,
+  // or a future format drift) must not throw and must not drop cards —
+  // but the degradation is logged once, naming the page, rather than
+  // being silent.
+  it("logs a warning once when the RSC payload has no cover images at all, but still returns every card", async () => {
+    const html =
+      `<html><body>` +
+      `<section dir="rtl" class="home-section">` +
+      `<div class="section-header"><h3>Rail</h3></div>` +
+      `<div class="section-body">` +
+      `<a href="/novel/a"><h4>A</h4><img src="/placeholder.gif"/></a>` +
+      `</div></section>` +
+      `</body></html>`; // no self.__next_f.push payload anywhere
+    const logs: Array<{ level: string; message: string }> = [];
+    const base = createTestHost({ responses: { [HOME_KEY]: html } });
+    const spiedHost: SourceHost = {
+      ...base,
+      log(level, message) {
+        logs.push({ level, message });
+      },
+    };
+    const source = createSource(spiedHost);
+    const cards = (await source.getHomeSections()).flatMap((s) => s.cards);
+    expect(cards).toHaveLength(1);
+    expect(cards[0].coverUrl).toBeUndefined();
+    const warning = logs.find((l) => l.level === "warn" && l.message.includes("RSC payload"));
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain(HOME_KEY);
+  });
 });
 
 describe("searchUrl", () => {
@@ -1209,6 +1416,68 @@ describe("search", () => {
     expect(r.page).toBe(1);
   });
 
+  // Same fix, other call site: every result card from the real search
+  // fixture must come back with a real /uploads/ coverUrl, matching the
+  // fixture's own independently-derived cover count, not a hardcoded one.
+  it("sets a real /uploads/ coverUrl on every result, matching the fixture's own cover count", async () => {
+    expect(SEARCH_DISTINCT_UPLOAD_SRCS).toBeGreaterThan(0);
+    const source = createSource(
+      createTestHost({ responses: { [searchUrl(SEARCH_FIRST_CARD_TITLE)]: searchHtml } }),
+    );
+    const r = await source.search(SEARCH_FIRST_CARD_TITLE);
+    expect(r.cards.length).toBe(SEARCH_DISTINCT_UPLOAD_SRCS);
+    for (const c of r.cards) {
+      expect(c.coverUrl).toMatch(/^https:\/\/sunovels\.com\/uploads\//);
+    }
+  });
+
+  // Ruling 2, other call site: a result whose slug has no payload entry
+  // keeps coverUrl: undefined and is NOT dropped from the results.
+  it("keeps a result whose slug has no payload entry, with coverUrl left undefined", async () => {
+    const payload =
+      `<script>self.__next_f.push([1,"[\\"$\\",\\"$L24\\",null,{\\"href\\":\\"/novel/has-cover\\",` +
+      `\\"children\\":[[\\"$\\",\\"$L25\\",null,{\\"src\\":\\"/uploads/has-cover.jpg\\"}],` +
+      `[\\"$\\",\\"h4\\",null,{\\"children\\":\\"Has Cover\\"}]]}]"])</script>`;
+    const html =
+      `<html><body><div class="searchSection"><ul class="grid-list">` +
+      `<li class="list-item"><a href="/novel/has-cover"><h4>Has Cover</h4><img src="/placeholder.gif"/></a></li>` +
+      `<li class="list-item"><a href="/novel/no-payload-entry"><h4>No Payload Entry</h4><img src="/placeholder.gif"/></a></li>` +
+      `</ul></div>${payload}</body></html>`;
+    const url = searchUrl("mixed");
+    const source = createSource(createTestHost({ responses: { [url]: html } }));
+    const r = await source.search("mixed");
+    expect(r.cards).toHaveLength(2); // neither result was dropped
+    const hasCover = r.cards.find((c) => c.url === `${BASE_URL}/novel/has-cover`);
+    const noPayload = r.cards.find((c) => c.url === `${BASE_URL}/novel/no-payload-entry`);
+    expect(hasCover?.coverUrl).toBe(`${BASE_URL}/uploads/has-cover.jpg`);
+    expect(noPayload?.coverUrl).toBeUndefined();
+  });
+
+  // Ruling 1, other call site: no covers anywhere in the payload still
+  // returns every result, with a single warning naming the page.
+  it("logs a warning once when the RSC payload has no cover images at all, but still returns every result", async () => {
+    const html =
+      `<html><body><div class="searchSection"><ul class="grid-list">` +
+      `<li class="list-item"><a href="/novel/a"><h4>A</h4><img src="/placeholder.gif"/></a></li>` +
+      `</ul></div></body></html>`; // no self.__next_f.push payload anywhere
+    const url = searchUrl("no-payload");
+    const logs: Array<{ level: string; message: string }> = [];
+    const base = createTestHost({ responses: { [url]: html } });
+    const spiedHost: SourceHost = {
+      ...base,
+      log(level, message) {
+        logs.push({ level, message });
+      },
+    };
+    const source = createSource(spiedHost);
+    const r = await source.search("no-payload");
+    expect(r.cards).toHaveLength(1);
+    expect(r.cards[0].coverUrl).toBeUndefined();
+    const warning = logs.find((l) => l.level === "warn" && l.message.includes("RSC payload"));
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain(url);
+  });
+
   // The real, correct empty result — nothing on the site matches — must
   // come back as [] rather than throw. This is deliberately the OTHER
   // half of the same distinction parseSearchResults's own tests pin: a
@@ -1222,6 +1491,25 @@ describe("search", () => {
     expect(r.cards).toEqual([]);
     expect(r.hasMore).toBe(false);
     expect(r.query).toBe("zzzzzznomatch");
+  });
+
+  // A genuine "nothing matched" result has no cards to decorate at all —
+  // it must NOT log the "no cover images" warning, since there is
+  // nothing degraded here to report. Guards against a version of the
+  // fix that builds/warns about the cover map unconditionally.
+  it("does not log a cover warning when a query genuinely matches nothing", async () => {
+    const url = searchUrl("zzzzzznomatch");
+    const logs: Array<{ level: string; message: string }> = [];
+    const base = createTestHost({ responses: { [url]: searchEmptyHtml } });
+    const spiedHost: SourceHost = {
+      ...base,
+      log(level, message) {
+        logs.push({ level, message });
+      },
+    };
+    const source = createSource(spiedHost);
+    await source.search("zzzzzznomatch");
+    expect(logs.some((l) => l.message.includes("RSC payload"))).toBe(false);
   });
 
   it("fetches exactly one request, at the exact URL searchUrl builds", async () => {

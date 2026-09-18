@@ -201,9 +201,11 @@ with no heading inside it at all, immediately followed by a SEPARATE
 returns `null` for an anchor with no heading rather than a title-less
 card, so `collectNovelCards` picks up the title from the second anchor
 and skips the first — at the cost of that card's `coverUrl` staying
-`undefined`, since the real cover lives on the anchor that got skipped.
-This is a known, accepted gap for that one rail, not silently dropped:
-`extensions/sunovels/tests/sunovels.test.ts` pins the exact behavior.
+`undefined` AT THE DOM LAYER, since the real cover lives on the anchor
+that got skipped. `collectNovelCards`/`parseCardAnchor` themselves are
+unchanged and still only read the DOM; `getHomeSections`/`search`
+backfill the cover afterward from the page's inline RSC payload instead
+— see "The cover gap — closed" below.
 
 **Chapter links are excluded by path-segment count, not just a prefix
 check.** A card anchor is `/novel/<slug>` (two path segments); a chapter
@@ -219,9 +221,9 @@ and search results alike. A novel's own detail page (`getNovel`,
 `figure.cover img`) is NOT lazy this way; only the card grids are.
 `parseCardAnchor` treats the literal placeholder the same as "no `<img>`
 at all" (`coverUrl: undefined`) rather than shipping every card with the
-same generic gif — see "The cover gap, restated honestly" below for what
-IS actually available (a real image path per card, just not from the
-rendered DOM) and why it isn't extracted here.
+same generic gif — see "The cover gap — closed" below for how
+`getHomeSections`/`search` fill this back in from the page's inline RSC
+payload, where a real image path per card actually lives.
 
 **A page with no recognizable sections at all is refused loudly**, naming
 the URL — the same "silent emptiness is indistinguishable from the site
@@ -355,7 +357,7 @@ synchronously during parse either way. Those two iframes carry zero
 information any parser reads; removing just them (not the scripts around
 them) was the narrowest fix available.
 
-### The cover gap, restated honestly
+### The cover gap — closed
 
 Every card grid this site renders — home sections, `/library`, search
 results alike — serves its cover images lazy-loaded: the static markup
@@ -378,23 +380,55 @@ as captured):
 — the real `/uploads/...` path, sitting right next to the same card's
 `href` and title, in a fixed, escaped-JSON-ish shape (`\"key\":\"value\"`,
 matching Next.js's Flight/RSC wire format). Counts checked directly
-against the unstripped fixtures: the homepage's RSC payload carries
-exactly as many `href`/`src` pairs as the rendered DOM (111 unique novel
-hrefs, 54 real `/uploads/...` paths for the ~52 cards that have one) — no
-HIDDEN extra rows beyond what's rendered, so this is not a "cheaper
-catalogue" either, just the same data with a real image path instead of
-the placeholder.
+against the unstripped fixtures: `home.html` carries 111 distinct
+`\"href\":\"/novel/...\"` payload entries against 111 distinct rendered
+`/novel/` hrefs (every rendered href has a payload counterpart, including
+chapter links and repeats across rails), and 54 `\"src\":\"/uploads/...\"`
+occurrences (52 distinct paths) — exactly matching the 52 distinct novel
+cards `collectNovelCards` finds across the whole homepage. `search.html`
+shows the same shape at a smaller scale: 4 payload hrefs, 4 payload
+srcs, 4 rendered cards.
 
-`collectNovelCards`/`parseCardAnchor` still only read the rendered DOM,
-so every card this extension returns — from all five home rails and
-every search result — has `coverUrl: undefined` today. That is a real,
-sized gap: extracting the cover would mean parsing the RSC payload's own
-wire format (matching an anchor's `href` to the nearest `src` in the same
-JSON-ish object, not a DOM query) and threading that data into
-`collectNovelCards` alongside the parsed document. Not implemented in
-this round — flagged here as a scoped follow-up, with the exact shape
-above, rather than left as a vague "todo" or, worse, a false claim that
-it can't be done.
+**`parseCoverMap(html)` (`src/index.ts`) now extracts this.** It's a
+bounded regex walk over the raw response text — the same technique
+`parseChaptersCount` already uses on this identical payload — not a real
+parse of the Flight wire format: for every `\"href\":\"/novel/<slug>\"`
+occurrence, it looks for the first `\"src\":\"/uploads/...\"` between
+that occurrence and whichever `href` token comes next in the text, never
+further out. That bound is what keeps this from degenerating into
+"nearest `/uploads/` path anywhere on the page", which risks stitching an
+unrelated card's image onto this one.
+
+Two shapes were confirmed directly against the fixtures, not assumed:
+
+- An ordinary grid card is ONE payload object — `href` plus a `children`
+  array whose first element is the `$L25` image (with `src`), followed by
+  the title. The `src` sits a few dozen characters after `href`.
+- The homepage's "أحدث الفصول" rail splits a novel across TWO payload
+  objects sharing the identical `href` — mirroring the DOM split
+  `parseCardAnchor` already handles for this same rail: a
+  `\"className\":\"cover\"` object carrying only the image, and a second,
+  plain object carrying only the title. `parseCoverMap` keeps scanning
+  later occurrences of the same href until one actually yields a `src`,
+  so it doesn't matter which of the pair the payload emits first.
+
+A slug with no `src` anywhere in any of its occurrences' windows gets no
+map entry — `getHomeSections`/`search` leave that card's `coverUrl`
+exactly as `parseCardAnchor` already left it, `undefined`, and never drop
+the card over it. On the two committed fixtures every rendered card
+happens to resolve a cover (52/52 on the homepage, 4/4 on search) — there
+is no card on the CURRENT fixtures that exercises the "no payload entry"
+path live; that path is proven with a forged fixture in the test suite
+instead (`sunovels.test.ts`, `describe("parseCoverMap")` and the
+`"keeps a card/result whose slug has no payload entry"` tests), and is
+real for pages this extension hasn't captured yet (e.g. a `/library`
+page, or a future novel with a broken thumbnail). A payload with NO
+covers at all (blocked/errored page, or a future format change) is
+likewise never treated as an error: `getHomeSections`/`search` still
+return every card, just all with `coverUrl: undefined`, and
+`host.log("warn", ...)` fires once naming the page — a cover is
+decorative, a card is not, the one place this extension's "refuse
+loudly" principle does not apply.
 
 ## Fetch-only, no ambient authority
 
