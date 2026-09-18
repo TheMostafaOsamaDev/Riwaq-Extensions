@@ -296,22 +296,24 @@ const host = createTestHost({
 });
 ```
 
-Fixtures are **derived from** real markup captured from the live site, not invented from
-whole cloth: every element and attribute a fixture contains should be copied verbatim
-from a page the site actually served, then trimmed down to just what your parser reads.
-The verbatim part is what matters, not the trimming — a hand-invented fixture only ever
-proves your parser agrees with its own author's assumptions about the site's markup,
-which is exactly the failure mode a fixture test exists to catch; copying real markup and
-cutting it down still lets a redesign of the parts your parser *does* read show up as a
-failing test, before a user hits it live.
+Fixtures are **unedited captures of a page the live site actually served** — not invented
+from whole cloth, and not trimmed down to what your parser reads. A hand-invented fixture
+only ever proves your parser agrees with its own author's assumptions about the site's
+markup, which is exactly the failure mode a fixture test exists to catch.
 
-Trimming does give something up: a full, untrimmed capture would also catch a change to
-markup your parser doesn't currently read (e.g. a wrapper element it ignores today that
-later gains significance), which a trimmed fixture by definition cannot. The fixtures
-under `extensions/*/tests/fixtures/` in this repo are exactly this trade-off already
-made — a few-hundred-byte to few-KB skeleton, not the hundreds of KB a real Madara/
-WordPress page actually weighs, but every tag, class and attribute in them was copied
-from a real capture and only re-indented for readability, not invented.
+Trimming used to be the convention here, and it gave something up: a trimmed fixture
+cannot, by definition, catch a change to markup your parser doesn't currently read (a
+wrapper element it ignores today that later gains significance), and it quietly invites
+editing a capture until the test passes. It was done for a mechanical reason — a live
+page carries an external `<script src>`/`<link>` for every ads, analytics and framework
+chunk, and under happy-dom each disabled load dispatched an error event that killed the
+whole run. `vitest.config.ts` now configures happy-dom to survive exactly that (see its
+own comment for the measurements), so a capture can be committed as it arrived.
+
+Some fixtures under `extensions/*/tests/fixtures/` predate that config change and still
+carry the marks of it — `extensions/cenele`'s four, in particular, had their
+`<script>`/`<link>` tags stripped at capture time. **A recapture must not repeat that
+stripping.** Save the page as served.
 
 **Read fixture files with `fileURLToPath(import.meta.url)` + `path.join`, never
 `new URL(...)`.** This suite runs under `environment: "happy-dom"` (see

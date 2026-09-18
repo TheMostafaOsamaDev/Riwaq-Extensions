@@ -199,6 +199,19 @@ selectors (see `parseNovelPage` in `src/index.ts`).
 | Volume shells   | none — the redesigned page ships no volume markup; `extractVolumeShells` always returns `[]` and `getNovel` gets the canonical volume list from the `meta_only=1` AJAX call instead |
 | Manga config    | inline `var nhvNovelV2 = {…}` (regex-extracted) — see Nonces above |
 
+## Fixtures: recapture without stripping
+
+All four fixtures under `tests/fixtures/` are live captures, but they were
+taken **before** `vitest.config.ts` learned to survive a real page's
+external `<script src>`/`<link>` tags under happy-dom, so their
+`<script>`/`<link>` tags were stripped at capture time (`novel.html` keeps
+only the inline `nhvNovelV2` config script, which the parser reads).
+
+That stripping is no longer necessary and **must not be repeated on a
+recapture** — save the page exactly as the site served it. The root
+README's Testing section has the reasoning and the measurements behind
+the happy-dom settings that make it work.
+
 ## Chapter-body decoy stripping
 
 Chapter pages mix legitimate paragraphs with anti-piracy decoys
