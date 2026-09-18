@@ -16,6 +16,7 @@ import createSource, {
 } from "../src/index";
 import { parseHtml, sanitizeText } from "@riwaq/extension-api";
 import { createTestHost } from "@riwaq/extension-api/testing";
+import type { SourceHost, SourceVolume } from "@riwaq/extension-api";
 
 // Deliberately not `readFileSync(new URL("./fixtures/novel.html", import.meta.url), ...)`:
 // this suite runs under `environment: "happy-dom"` (see vitest.config.ts), and
@@ -742,5 +743,450 @@ describe("createSource (end-to-end via createTestHost)", () => {
     await expect(
       createSource(host).getChapterContent({ id: 99, title: "x", url, lines: [] }),
     ).rejects.toThrow(url);
+  });
+});
+
+// ── the AJAX subsystem ─────────────────────────────────────────────────────
+//
+// Everything cenele does beyond search and chapter bodies runs over
+// `wp-admin/admin-ajax.php` with form-encoded bodies: the volume list
+// (`meta_only=1`), each volume's paginated chapter list, and in-novel
+// chapter search. None of it was driven through `createSource` before.
+//
+// These assert on the RECORDED REQUEST — url, method and exact body —
+// not just on the parse of a canned reply. Every one of these calls is a
+// POST to the SAME url, so a source that sent the wrong action, the
+// section nonce instead of the chapters nonce, or a 1-indexed page where
+// the site wants a volume number would still be handed the right fixture
+// by any url-keyed stub and still "pass" a parse-only assertion.
+//
+// The AJAX replies below are SYNTHETIC — built to the shapes this
+// extension's README documents for `nhv_manga_single_chapters_page` and
+// `nhv_search_manga_chapters`. The novel PAGE they hang off
+// (fixtures/novel.html) is the real live capture, so the manga id and
+// nonce these requests carry are the site's own values, not invented ones.
+
+const AJAX_URL = "https://cenele.com/wp-admin/admin-ajax.php";
+const NOVEL_URL = "https://cenele.com/cont/create-heaven-riwya/";
+/** From the live novel.html capture — see the extractNovelConfig tests. */
+const MANGA_ID = "114932";
+const CHAPTERS_NONCE = "1ef880db28";
+
+type Call = { url: string; method: string; body?: string };
+
+/** One `<li>` in the shape the chapters AJAX returns. */
+const chapterLi = (n: number, name: string) =>
+  `<li data-chapter-id="${n}" class="wp-manga-chapter">` +
+  `<a href="https://cenele.com/cont/create-heaven-riwya/${n}/">الفصل ${n} ` +
+  `<span class="nhv-chapter-name">${name}</span></a></li>`;
+
+/** A SourceHost that routes POSTs by their form body rather than by url.
+ *  Necessary here and not incidental: `meta_only`, every chapter page and
+ *  chapter search all POST to the one admin-ajax.php url, so a url-keyed
+ *  stub cannot tell them apart — and a test built on one would serve the
+ *  volume list to a request that asked for chapter search. */
+function ajaxHost(options: {
+  pages?: Record<string, string>;
+  ajax: (params: URLSearchParams) => string;
+  calls?: Call[];
+}): SourceHost {
+  const calls = options.calls ?? [];
+  const base = createTestHost({ responses: options.pages ?? {}, calls });
+  return {
+    ...base,
+    async fetch(url, opts) {
+      if (opts?.method === "POST") {
+        calls.push({ url, method: "POST", body: opts.body });
+        return {
+          status: 200,
+          text: options.ajax(new URLSearchParams(opts.body ?? "")),
+          headers: {},
+        };
+      }
+      return base.fetch(url, opts);
+    },
+  };
+}
+
+/** The volume list the meta_only call answers with. Deliberately NOT in
+ *  ascending order, and with the num=0 "no volume" pseudo-volume in the
+ *  middle, so the sort getNovel applies is actually exercised. */
+const META_VOLUMES = JSON.stringify({
+  success: true,
+  mixed: true,
+  volumes: [
+    { num: 2, label: "المجلد الثاني", count: 2 },
+    { num: 0, label: "بدون مجلد", count: 1 },
+    { num: 1, label: "المجلد الأول", count: 3 },
+  ],
+});
+
+/** Answers meta_only, one-page volume listings and chapter search.
+ *  Volume 1 spans two pages (has_more on page 1) so the pagination loop
+ *  is exercised; volumes 2 and 0 are one page each. */
+function defaultAjax(params: URLSearchParams): string {
+  const action = params.get("action");
+  if (action === "nhv_manga_single_chapters_page") {
+    if (params.get("meta_only") === "1") return META_VOLUMES;
+    const volume = Number(params.get("volume"));
+    const page = Number(params.get("page"));
+    if (volume === 1) {
+      return page === 1
+        ? JSON.stringify({
+            success: true,
+            has_more: true,
+            page,
+            html: chapterLi(1, "البداية") + chapterLi(2, "الطريق"),
+          })
+        : JSON.stringify({ success: true, has_more: false, page, html: chapterLi(3, "النهاية") });
+    }
+    if (volume === 2) {
+      return JSON.stringify({
+        success: true,
+        has_more: false,
+        page,
+        html: chapterLi(4, "فصل رابع") + chapterLi(5, "فصل خامس"),
+      });
+    }
+    return JSON.stringify({ success: true, has_more: false, page, html: chapterLi(6, "ملحق") });
+  }
+  if (action === "nhv_search_manga_chapters") {
+    return JSON.stringify({
+      success: true,
+      items: [
+        {
+          id: 5,
+          title: "الفصل 5",
+          title_html: 'الفصل 5 <span class="nhv-chapter-name">فصل خامس</span>',
+          url: "https://cenele.com/cont/create-heaven-riwya/5/",
+          time: "",
+        },
+        {
+          id: 9,
+          title: "الفصل 9",
+          title_html: 'الفصل 9 <span class="nhv-chapter-name">فصل تاسع</span>',
+          url: "https://cenele.com/cont/create-heaven-riwya/9/",
+          time: "",
+        },
+      ],
+    });
+  }
+  throw new Error(`unexpected AJAX action: ${action}`);
+}
+
+const form = (fields: Record<string, string>) => new URLSearchParams(fields).toString();
+
+describe("getNovel (AJAX volume meta)", () => {
+  it("fetches the novel page, then asks meta_only=1 for the volume list", async () => {
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+
+    const novel = await source.getNovel(NOVEL_URL);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ url: NOVEL_URL, method: "GET" });
+    // The exact form body — the action, the CHAPTERS nonce (not
+    // nhvNovelV2.nonce, which would 403 every call), the manga id lifted
+    // from the live page, and meta_only.
+    expect(calls[1]).toEqual({
+      url: AJAX_URL,
+      method: "POST",
+      body: form({
+        action: "nhv_manga_single_chapters_page",
+        nonce: CHAPTERS_NONCE,
+        manga_id: MANGA_ID,
+        meta_only: "1",
+      }),
+    });
+
+    expect(novel.title).toBe("انشاء القوانين السماوية");
+    // Sorted ascending by the site's own volume number, with the num=0
+    // "no volume" pseudo-volume last regardless of where it arrived.
+    // `key` carries the site's number; `id` is ours and is 1-based.
+    expect(novel.volumes).toEqual([
+      { id: 1, title: "المجلد الأول", chapters: [], chapterCount: 3, key: "1" },
+      { id: 2, title: "المجلد الثاني", chapters: [], chapterCount: 2, key: "2" },
+      { id: 3, title: "بدون مجلد", chapters: [], chapterCount: 1, key: "0" },
+    ]);
+  });
+
+  it("declares lazy volumes and hands back empty chapter arrays", () => {
+    // getNovel must not have fetched any chapter list: the whole point of
+    // the lazy contract is that a 12-volume novel opens without walking
+    // every volume's pagination.
+    expect(createSource(createTestHost()).hasLazyVolumes).toBe(true);
+  });
+
+  it("falls back to a synthesized volume title when the site sends none", async () => {
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: (p) =>
+          p.get("meta_only") === "1"
+            ? JSON.stringify({ success: true, volumes: [{ num: 4, label: "", count: 1 }] })
+            : defaultAjax(p),
+      }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    // The fallback is synthesized through host.locale, and createTestHost
+    // defaults to "en" — proof the label came from this extension's own
+    // string catalogue rather than from the (empty) site value.
+    expect(novel.volumes[0].title).toBe("Volume 4");
+  });
+
+  it("throws when the meta_only call reports no volumes", async () => {
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: () => JSON.stringify({ success: false }),
+      }),
+    );
+    await expect(source.getNovel(NOVEL_URL)).rejects.toThrow(/meta_only/);
+  });
+});
+
+describe("getVolumeChapters (paginated chapter-list AJAX)", () => {
+  const volumeOf = (novel: { volumes: SourceVolume[] }, id: number) =>
+    novel.volumes.find((v) => v.id === id)!;
+
+  it("walks the has_more pagination loop and assigns ids from the volume's own offset", async () => {
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+
+    const chapters = await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 1));
+
+    // Two POSTs, because page 1 answered has_more: true. Both carry the
+    // site's volume NUMBER (from meta), a 1-based page, and per_page=50.
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({
+      url: AJAX_URL,
+      method: "POST",
+      body: form({
+        action: "nhv_manga_single_chapters_page",
+        nonce: CHAPTERS_NONCE,
+        manga_id: MANGA_ID,
+        volume: "1",
+        page: "1",
+        per_page: "50",
+      }),
+    });
+    expect(calls[1].body).toContain("page=2");
+
+    // Volume 1 starts at id 1; the chapter number prefix and the
+    // `.nhv-chapter-name` subtitle are joined with a dash.
+    expect(chapters).toEqual([
+      { id: 1, title: "الفصل 1 - البداية", url: "https://cenele.com/cont/create-heaven-riwya/1/", lines: [] },
+      { id: 2, title: "الفصل 2 - الطريق", url: "https://cenele.com/cont/create-heaven-riwya/2/", lines: [] },
+      { id: 3, title: "الفصل 3 - النهاية", url: "https://cenele.com/cont/create-heaven-riwya/3/", lines: [] },
+    ]);
+  });
+
+  it("offsets a later volume's ids past every earlier volume's chapter count", async () => {
+    const source = createSource(ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax }));
+    const novel = await source.getNovel(NOVEL_URL);
+
+    // Volume 1 declared 3 chapters, so volume 2 starts at 4 and the
+    // num=0 pseudo-volume at 6 — WITHOUT volume 1 ever being expanded.
+    // That is what makes a chapter id stable across sessions.
+    expect((await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 2))).map((c) => c.id)).toEqual([
+      4, 5,
+    ]);
+    expect((await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 3))).map((c) => c.id)).toEqual([
+      6,
+    ]);
+  });
+
+  it("sends the site's volume number, not our volume id", async () => {
+    // Our id 3 is the site's volume 0. Sending the id would fetch the
+    // wrong volume's chapters and nothing downstream would notice.
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+    await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 3));
+    expect(calls[0].body).toContain("volume=0");
+  });
+
+  it("re-derives the manga id, nonce and volume offsets on a cold-start cache miss", async () => {
+    // The detail view loaded a snapshot from disk and calls us with no
+    // prior getNovel in this session. The novel page has to be refetched
+    // for the nonce and the meta call redone for the offsets, or the
+    // chapter ids would restart at 1 for every volume.
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+
+    const chapters = await source.getVolumeChapters!(NOVEL_URL, {
+      id: 2,
+      title: "المجلد الثاني",
+      chapters: [],
+      key: "2",
+    });
+
+    expect(calls[0]).toMatchObject({ url: NOVEL_URL, method: "GET" });
+    expect(calls[1].body).toContain("meta_only=1");
+    expect(calls[2].body).toContain("volume=2");
+    expect(chapters.map((c) => c.id)).toEqual([4, 5]);
+  });
+
+  it("resolves a volume by its key when our id no longer matches the meta list", async () => {
+    // A snapshot written in an earlier session can carry an id the site's
+    // current volume list doesn't assign. `key` (the site's own number)
+    // is the durable handle.
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+
+    const chapters = await source.getVolumeChapters!(NOVEL_URL, {
+      id: 99,
+      title: "المجلد الثاني",
+      chapters: [],
+      key: "2",
+    });
+
+    expect(calls[0].body).toContain("volume=2");
+    expect(chapters.map((c) => c.id)).toEqual([4, 5]);
+  });
+
+  it("throws when neither the id nor the key resolves to a known volume", async () => {
+    const source = createSource(ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax }));
+    await source.getNovel(NOVEL_URL);
+    await expect(
+      source.getVolumeChapters!(NOVEL_URL, { id: 99, title: "x", chapters: [], key: "77" }),
+    ).rejects.toThrow(/couldn't resolve volume 99/);
+  });
+
+  it("throws when a chapters page comes back unsuccessful, naming the page and volume", async () => {
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: (p) =>
+          p.get("meta_only") === "1" ? META_VOLUMES : JSON.stringify({ success: false }),
+      }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    await expect(
+      source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 1)),
+    ).rejects.toThrow(/chapters page 1 for volume 1/);
+  });
+
+  it("stops at MAX_VOLUME_PAGES when the server never clears has_more", async () => {
+    // A broken or hostile `has_more` must not hang the import. The cap is
+    // 100 pages (MAX_VOLUME_PAGES in ../src/index.ts).
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: (p) =>
+          p.get("meta_only") === "1"
+            ? META_VOLUMES
+            : JSON.stringify({ success: true, has_more: true, html: chapterLi(1, "تكرار") }),
+        calls,
+      }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+
+    await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 1));
+
+    expect(calls).toHaveLength(100);
+    expect(calls[99].body).toContain("page=100");
+  });
+});
+
+describe("searchChapters (in-novel chapter search AJAX)", () => {
+  it("sends the search action with the shared nonce and reuses ids already assigned", async () => {
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    // Expanding volume 2 is what teaches the source that chapter 5's URL
+    // maps to id 5 — without it there is nothing to reuse.
+    await source.getVolumeChapters!(NOVEL_URL, novel.volumes[1]);
+    calls.length = 0;
+
+    const hits = await source.searchChapters!(NOVEL_URL, "فصل");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      url: AJAX_URL,
+      method: "POST",
+      body: form({
+        action: "nhv_search_manga_chapters",
+        nonce: CHAPTERS_NONCE,
+        manga_id: MANGA_ID,
+        query: "فصل",
+        limit: "80",
+      }),
+    });
+
+    // The hit that already exists in the expanded volume keeps that
+    // volume's id (5) — that is what lets a click hand off to the reader.
+    // The title is recomposed from `title_html`, dash-joined the same way
+    // the volume listing composes it.
+    expect(hits[0]).toEqual({
+      id: 5,
+      title: "الفصل 5 - فصل خامس",
+      url: "https://cenele.com/cont/create-heaven-riwya/5/",
+      lines: [],
+    });
+  });
+
+  it("returns an empty list for a blank query without calling the site", async () => {
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+    expect(await source.searchChapters!(NOVEL_URL, "   ")).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("throws when called before getNovel has populated the per-novel cache", async () => {
+    const source = createSource(ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax }));
+    await expect(source.searchChapters!(NOVEL_URL, "فصل")).rejects.toThrow(
+      /searchChapters called before getNovel/,
+    );
+  });
+
+  it("throws when the search response is not the expected shape", async () => {
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: (p) => (p.get("meta_only") === "1" ? META_VOLUMES : JSON.stringify({ success: true })),
+      }),
+    );
+    await source.getNovel(NOVEL_URL);
+    await expect(source.searchChapters!(NOVEL_URL, "فصل")).rejects.toThrow(
+      /chapter search returned an unexpected response/,
+    );
+  });
+});
+
+describe("getHomeSections (end-to-end via createTestHost)", () => {
+  it("requests the site root and returns the parsed sections", async () => {
+    const calls: Call[] = [];
+    const host = createTestHost({ responses: { "https://cenele.com/": homeHtml }, calls });
+
+    const sections = await createSource(host).getHomeSections();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ url: "https://cenele.com/", method: "GET" });
+    expect(sections.map((s) => s.id)).toEqual(["gems", "newseries", "newreleases"]);
+    expect(sections.every((s) => s.cards.length > 0)).toBe(true);
   });
 });
