@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.base.json",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
+    "probe": "vitest run --config scripts/probe.config.ts",
     "dev-repo": "tsx scripts/dev-repo.ts",
     "new-extension": "tsx scripts/new-extension.ts"
   },

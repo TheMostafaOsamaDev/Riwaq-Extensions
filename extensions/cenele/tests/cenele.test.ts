@@ -8,11 +8,15 @@ import createSource, {
   hasHiddenStyle,
   isDecoyElement,
   looksLikePiracyDecoy,
+  normalizeDecoyText,
+  parseHomeSections,
   parseNovelPage,
   searchUrl,
   parseSearchPage,
 } from "../src/index";
+import { parseHtml, sanitizeText } from "@riwaq/extension-api";
 import { createTestHost } from "@riwaq/extension-api/testing";
+import type { SourceHost, SourceVolume } from "@riwaq/extension-api";
 
 // Deliberately not `readFileSync(new URL("./fixtures/novel.html", import.meta.url), ...)`:
 // this suite runs under `environment: "happy-dom"` (see vitest.config.ts), and
@@ -24,22 +28,58 @@ import { createTestHost } from "@riwaq/extension-api/testing";
 // own `import.meta.url` (no relative resolution involved) plus plain path-segment
 // arithmetic sidesteps it entirely.
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
+/** This extension's own manifest id. Errors are prefixed with it (never
+ *  with a display name) because CONTRIBUTING.md's bug-report section asks
+ *  users for the id — reading it from the manifest here means renaming the
+ *  id without updating the error strings fails this suite. */
+const MANIFEST_ID = (
+  JSON.parse(readFileSync(join(FIXTURES_DIR, "..", "..", "manifest.json"), "utf8")) as {
+    id: string;
+  }
+).id;
+
 const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 const searchHtml = readFileSync(join(FIXTURES_DIR, "search.html"), "utf8");
 const chapterHtml = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
+const homeHtml = readFileSync(join(FIXTURES_DIR, "home.html"), "utf8");
+
+/** The piracy boilerplate exactly as tests/fixtures/chapter.html carries
+ *  it. DERIVED from the capture, never typed out here: the live theme
+ *  obfuscates this text with tatweel (U+0640) and Arabic presentation
+ *  forms, so a hand-written copy of the phrase is a DIFFERENT string from
+ *  the one the site actually emits — and matching the hand-written one
+ *  while missing the real one is precisely the bug these tests exist to
+ *  keep out. Throws rather than returning "" when the fixture stops
+ *  carrying a decoy at all, so that shows up as a loud failure instead of
+ *  quietly making every assertion built on it vacuous. */
+function liveDecoyText(): string {
+  const doc = new DOMParser().parseFromString(chapterHtml, "text/html");
+  const el = doc.querySelector('[data-nosnippet="true"]');
+  if (!el) {
+    throw new Error(
+      "fixtures/chapter.html no longer contains a [data-nosnippet=\"true\"] decoy — " +
+        "recapture it or these decoy tests prove nothing.",
+    );
+  }
+  const text = sanitizeText(el.textContent);
+  if (text.length === 0) {
+    throw new Error("fixtures/chapter.html's first decoy element is empty.");
+  }
+  return text;
+}
 
 describe("extractNovelConfig", () => {
   it("reads postId and chaptersNonce from nhvNovelV2", () => {
     expect(extractNovelConfig(novelHtml)).toEqual({
-      postId: "32235",
-      chaptersNonce: "6d7f45aa72",
+      postId: "114932",
+      chaptersNonce: "1ef880db28",
     });
   });
 
   it("prefers chaptersNonce over the section nonce", () => {
-    // nhvNovelV2.nonce is 0367ecdfde and belongs to nhv_novel_v2_section,
+    // nhvNovelV2.nonce is 8b20962872 and belongs to nhv_novel_v2_section,
     // NOT to the chapters AJAX. Picking it would 403 every chapter fetch.
-    expect(extractNovelConfig(novelHtml)?.chaptersNonce).not.toBe("0367ecdfde");
+    expect(extractNovelConfig(novelHtml)?.chaptersNonce).not.toBe("8b20962872");
   });
 
   it("returns null when the config global is absent", () => {
@@ -55,24 +95,24 @@ describe("extractNovelConfig", () => {
 const parse = () =>
   parseNovelPage(
     new DOMParser().parseFromString(novelHtml, "text/html"),
-    "https://cenele.com/cont/pursuit/",
+    "https://cenele.com/cont/create-heaven-riwya/",
   );
 
 describe("parseNovelPage", () => {
   it("reads title, original title and cover", () => {
     const n = parse();
-    expect(n.title).toBe("السعي وراء الحقيقة");
-    expect(n.originalTitle).toBe("Pursuit of the Truth");
+    expect(n.title).toBe("انشاء القوانين السماوية");
+    expect(n.originalTitle).toBe("Create heavenly laws");
     expect(n.coverUrl).toBe(
-      "https://cenele.com/wp-content/uploads/2021/12/cover-768x1024.webp",
+      "https://cenele.com/wp-content/uploads/2026/08/139e19c5-bfa6-468f-8694-ee4b00437657-768x1024.webp",
     );
   });
 
   it("keeps genres and tags as separate lists", () => {
     const n = parse();
     expect(n.tags).toEqual([
-      "أكشن", "بالغ", "زيانشيا", "غموض", "فنون قتالية", "للكبار", "مأساة", "مظلمة", "نفسي",
-      "إنتقال العالم", "الانتقال الزمني", "الانتقام", "الزراعة", "الشخصية لا ترحم", "الكيمياء", "الوقت القديم", "تطور شخصية", "خلفية عائلة غامضة", "داو", "غدر الأحباء", "من ضعيف إلى قوي",
+      "أكشن", "خيال", "خيال علمي", "شوانهوان", "غموض", "فانتازيا", "فنون قتالية", "قوى خارقة", "مغامرة",
+      "صينية", "مغامرات",
     ]);
   });
 
@@ -89,33 +129,34 @@ describe("parseNovelPage", () => {
     expect(n.meta).toContainEqual({ label: "النوع", value: "صينية" });
     expect(n.meta).toContainEqual({
       label: "المؤلف",
-      value: "Er Gen",
-      url: "https://cenele.com/cont-author/er-gen/",
+      value: "It's not Sunday",
+      url: "https://cenele.com/cont-author/its-not-sunday/",
     });
   });
 
   it("lifts the author out of the meta rows", () => {
-    expect(parse().author).toBe("Er Gen");
+    expect(parse().author).toBe("It's not Sunday");
   });
 
   it("reads the synopsis", () => {
-    expect(parse().description).toContain("سجن أبدي");
+    expect(parse().description).toContain("تقنيات سامية؟");
   });
 
   it("excludes heading boilerplate from the synopsis", () => {
-    // The synopsis container holds an <h2> (title repeated) and trailing
-    // <h3> (promotional copy). These must not appear in the stored description.
+    // The synopsis container holds an <h2> (title repeated, once before and
+    // once after the paragraphs — an Arabic heading and an English one).
+    // These must not appear in the stored description.
     const n = parse();
-    expect(n.description).not.toContain("قصة رواية السعي وراء الحقيقة");
-    expect(n.description).not.toContain("الكتاب الثاني في سلسلة إير جين");
+    expect(n.description).not.toContain("رواية إنشاء القوانين السماوية");
+    expect(n.description).not.toContain("رواية Create heavenly laws");
     // The actual paragraph content should still be present
-    expect(n.description).toContain("سجن أبدي");
+    expect(n.description).toContain("تقنيات سامية؟");
   });
 
   it("carries the chapter credentials through", () => {
     const n = parse();
-    expect(n.mangaId).toBe("32235");
-    expect(n.chaptersNonce).toBe("6d7f45aa72");
+    expect(n.mangaId).toBe("114932");
+    expect(n.chaptersNonce).toBe("1ef880db28");
   });
 
   it("throws a page-identifying error when the config is missing", () => {
@@ -156,7 +197,7 @@ describe("parseSearchPage", () => {
     );
 
   it("returns one card per result row", () => {
-    expect(parsed().cards).toHaveLength(2);
+    expect(parsed().cards).toHaveLength(12);
   });
 
   it("reads url, title, cover, original title and genres", () => {
@@ -164,16 +205,20 @@ describe("parseSearchPage", () => {
       url: "https://cenele.com/cont/lord-of-wishes/",
       title: "سيد التمني",
       coverUrl:
-        "https://cenele.com/wp-content/uploads/2026/06/wishes-193x278.jpg",
+        "https://cenele.com/wp-content/uploads/2026/06/IMG_%D9%A2%D9%A0%D9%A2%D9%A6%D9%A0%D9%A3%D9%A1%D9%A7_%D9%A0%D9%A9%D9%A1%D9%A2%D9%A3%D9%A4-193x278.jpg",
       subtitle: "رواية Lord of Wishes",
-      badges: ["أكشن", "فانتازيا"],
+      badges: ["أكشن", "دراما", "رعب", "غموض", "فانتازيا"],
     });
   });
 
   it("omits optional fields a row doesn't carry", () => {
-    const second = parsed().cards[1];
-    expect(second.subtitle).toBeUndefined();
-    expect(second.badges).toBeUndefined();
+    // Row 2 ("عودة السيد الشامل الأسطوري") carries genre badges but no
+    // "Alternative" (original-title) block — the live fixture's real
+    // example of an optional field being absent.
+    const third = parsed().cards[2];
+    expect(third.title).toBe("عودة السيد الشامل الأسطوري");
+    expect(third.subtitle).toBeUndefined();
+    expect(third.badges).toBeDefined();
   });
 
   it("reports hasMore from the older-posts link", () => {
@@ -198,58 +243,284 @@ describe("parseSearchPage", () => {
   });
 });
 
+// ── homepage sections ────────────────────────────────────────────────────
+//
+// tests/fixtures/home.html is a live capture of https://cenele.com/. Two of
+// the sections it renders — the "nhv-newseries" slider and the
+// "nhv-gems-lb" leaderboard — list real novels that getHomeSections has to
+// surface, alongside the "nhv-newreleases" row it already handled.
+
+describe("parseHomeSections", () => {
+  it("parses the new-series slider as its own section", () => {
+    const doc = parseHtml(homeHtml);
+    const sections = parseHomeSections(doc);
+    const newseries = sections.find((s) => s.id === "newseries");
+    expect(newseries).toBeDefined();
+    // Fixture-derived, not a floor: one card per `article.nhv-feature` the
+    // captured slider actually renders. `length > 0` would pass for a
+    // parser that surfaced 1 of N.
+    const featureCount = doc.querySelectorAll(
+      "section.nhv-newseries article.nhv-feature",
+    ).length;
+    expect(featureCount).toBeGreaterThan(0);
+    expect(newseries!.cards).toHaveLength(featureCount);
+    for (const card of newseries!.cards) {
+      expect(card.url).toMatch(/^https:\/\/cenele\.com\/cont\//);
+      expect(card.title).not.toBe("");
+    }
+  });
+
+  it("parses the gems leaderboard as its own section", () => {
+    const sections = parseHomeSections(parseHtml(homeHtml));
+    const gems = sections.find((s) => s.id === "gems");
+    expect(gems).toBeDefined();
+    // The live board lists six ranked novels — that's the real count in
+    // the captured fixture (matches the live site's board size).
+    expect(gems!.cards).toHaveLength(6);
+    expect(gems!.cards[0].url).toMatch(/^https:\/\/cenele\.com\/cont\//);
+  });
+
+  it("drops the gem count and rank from the gems card titles", () => {
+    // The identity anchor's textContent glues a "boosted novel" label
+    // directly onto the title with no separator — proof the parser reads
+    // just the <strong> rather than falling through to the raw text.
+    const gems = parseHomeSections(parseHtml(homeHtml)).find((s) => s.id === "gems")!;
+    for (const card of gems.cards) {
+      expect(card.title).not.toMatch(/\d/);
+      expect(card.title).not.toContain("معززة");
+    }
+  });
+
+  it("falls back to the synthesized heading when the gems section ships no .nhv-title", () => {
+    // The live gems markup's own heading is a bare <h2>, not .nhv-title,
+    // so this is the actually-exercised path, not a defensive no-op.
+    const gems = parseHomeSections(parseHtml(homeHtml)).find((s) => s.id === "gems")!;
+    expect(gems.title).toBe("لوحة الجواهر");
+  });
+
+  it("never emits a section with zero cards", () => {
+    // An empty section renders as a bare heading over blank space in the
+    // Store, which reads as a bug rather than as "nothing here today".
+    for (const s of parseHomeSections(parseHtml(homeHtml))) {
+      expect(s.cards.length).toBeGreaterThan(0);
+    }
+  });
+});
+
 // ── chapter-body extraction ─────────────────────────────────────────────────
 //
 // The highest-consequence, most theme-fragile code in this extension: over-
 // strip and a user's imported book is silently truncated, under-strip and
-// piracy boilerplate is baked into their EPUB. tests/fixtures/chapter.html
-// exercises every decoy form isDecoyElement/looksLikePiracyDecoy claim to
-// handle (see the file-header comment and each function's own doc comment
-// in ../src/index.ts), alongside real-looking chapter paragraphs and a real
-// image, so a regression in either direction shows up here.
+// piracy boilerplate is baked into their EPUB.
+//
+// tests/fixtures/chapter.html is a live capture (chapter 1 of
+// create-heaven-riwya, 2026-09-18) — real prose, real decoys, not hand-
+// written. Two things about it are worth knowing before touching this
+// block:
+//
+// 1. As of this capture, EVERY decoy the live theme emits is a `<section
+//    data-nosnippet="true">`/`<span aria-hidden="true">` that sits as a
+//    SIBLING of the real `<p>` elements, never nested inside one and never
+//    a `<p>` itself (sampled across 11 chapters over 2 novels — see the
+//    README's "Chapter-body decoy stripping" section). extractChapterLines
+//    only ever reads `p, img`, so removing or not removing these siblings
+//    makes zero difference to its output on any chapter sampled during
+//    this refresh — the fixture proves the site still ships decoy markup
+//    and that none of its (still tatweel-obfuscated) boilerplate leaks
+//    into a real line, but it can't prove the nested-inside-a-<p> or
+//    whole-<p> removal paths, because nothing live currently exercises
+//    them. The synthetic test below keeps those paths covered.
+// 2. This capture is what surfaced a real bug during this refresh: three
+//    separate, unrelated one-word paragraphs in this chapter are all
+//    exactly "لكن…" ("But…"). The old whole-chapter `Set`-based dedup
+//    collapsed all three into one, silently dropping two real lines of
+//    prose. extractChapterLines now only dedups against the IMMEDIATELY
+//    PRECEDING line (see its own comment) — the fix this capture justified.
 
 describe("extractChapterLines", () => {
-  it("keeps every real paragraph and image, in order, and strips every decoy form", () => {
+  it("keeps every real chapter paragraph, in order, with no decoy boilerplate leaking through", () => {
     const doc = new DOMParser().parseFromString(chapterHtml, "text/html");
+
+    // Non-vacuous check: the fixture must still carry decoy markup THAT
+    // isDecoyElement ACTUALLY MATCHES INSIDE THE CONTENT REGION
+    // extractChapterLines reads — not just "this attribute appears
+    // somewhere on the page". aria-hidden="true" alone is a bad proxy for
+    // that: it's a common accessibility attribute the theme also uses on
+    // ordinary page chrome (share-button SVG icons, etc.) well outside
+    // .reading-content — a whole-file count of it would stay green even
+    // if every real chapter-body decoy vanished, which is the exact
+    // hollowness this check exists to rule out. data-nosnippet="true" is
+    // fine to check file-wide (it's decoy-exclusive in this fixture — see
+    // the report), but aria-hidden needs to be scoped to the actual
+    // content region and to elements isDecoyElement would flag.
+    const contentRoot =
+      doc.querySelector(".reading-content .text-left") ||
+      doc.querySelector(".reading-content") ||
+      doc.querySelector(".entry-content") ||
+      doc.body;
+    const ariaHiddenDecoyCount = contentRoot.querySelectorAll('[aria-hidden="true"]').length;
+    const dataNosnippetCount = (chapterHtml.match(/data-nosnippet="true"/g) || []).length;
+    expect(ariaHiddenDecoyCount).toBeGreaterThan(0);
+    expect(dataNosnippetCount).toBeGreaterThan(0);
+
     const lines = extractChapterLines(doc);
 
-    expect(lines).toEqual([
-      {
-        type: "text",
-        content: "كان يا ما كان، في قديم الزمان، عاش بطل الرواية في قرية صغيرة.",
-      },
-      // The aria-hidden <span> nested inside this <p> is removed by the
-      // first pass, but the real text on either side of it survives —
-      // proving decoys nested inside a real paragraph (not just whole
-      // decoy paragraphs) are handled, per the file's header comment.
-      {
-        type: "text",
-        content: "هذا نص حقيقي يتبعه المزيد من النص الحقيقي.",
-      },
-      // aria-hidden="true" (whole <p>), data-nosnippet="true", the
+    // 217 <p> elements in .reading-content .text-left, all real; a
+    // regression that starts over- or under-extracting moves this count.
+    expect(lines).toHaveLength(217);
+    expect(lines.every((l) => l.type === "text")).toBe(true);
+
+    // Real prose survives, in order, at both ends and in the middle.
+    expect(lines[0]).toEqual({
+      type: "text",
+      content: "الفصل الأول: التجنيد الإجباري",
+    });
+    expect(lines[Math.floor(lines.length / 2)]).toEqual({
+      type: "text",
+      content: "كانت حاكمة الحكمة واحدة من الحاكمات الثلاث العظيمات لتحالف البشر العالمي.",
+    });
+    expect(lines[lines.length - 1]).toEqual({
+      type: "text",
+      content: "الترجمة: القارئ الأبدي",
+    });
+
+    // The short one-word paragraph "لكن…" ("But…") genuinely repeats three
+    // times at unrelated points in this chapter — proof the fix in point 2
+    // of the file-header comment above keeps non-adjacent repeats, not
+    // just that it exists.
+    expect(lines.filter((l) => l.content === "لكن…")).toHaveLength(3);
+
+    // None of the decoy boilerplate leaks into the output. The marker is
+    // a slice of the REAL decoy string this capture carries (see
+    // liveDecoyText), not a phrase typed here — the previous version of
+    // this check looked for a hand-spelled keyword that occurs zero times
+    // in all four cenele fixtures, so it passed for an implementation
+    // that stripped nothing at all.
+    //
+    // This is a FLOOR, not a proof: as of this capture every decoy is a
+    // <section> sibling with no <p> inside it, and extractChapterLines
+    // only ever reads `p, img`, so nothing can leak here regardless of
+    // what either filter does. The non-vacuous proof that the keyword net
+    // actually matches this exact string is the two tests immediately
+    // below.
+    const decoyMarker = liveDecoyText().slice(-40);
+    for (const line of lines) {
+      expect(line.content).not.toContain(decoyMarker);
+    }
+  });
+
+  it("the keyword net matches the live capture's own boilerplate, obfuscation and all", () => {
+    // The check that would have caught the real bug: looksLikePiracyDecoy
+    // normalized only zero-width characters, and the live decoys are
+    // obfuscated with tatweel + Arabic presentation forms instead, so the
+    // whole "final-line safety net" was inert against everything the site
+    // emits. Fed the capture's own string, it must fire.
+    const decoy = liveDecoyText();
+    expect(looksLikePiracyDecoy(decoy)).toBe(true);
+    // And it must still be the obfuscated form that was matched — i.e.
+    // normalization is what makes it match, not the raw text happening to
+    // spell the keywords out.
+    expect(decoy).not.toContain("يسرق");
+    expect(normalizeDecoyText(decoy)).toContain("يسرق");
+  });
+
+  it("strips an unwrapped copy of the live decoy — the variant the structural filter cannot see", () => {
+    // The structural filter only removes elements carrying a decoy marker
+    // (aria-hidden / data-nosnippet / role=presentation / a hiding style).
+    // When the theme rolls a variant that carries none of them — which the
+    // README records it having done before — the keyword net is the only
+    // thing left. This presents the capture's REAL boilerplate as a bare
+    // <p> with no attributes, which is exactly that case.
+    const decoy = liveDecoyText();
+    const doc = new DOMParser().parseFromString(
+      `<div class="reading-content"><div class="text-left">
+        <p>سطر حقيقي قبل الفخ.</p>
+        <p>${decoy}</p>
+        <p>سطر حقيقي بعد الفخ.</p>
+      </div></div>`,
+      "text/html",
+    );
+    expect(extractChapterLines(doc)).toEqual([
+      { type: "text", content: "سطر حقيقي قبل الفخ." },
+      { type: "text", content: "سطر حقيقي بعد الفخ." },
+    ]);
+  });
+
+  // Synthetic (not a live capture): the live site sampled during this
+  // refresh never nests a decoy inside a real <p>, never ships a whole-<p>
+  // decoy, and never leaves an unhidden keyword-only decoy paragraph (see
+  // the file-header comment) — so this snippet is what keeps
+  // extractChapterLines's actual removal-and-dedup integration covered:
+  // a decoy nested inside a real paragraph, a whole aria-hidden <p>, a
+  // role="presentation" wrapper removed along with the real-looking <p>
+  // nested inside it, a hidden-style-only <p>, translate="no" ALONE
+  // surviving (it's not a decoy signal on its own), the keyword safety net
+  // catching a plain piracy paragraph isDecoyElement wouldn't flag, and
+  // adjacent-vs-non-adjacent text/image dedup.
+  it("integration: nested/whole-paragraph decoy removal, the keyword safety net, and adjacent-only dedup all still cooperate", () => {
+    const doc = new DOMParser().parseFromString(
+      `<div class="reading-content"><div class="text-left">
+        <p>هذا نص حقيقي <span aria-hidden="true">نص مخفي داخل الفقرة</span> يتبعه المزيد من النص الحقيقي.</p>
+        <p aria-hidden="true">هذا النص كله مخفي ولا يجب أن يظهر إطلاقاً.</p>
+        <p data-nosnippet="true">فقرة مخفية أخرى عبر data-nosnippet.</p>
+        <div role="presentation"><p>فقرة كاملة داخل عنصر role="presentation" يجب حذفها بالكامل.</p></div>
+        <p style="position:absolute;opacity:0;">فقرة مخفية عبر الأنماط المباشرة فقط.</p>
+        <p translate="no">اسم علم مثل Cenele لا يُترجم.</p>
+        <p>رواياتنا مسروقة من موقع فضاء الروايات، حمل تطبيقنا الآن.</p>
+        <p>القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.</p>
+        <p>القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.</p>
+        <p>سطر منتصف الفصل.</p>
+        <p>القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.</p>
+        <img src="https://cenele.com/wp-content/uploads/2024/01/scene.jpg" alt="scene">
+        <img src="https://cenele.com/wp-content/uploads/2024/01/scene.jpg" alt="scene duplicate">
+        <img class="wp-post-image" src="https://cenele.com/wp-content/uploads/2024/01/avatar.jpg" alt="decorative">
+        <img src="https://cenele.com/ads/banner.jpg" alt="ad">
+        <img src="https://cenele.com/wp-content/uploads/2024/01/other.jpg" alt="a different real image">
+        <img src="https://cenele.com/wp-content/uploads/2024/01/scene.jpg" alt="scene again, non-adjacent">
+      </div></div>`,
+      "text/html",
+    );
+
+    expect(extractChapterLines(doc)).toEqual([
+      // The nested aria-hidden <span> is removed by the first pass; the
+      // real text on either side of it survives in one paragraph.
+      { type: "text", content: "هذا نص حقيقي يتبعه المزيد من النص الحقيقي." },
+      // The whole aria-hidden <p>, the data-nosnippet <p>, the
       // role="presentation" wrapper (and the real-looking <p> nested
-      // inside it — removed along with its ancestor), the hidden-style-
-      // only <p>, and the translate="no"+hidden-style combo above are
-      // all absent from this array entirely: proof they were stripped,
-      // not merely reordered.
+      // inside it — removed along with its ancestor), and the
+      // hidden-style-only <p> are all absent entirely: proof they were
+      // stripped, not merely reordered.
       //
       // translate="no" ALONE (no hidden style) is deliberately NOT a
       // decoy signal — isDecoyElement requires hasHiddenStyle too — so
       // this paragraph must survive.
       { type: "text", content: "اسم علم مثل Cenele لا يُترجم." },
-      // The piracy-boilerplate paragraph (no special attributes at all)
-      // is caught by the looksLikePiracyDecoy keyword safety net, not by
-      // isDecoyElement — proof that net runs independently.
+      // The piracy-boilerplate paragraph has no special attributes at
+      // all — caught by looksLikePiracyDecoy, not isDecoyElement.
       //
-      // The next real paragraph is repeated twice in the fixture; only
-      // one copy survives (dedup).
+      // The next paragraph repeats twice back to back — adjacent dedup
+      // keeps one copy — then a middle line, then the SAME text a third
+      // time, non-adjacent this time, which must survive (see the fix
+      // described in the file-header comment: dedup is adjacency-only).
+      { type: "text", content: "القصة مستمرة والبطل يواصل رحلته نحو الحقيقة." },
+      { type: "text", content: "سطر منتصف الفصل." },
+      { type: "text", content: "القصة مستمرة والبطل يواصل رحلته نحو الحقيقة." },
+      // The real image repeats back to back — adjacent dedup keeps one
+      // copy; the wp-post-image avatar and the /ads/ banner are both
+      // decorative and excluded entirely (and don't count as the
+      // "previous image" for adjacency, since they're filtered before
+      // ever being considered). A different real image then plays the
+      // same role the middle text line played above, so the final
+      // repeat of the first image is genuinely non-adjacent in the KEPT
+      // output and must survive.
       {
-        type: "text",
-        content: "القصة مستمرة والبطل يواصل رحلته نحو الحقيقة.",
+        type: "image",
+        content: "https://cenele.com/wp-content/uploads/2024/01/scene.jpg",
       },
-      // The real image is repeated once (dedup keeps one copy); the
-      // wp-post-image avatar and the /ads/ banner are both decorative
-      // and excluded entirely.
+      {
+        type: "image",
+        content: "https://cenele.com/wp-content/uploads/2024/01/other.jpg",
+      },
       {
         type: "image",
         content: "https://cenele.com/wp-content/uploads/2024/01/scene.jpg",
@@ -263,6 +534,46 @@ describe("extractChapterLines", () => {
       "text/html",
     );
     expect(extractChapterLines(doc)).toEqual([{ type: "text", content: "نص الفصل هنا." }]);
+  });
+
+  // Documents a KNOWN LIMITATION (see the long comment at the dedup site in
+  // ../src/index.ts) — this pins the CURRENT behavior for review/regression
+  // purposes, it is not asserting this is the desired outcome. A duplicated
+  // multi-element run (<p>A</p><img>X</img><p>B</p> immediately repeated)
+  // is not deduped as a whole: lastText/lastImage are tracked per element
+  // type, so from the text-only sub-sequence's point of view A and B are
+  // never adjacent to their own repeat (B sits between them), and both
+  // survive as visible duplicates — the accepted trade-off. But from the
+  // image-only sub-sequence's point of view, the two <img>X occurrences
+  // ARE adjacent (no other image occurs between them), so the second one
+  // is silently dropped — a real, if narrow, silent-loss case this
+  // trade-off still accepts. If this test's expectations ever need to
+  // change because the dedup strategy was redesigned, that's a deliberate
+  // change to make with full knowledge of this case, not a fixture drift.
+  it("known limitation: a duplicated multi-element run isn't deduped as a whole (text duplicates survive, the repeated image is silently dropped)", () => {
+    const doc = new DOMParser().parseFromString(
+      `<div class="reading-content"><div class="text-left">
+        <p>A</p>
+        <img src="https://cenele.com/wp-content/uploads/2024/01/x.jpg" alt="x">
+        <p>B</p>
+        <p>A</p>
+        <img src="https://cenele.com/wp-content/uploads/2024/01/x.jpg" alt="x">
+        <p>B</p>
+      </div></div>`,
+      "text/html",
+    );
+    expect(extractChapterLines(doc)).toEqual([
+      { type: "text", content: "A" },
+      { type: "image", content: "https://cenele.com/wp-content/uploads/2024/01/x.jpg" },
+      { type: "text", content: "B" },
+      // The repeated run's <p>A</p> and <p>B</p> both survive (duplicated,
+      // visible) ...
+      { type: "text", content: "A" },
+      // ... but the run's repeated <img> does NOT survive: it was silently
+      // deduped away here, even though a real <p>B</p> sits between the
+      // two occurrences in the actual document.
+      { type: "text", content: "B" },
+    ]);
   });
 });
 
@@ -391,19 +702,549 @@ describe("createSource (end-to-end via createTestHost)", () => {
     expect(result.query).toBe("سيد");
     expect(result.page).toBe(1);
     expect(result.hasMore).toBe(true);
-    expect(result.cards).toHaveLength(2);
+    expect(result.cards).toHaveLength(12);
     expect(result.cards[0]).toEqual({
       url: "https://cenele.com/cont/lord-of-wishes/",
       title: "سيد التمني",
-      coverUrl: "https://cenele.com/wp-content/uploads/2026/06/wishes-193x278.jpg",
+      coverUrl:
+        "https://cenele.com/wp-content/uploads/2026/06/IMG_%D9%A2%D9%A0%D9%A2%D9%A6%D9%A0%D9%A3%D9%A1%D9%A7_%D9%A0%D9%A9%D9%A1%D9%A2%D9%A3%D9%A4-193x278.jpg",
       subtitle: "رواية Lord of Wishes",
-      badges: ["أكشن", "فانتازيا"],
+      badges: ["أكشن", "دراما", "رعب", "غموض", "فانتازيا"],
     });
+  });
+
+  it("prefixes a thrown error with the manifest id, not a display name", () => {
+    const doc = new DOMParser().parseFromString("<html><body></body></html>", "text/html");
+    expect(() => parseNovelPage(doc, "https://cenele.com/cont/x/")).toThrow(
+      new RegExp(`^${MANIFEST_ID}: `),
+    );
   });
 
   it("canHandle() accepts cenele.com URLs and rejects other hosts", () => {
     const source = createSource(createTestHost());
     expect(source.canHandle("https://cenele.com/cont/pursuit/")).toBe(true);
     expect(source.canHandle("https://example.com/")).toBe(false);
+  });
+
+  it("getChapterContent() fetches the chapter URL and returns the parsed body", async () => {
+    const url = "https://cenele.com/cont/create-heaven-riwya/chapter-1/";
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const host = createTestHost({ responses: { [url]: chapterHtml }, calls });
+
+    const lines = await createSource(host).getChapterContent({
+      id: 1,
+      title: "الفصل الأول",
+      url,
+      lines: [],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(url);
+    expect(calls[0].method).toBe("GET");
+    expect(lines).toHaveLength(217);
+    expect(lines[0]).toEqual({ type: "text", content: "الفصل الأول: التجنيد الإجباري" });
+  });
+
+  it("getChapterContent() refuses a page that parses to zero lines instead of importing a blank chapter", async () => {
+    // A blocked or errored response served with HTTP 200 —
+    // extractChapterLines falls back to `doc.body` and finds no
+    // paragraphs. Returning [] here would import a chapter the reader
+    // renders as a blank page, indistinguishable from a genuinely empty
+    // one and silent at every layer above. The chapter URL must be in the
+    // message: it is the only handle a user has when reporting it.
+    const url = "https://cenele.com/cont/create-heaven-riwya/chapter-99/";
+    const host = createTestHost({
+      responses: { [url]: "<html><body><div class=\"reading-content\"></div></body></html>" },
+    });
+
+    await expect(
+      createSource(host).getChapterContent({ id: 99, title: "x", url, lines: [] }),
+    ).rejects.toThrow(url);
+  });
+});
+
+// ── the AJAX subsystem ─────────────────────────────────────────────────────
+//
+// Everything cenele does beyond search and chapter bodies runs over
+// `wp-admin/admin-ajax.php` with form-encoded bodies: the volume list
+// (`meta_only=1`), each volume's paginated chapter list, and in-novel
+// chapter search. None of it was driven through `createSource` before.
+//
+// These assert on the RECORDED REQUEST — url, method and exact body —
+// not just on the parse of a canned reply. Every one of these calls is a
+// POST to the SAME url, so a source that sent the wrong action, the
+// section nonce instead of the chapters nonce, or a 1-indexed page where
+// the site wants a volume number would still be handed the right fixture
+// by any url-keyed stub and still "pass" a parse-only assertion.
+//
+// The AJAX replies below are SYNTHETIC — built to the shapes this
+// extension's README documents for `nhv_manga_single_chapters_page` and
+// `nhv_search_manga_chapters`. The novel PAGE they hang off
+// (fixtures/novel.html) is the real live capture, so the manga id and
+// nonce these requests carry are the site's own values, not invented ones.
+
+const AJAX_URL = "https://cenele.com/wp-admin/admin-ajax.php";
+const NOVEL_URL = "https://cenele.com/cont/create-heaven-riwya/";
+/** From the live novel.html capture — see the extractNovelConfig tests. */
+const MANGA_ID = "114932";
+const CHAPTERS_NONCE = "1ef880db28";
+
+type Call = { url: string; method: string; body?: string };
+
+/** One `<li>` in the shape the chapters AJAX returns. */
+const chapterLi = (n: number, name: string) =>
+  `<li data-chapter-id="${n}" class="wp-manga-chapter">` +
+  `<a href="https://cenele.com/cont/create-heaven-riwya/${n}/">الفصل ${n} ` +
+  `<span class="nhv-chapter-name">${name}</span></a></li>`;
+
+/** A SourceHost that routes POSTs by their form body rather than by url.
+ *  Necessary here and not incidental: `meta_only`, every chapter page and
+ *  chapter search all POST to the one admin-ajax.php url, so a url-keyed
+ *  stub cannot tell them apart — and a test built on one would serve the
+ *  volume list to a request that asked for chapter search. */
+function ajaxHost(options: {
+  pages?: Record<string, string>;
+  ajax: (params: URLSearchParams) => string;
+  calls?: Call[];
+}): SourceHost {
+  const calls = options.calls ?? [];
+  const base = createTestHost({ responses: options.pages ?? {}, calls });
+  return {
+    ...base,
+    async fetch(url, opts) {
+      if (opts?.method === "POST") {
+        calls.push({ url, method: "POST", body: opts.body });
+        return {
+          status: 200,
+          text: options.ajax(new URLSearchParams(opts.body ?? "")),
+          headers: {},
+        };
+      }
+      return base.fetch(url, opts);
+    },
+  };
+}
+
+/** The volume list the meta_only call answers with. Deliberately NOT in
+ *  ascending order, and with the num=0 "no volume" pseudo-volume in the
+ *  middle, so the sort getNovel applies is actually exercised. */
+const META_VOLUMES = JSON.stringify({
+  success: true,
+  mixed: true,
+  volumes: [
+    { num: 2, label: "المجلد الثاني", count: 2 },
+    { num: 0, label: "بدون مجلد", count: 1 },
+    { num: 1, label: "المجلد الأول", count: 3 },
+  ],
+});
+
+/** Answers meta_only, one-page volume listings and chapter search.
+ *  Volume 1 spans two pages (has_more on page 1) so the pagination loop
+ *  is exercised; volumes 2 and 0 are one page each. */
+function defaultAjax(params: URLSearchParams): string {
+  const action = params.get("action");
+  if (action === "nhv_manga_single_chapters_page") {
+    if (params.get("meta_only") === "1") return META_VOLUMES;
+    const volume = Number(params.get("volume"));
+    const page = Number(params.get("page"));
+    if (volume === 1) {
+      return page === 1
+        ? JSON.stringify({
+            success: true,
+            has_more: true,
+            page,
+            html: chapterLi(1, "البداية") + chapterLi(2, "الطريق"),
+          })
+        : JSON.stringify({ success: true, has_more: false, page, html: chapterLi(3, "النهاية") });
+    }
+    if (volume === 2) {
+      return JSON.stringify({
+        success: true,
+        has_more: false,
+        page,
+        html: chapterLi(4, "فصل رابع") + chapterLi(5, "فصل خامس"),
+      });
+    }
+    return JSON.stringify({ success: true, has_more: false, page, html: chapterLi(6, "ملحق") });
+  }
+  if (action === "nhv_search_manga_chapters") {
+    return JSON.stringify({
+      success: true,
+      items: [
+        {
+          id: 5,
+          title: "الفصل 5",
+          title_html: 'الفصل 5 <span class="nhv-chapter-name">فصل خامس</span>',
+          url: "https://cenele.com/cont/create-heaven-riwya/5/",
+          time: "",
+        },
+        {
+          id: 9,
+          title: "الفصل 9",
+          title_html: 'الفصل 9 <span class="nhv-chapter-name">فصل تاسع</span>',
+          url: "https://cenele.com/cont/create-heaven-riwya/9/",
+          time: "",
+        },
+      ],
+    });
+  }
+  throw new Error(`unexpected AJAX action: ${action}`);
+}
+
+const form = (fields: Record<string, string>) => new URLSearchParams(fields).toString();
+
+describe("getNovel (AJAX volume meta)", () => {
+  it("fetches the novel page, then asks meta_only=1 for the volume list", async () => {
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+
+    const novel = await source.getNovel(NOVEL_URL);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ url: NOVEL_URL, method: "GET" });
+    // The exact form body — the action, the CHAPTERS nonce (not
+    // nhvNovelV2.nonce, which would 403 every call), the manga id lifted
+    // from the live page, and meta_only.
+    expect(calls[1]).toEqual({
+      url: AJAX_URL,
+      method: "POST",
+      body: form({
+        action: "nhv_manga_single_chapters_page",
+        nonce: CHAPTERS_NONCE,
+        manga_id: MANGA_ID,
+        meta_only: "1",
+      }),
+    });
+
+    expect(novel.title).toBe("انشاء القوانين السماوية");
+    // Sorted ascending by the site's own volume number, with the num=0
+    // "no volume" pseudo-volume last regardless of where it arrived.
+    // `key` carries the site's number; `id` is ours and is 1-based.
+    expect(novel.volumes).toEqual([
+      { id: 1, title: "المجلد الأول", chapters: [], chapterCount: 3, key: "1" },
+      { id: 2, title: "المجلد الثاني", chapters: [], chapterCount: 2, key: "2" },
+      { id: 3, title: "بدون مجلد", chapters: [], chapterCount: 1, key: "0" },
+    ]);
+  });
+
+  it("declares lazy volumes and hands back empty chapter arrays", () => {
+    // getNovel must not have fetched any chapter list: the whole point of
+    // the lazy contract is that a 12-volume novel opens without walking
+    // every volume's pagination.
+    expect(createSource(createTestHost()).hasLazyVolumes).toBe(true);
+  });
+
+  it("falls back to a synthesized volume title when the site sends none", async () => {
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: (p) =>
+          p.get("meta_only") === "1"
+            ? JSON.stringify({ success: true, volumes: [{ num: 4, label: "", count: 1 }] })
+            : defaultAjax(p),
+      }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    // The fallback is synthesized through host.locale, and createTestHost
+    // defaults to "en" — proof the label came from this extension's own
+    // string catalogue rather than from the (empty) site value.
+    expect(novel.volumes[0].title).toBe("Volume 4");
+  });
+
+  it("throws when the meta_only call reports no volumes", async () => {
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: () => JSON.stringify({ success: false }),
+      }),
+    );
+    await expect(source.getNovel(NOVEL_URL)).rejects.toThrow(/meta_only/);
+  });
+});
+
+describe("getVolumeChapters (paginated chapter-list AJAX)", () => {
+  const volumeOf = (novel: { volumes: SourceVolume[] }, id: number) =>
+    novel.volumes.find((v) => v.id === id)!;
+
+  it("walks the has_more pagination loop and assigns ids from the volume's own offset", async () => {
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+
+    const chapters = await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 1));
+
+    // Two POSTs, because page 1 answered has_more: true. Both carry the
+    // site's volume NUMBER (from meta), a 1-based page, and per_page=50.
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual({
+      url: AJAX_URL,
+      method: "POST",
+      body: form({
+        action: "nhv_manga_single_chapters_page",
+        nonce: CHAPTERS_NONCE,
+        manga_id: MANGA_ID,
+        volume: "1",
+        page: "1",
+        per_page: "50",
+      }),
+    });
+    expect(calls[1].body).toContain("page=2");
+
+    // Volume 1 starts at id 1; the chapter number prefix and the
+    // `.nhv-chapter-name` subtitle are joined with a dash.
+    expect(chapters).toEqual([
+      { id: 1, title: "الفصل 1 - البداية", url: "https://cenele.com/cont/create-heaven-riwya/1/", lines: [] },
+      { id: 2, title: "الفصل 2 - الطريق", url: "https://cenele.com/cont/create-heaven-riwya/2/", lines: [] },
+      { id: 3, title: "الفصل 3 - النهاية", url: "https://cenele.com/cont/create-heaven-riwya/3/", lines: [] },
+    ]);
+  });
+
+  it("offsets a later volume's ids past every earlier volume's chapter count", async () => {
+    const source = createSource(ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax }));
+    const novel = await source.getNovel(NOVEL_URL);
+
+    // Volume 1 declared 3 chapters, so volume 2 starts at 4 and the
+    // num=0 pseudo-volume at 6 — WITHOUT volume 1 ever being expanded.
+    // That is what makes a chapter id stable across sessions.
+    expect((await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 2))).map((c) => c.id)).toEqual([
+      4, 5,
+    ]);
+    expect((await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 3))).map((c) => c.id)).toEqual([
+      6,
+    ]);
+  });
+
+  it("sends the site's volume number, not our volume id", async () => {
+    // Our id 3 is the site's volume 0. Sending the id would fetch the
+    // wrong volume's chapters and nothing downstream would notice.
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+    await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 3));
+    expect(calls[0].body).toContain("volume=0");
+  });
+
+  it("re-derives the manga id, nonce and volume offsets on a cold-start cache miss", async () => {
+    // The detail view loaded a snapshot from disk and calls us with no
+    // prior getNovel in this session. The novel page has to be refetched
+    // for the nonce and the meta call redone for the offsets, or the
+    // chapter ids would restart at 1 for every volume.
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+
+    const chapters = await source.getVolumeChapters!(NOVEL_URL, {
+      id: 2,
+      title: "المجلد الثاني",
+      chapters: [],
+      key: "2",
+    });
+
+    expect(calls[0]).toMatchObject({ url: NOVEL_URL, method: "GET" });
+    expect(calls[1].body).toContain("meta_only=1");
+    expect(calls[2].body).toContain("volume=2");
+    expect(chapters.map((c) => c.id)).toEqual([4, 5]);
+  });
+
+  it("resolves a volume by its key when our id no longer matches the meta list", async () => {
+    // A snapshot written in an earlier session can carry an id the site's
+    // current volume list doesn't assign. `key` (the site's own number)
+    // is the durable handle.
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+
+    const chapters = await source.getVolumeChapters!(NOVEL_URL, {
+      id: 99,
+      title: "المجلد الثاني",
+      chapters: [],
+      key: "2",
+    });
+
+    expect(calls[0].body).toContain("volume=2");
+    expect(chapters.map((c) => c.id)).toEqual([4, 5]);
+  });
+
+  it("throws when neither the id nor the key resolves to a known volume", async () => {
+    const source = createSource(ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax }));
+    await source.getNovel(NOVEL_URL);
+    await expect(
+      source.getVolumeChapters!(NOVEL_URL, { id: 99, title: "x", chapters: [], key: "77" }),
+    ).rejects.toThrow(/couldn't resolve volume 99/);
+  });
+
+  it("throws when a chapters page comes back unsuccessful, naming the page and volume", async () => {
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: (p) =>
+          p.get("meta_only") === "1" ? META_VOLUMES : JSON.stringify({ success: false }),
+      }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    await expect(
+      source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 1)),
+    ).rejects.toThrow(/chapters page 1 for volume 1/);
+  });
+
+  it("stops at MAX_VOLUME_PAGES when the server never clears has_more", async () => {
+    // A broken or hostile `has_more` must not hang the import. The cap is
+    // 100 pages (MAX_VOLUME_PAGES in ../src/index.ts).
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: (p) =>
+          p.get("meta_only") === "1"
+            ? META_VOLUMES
+            : JSON.stringify({ success: true, has_more: true, html: chapterLi(1, "تكرار") }),
+        calls,
+      }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+
+    await source.getVolumeChapters!(NOVEL_URL, volumeOf(novel, 1));
+
+    expect(calls).toHaveLength(100);
+    expect(calls[99].body).toContain("page=100");
+  });
+});
+
+describe("searchChapters (in-novel chapter search AJAX)", () => {
+  it("sends the search action with the shared nonce and reuses ids already assigned", async () => {
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+    // Expanding volume 2 is what teaches the source that chapter 5's URL
+    // maps to id 5 — without it there is nothing to reuse.
+    await source.getVolumeChapters!(NOVEL_URL, novel.volumes[1]);
+    calls.length = 0;
+
+    const hits = await source.searchChapters!(NOVEL_URL, "فصل");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      url: AJAX_URL,
+      method: "POST",
+      body: form({
+        action: "nhv_search_manga_chapters",
+        nonce: CHAPTERS_NONCE,
+        manga_id: MANGA_ID,
+        query: "فصل",
+        limit: "80",
+      }),
+    });
+
+    // The hit that already exists in the expanded volume keeps that
+    // volume's id (5) — that is what lets a click hand off to the reader.
+    // The title is recomposed from `title_html`, dash-joined the same way
+    // the volume listing composes it.
+    expect(hits[0]).toEqual({
+      id: 5,
+      title: "الفصل 5 - فصل خامس",
+      url: "https://cenele.com/cont/create-heaven-riwya/5/",
+      lines: [],
+    });
+  });
+
+  it("never mints a synthetic id that a volume will later claim, even before any expand", async () => {
+    // The chapter-search input sits above a COLLAPSED accordion, so a
+    // search before any volume is expanded is the common case, not an
+    // edge one. chapterIdByUrl is empty until an expand, so a counter
+    // seeded only from it starts at 0 and hands out 1, 2, 3 … — exactly
+    // volume 1's real chapter ids. The collision only surfaced later,
+    // when the user expanded volume 1 and two different chapters claimed
+    // the same id.
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+
+    // No getVolumeChapters call anywhere before this.
+    const hits = await source.searchChapters!(NOVEL_URL, "فصل");
+    expect(hits).toHaveLength(2);
+
+    // META_VOLUMES declares 3 + 2 + 1 = 6 chapters, so ids 1..6 are all
+    // spoken for. Every synthetic id must sit above that.
+    const declared = novel.volumes.reduce((n, v) => n + (v.chapterCount ?? 0), 0);
+    expect(declared).toBe(6);
+    for (const hit of hits) {
+      expect(hit.id).toBeGreaterThan(declared);
+    }
+    // And they must be distinct from each other.
+    expect(new Set(hits.map((h) => h.id)).size).toBe(hits.length);
+
+    // Now expand the volumes that really own those ids and confirm
+    // nothing overlaps.
+    const real = [
+      ...(await source.getVolumeChapters!(NOVEL_URL, novel.volumes[0])),
+      ...(await source.getVolumeChapters!(NOVEL_URL, novel.volumes[1])),
+      ...(await source.getVolumeChapters!(NOVEL_URL, novel.volumes[2])),
+    ];
+    const realIds = new Set(real.map((c) => c.id));
+    expect(realIds.size).toBe(6);
+    for (const hit of hits) {
+      expect(realIds.has(hit.id)).toBe(false);
+    }
+  });
+
+  it("returns an empty list for a blank query without calling the site", async () => {
+    const calls: Call[] = [];
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax, calls }),
+    );
+    await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+    expect(await source.searchChapters!(NOVEL_URL, "   ")).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("throws when called before getNovel has populated the per-novel cache", async () => {
+    const source = createSource(ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax }));
+    await expect(source.searchChapters!(NOVEL_URL, "فصل")).rejects.toThrow(
+      /searchChapters called before getNovel/,
+    );
+  });
+
+  it("throws when the search response is not the expected shape", async () => {
+    const source = createSource(
+      ajaxHost({
+        pages: { [NOVEL_URL]: novelHtml },
+        ajax: (p) => (p.get("meta_only") === "1" ? META_VOLUMES : JSON.stringify({ success: true })),
+      }),
+    );
+    await source.getNovel(NOVEL_URL);
+    await expect(source.searchChapters!(NOVEL_URL, "فصل")).rejects.toThrow(
+      /chapter search returned an unexpected response/,
+    );
+  });
+});
+
+describe("getHomeSections (end-to-end via createTestHost)", () => {
+  it("requests the site root and returns the parsed sections", async () => {
+    const calls: Call[] = [];
+    const host = createTestHost({ responses: { "https://cenele.com/": homeHtml }, calls });
+
+    const sections = await createSource(host).getHomeSections();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ url: "https://cenele.com/", method: "GET" });
+    expect(sections.map((s) => s.id)).toEqual(["gems", "newseries", "newreleases"]);
+    expect(sections.every((s) => s.cards.length > 0)).toBe(true);
   });
 });

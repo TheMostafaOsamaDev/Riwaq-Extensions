@@ -18,8 +18,10 @@ there; this file only covers the process around a contribution.
 
 `.github/workflows/ci.yml` runs on every PR: manifest validation, typecheck, the test
 suite, a full build of every extension, and (once an extension is already published) a
-check that its manifest `version` was bumped if any of its files changed. All of it has
-to pass before a PR merges — there is no separate publish step to catch what CI missed.
+check that its manifest `version` was bumped if anything that reaches its published
+bundle changed — its own files, or the shared `packages/` code and `scripts/build.ts`
+that get inlined into every bundle. All of it has to pass before a PR merges — there is
+no separate publish step to catch what CI missed.
 
 Nothing a PR does publishes anything. Publishing only happens from `main` — see the
 README's [Publishing](README.md#publishing) section.

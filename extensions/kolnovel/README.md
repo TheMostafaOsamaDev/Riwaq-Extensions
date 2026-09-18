@@ -28,7 +28,7 @@ chapters.
 | `search`              | ✓ (unpaginated) | `GET /?s=<q>` only — see **Search** below |
 | `getNovel`            | ✓         | `/series/<slug>/` — `.sertobig` + `.ts-chl-collapsible` |
 | `searchChapters`      | —         | no in-novel search on the site |
-| `getChapterContent`   | ✓ (HTML + PDF fallback) | see **Chapter content** below |
+| `getChapterContent`   | ✓ (HTML + PDF fallback) | see **Chapter content** below; throws rather than return an empty chapter |
 
 ## Search
 
@@ -69,10 +69,18 @@ falls back to the site's token-gated download flow:
 
 1. `POST /wp-admin/admin-ajax.php` with `action=ts_ln_dl_url&post_id=<id>`
    (the numeric id trailing the chapter's permalink) → `{ error: 0, url:
-   "https://kolnovel.com/<chapter>/pdf/?tspdftoken=<token>" }`.
+   "https://kolnovel.com/<chapter>/pdf/?tspdftoken=<token>" }`. The returned
+   url is resolved against the site origin before use — see **Token-flow
+   failures** below for why that is not paranoia.
 2. `GET` that tokenized URL → the PDF bytes. `assertPdf` checks the `%PDF`
    magic bytes before proceeding, since an expired/invalid token makes the
-   endpoint return an HTML error/login page instead of a file.
+   endpoint return an HTML error/login page instead of a file. The length
+   bound is `>= 4`, which is what reading bytes 0-3 actually needs. This is a
+   magic-byte check and not a `Content-Type` check because the extension
+   cannot see the content type at all: `SourceHost.fetchBytes` returns a bare
+   `Promise<Uint8Array>` with no headers beside it (only the text `fetch`
+   returns a `FetchResponse` carrying `headers`). The first four bytes are the
+   only evidence this path has.
 3. The bytes go to **`host.pdf.extractChapter(bytes, { chapterUrl,
    novelTitle, mintImageRef })`** — this extension never parses PDF bytes
    itself. `pdf.js` is too heavy to bundle per-extension (the build enforces
@@ -83,12 +91,78 @@ falls back to the site's token-gated download flow:
    `imageStore` map; `resolveImage(ref)` reads them back out for the host to
    package. This mirrors how any source emits an image `SourceLine` whose
    `content` is not a directly-fetchable URL — see `resolveImage` on
-   `Source` in `@riwaq/extension-api`.
+   `Source` in `@riwaq/extension-api`. The map is cleared at the start of
+   every PDF extraction, so it holds one chapter's images rather than a
+   session's: a ref is valid only until the next `getChapterContent` call on
+   the same instance, which is the lifetime `Source.resolveImage` documents.
+   It used to be cleared only in `getNovel`, which a reader working through
+   an already-imported snapshot never calls.
 
 There is no length heuristic gating the HTML-vs-PDF choice: a real chapter's
 HTML body can legitimately be short or image-heavy, and guessing from length
 would wrongly route those to the PDF endpoint (which fails for HTML-only
 chapters). "Zero lines extracted" is the only trigger for the PDF fallback.
+
+### Never a hollow chapter, and never a hollow novel
+
+If the HTML body parses to nothing *and* the PDF extracts to nothing,
+`getChapterContent` **throws**, naming the chapter URL. It does not return an
+empty `lines` array. An empty chapter is imported silently and drawn by the
+reader as a blank page, indistinguishable from a chapter that is genuinely
+empty — there is no layer above this one that can tell the difference, so the
+refusal has to happen here. A genuinely empty *search* result is a different
+thing and returns empty without throwing.
+
+`parseNovelPage` applies the same ruling to a novel page: `title` falls back
+to `""`, `tags` to `[]` and `volumes` to `[]`, so a blocked or errored page
+served with HTTP 200 would otherwise produce a structurally valid but
+completely empty `SourceNovel` that imports as a book with no chapters. It
+**throws** when no title can be read, naming the page URL. A real novel page
+that simply has no chapters listed yet is *not* refused — that is a page the
+site legitimately serves.
+
+### Dedup is adjacency-only, not whole-chapter
+
+`parseChapterContent` dedups a line only against the immediately-preceding
+line of the same type, not against every line seen earlier in the chapter.
+A whole-chapter `Set` silently deletes a legitimately repeated short
+paragraph — a one-word interjection reused at unrelated points in the
+narrative — from the imported book. That is not hypothetical: `extensions/
+cenele` hit exactly this on a live capture (three unrelated one-word
+paragraphs, all identical, two of them dropped) and its README records it.
+No loss is demonstrated in kolnovel's own live capture — `chapter-live.html`
+yields 163 kept paragraphs, all distinct, so both strategies produce
+identical output there — so this is the known-good fix ported before the
+site hands us the case. See the comment at the dedup site for the known
+limitation the trade-off accepts, and the test that pins the difference.
+
+### Token-flow failures
+
+The three ways the token request can fail are three separate errors, because
+they have three different causes and three different fixes. They were one
+message until v1.0.1 — `"members-only or removed"` — which named a cause the
+code had not established. Verified against the live endpoint on 2026-09-18,
+and each response committed as a fixture under `tests/fixtures/`:
+
+| Request | Response | Extension's behaviour |
+|---|---|---|
+| `post_id=293246` (a real chapter) | `{"error":0,"url":"https://kolnovel.com/…/pdf/?tspdftoken=…"}` | downloads it |
+| `post_id=` (empty) or a non-numeric id | `{"error":403,"url":""}` | throws naming **error code 403** |
+| `post_id=999999999` (unknown id) | `{"error":0,"url":"/pdf/?tspdftoken=…"}` | resolves the **root-relative** url against the origin, then fails the `%PDF` check |
+| — (synthetic) | `{"error":0}` | throws: reported success, **no download url** |
+| — (synthetic) | a non-JSON body | throws, reporting the **HTTP status** |
+
+The third row is the surprising one and the reason the url is resolved rather
+than forwarded: for a post id the site does not recognise it answers *success*
+and hands back a root-relative url with the novel segment missing. Passing
+that string to `host.fetchBytes` would ask the host to fetch a relative URL;
+resolving it yields a real absolute URL whose failure is then reported
+accurately by `assertPdf`.
+
+`assertPdf`'s message reports the chapter URL and a short description of what
+actually arrived (`1153 bytes starting "<html>"`), so a user forwarding the
+error and a maintainer reading it later can tell an HTML loader page from an
+empty body from a CDN challenge without re-running the download.
 
 ## Why static fetch is enough
 
@@ -111,6 +185,17 @@ chapter URLs in the same homepage rows. Every card parser filters on
 is expected to navigate a card click to a novel detail view, not a chapter.
 
 ## Home section shapes
+
+**Section ids are derived from the section, never from its position.**
+`SourceSection.id` is contracted to be stable and useful for caching.
+`.trendarea` is `trending` and `.homehot` is `hot` (one of each per page);
+a `.bixbox` takes `bixbox-` plus the `order`/`status`/`type` query of its
+own "see more" link (`/series/?status=&order=update` → `bixbox-update`),
+falling back to a slug of its heading. A document-order `home-<idx>` —
+which this used to emit, and which was incremented only for sections that
+survived the zero-cards filter — reindexed every rail below any rail that
+happened to render nothing that run. `extensions/cenele` abandoned the
+same scheme for the same reason and keys off each section's CSS class.
 
 | Class        | Cards under         | Notes |
 |--------------|----------------------|-------|
@@ -138,7 +223,7 @@ specifically to guard against this being "restored" by a future edit.
 
 | Field          | Selector |
 |----------------|----------|
-| Title          | `.sertobig h1.entry-title` (falls back to a bare `h1.entry-title`) |
+| Title          | `.sertobig h1.entry-title` (falls back to a bare `h1.entry-title`; **no title at all is a refusal**, see [Never a hollow chapter, and never a hollow novel](#never-a-hollow-chapter-and-never-a-hollow-novel)) |
 | Original title | `.sertobig .alter` |
 | Status         | `.sertobig .sertostat > span` — kept as the site's own text; a host UI renders it verbatim as a badge |
 | Cover image    | `.sertobig .sertothumb img` |

@@ -36,6 +36,7 @@ import {
   absoluteUrl,
   parseHtml,
   sanitizeText,
+  type Locale,
   type NovelCard,
   type Source,
   type SourceChapter,
@@ -104,7 +105,7 @@ export default function createSource(host: SourceHost): Source {
       host.log("info", "getHomeSections");
       const resp = await host.fetch(BASE_URL + "/");
       const doc = parseHtml(resp.text);
-      return parseHomeSections(doc);
+      return parseHomeSections(doc, host.locale);
     },
 
     async search(query, page) {
@@ -153,7 +154,7 @@ export default function createSource(host: SourceHost): Source {
       let nextId = 1;
       const volumes: SourceVolume[] = sorted.map((shell, i) => {
         const ourId = i + 1;
-        const count = shell.count ?? 0;
+        const count = shell.count;
         const startId = nextId;
         volumeIndex.set(ourId, {
           sourceNum: shell.num,
@@ -208,7 +209,7 @@ export default function createSource(host: SourceHost): Source {
         const ajax = extractNovelConfig(resp.text);
         if (!ajax) {
           throw new Error(
-            "Cenele: couldn't find nhvNovelV2 config — site layout may have changed.",
+            "cenele: couldn't find nhvNovelV2 config — site layout may have changed.",
           );
         }
         const meta = await fetchVolumeMeta(host, ajax.postId, ajax.chaptersNonce);
@@ -223,7 +224,7 @@ export default function createSource(host: SourceHost): Source {
         >();
         let nextId = 1;
         sorted.forEach((shell, i) => {
-          const c = shell.count ?? 0;
+          const c = shell.count;
           volumeIndex.set(i + 1, {
             sourceNum: shell.num,
             startId: nextId,
@@ -256,7 +257,7 @@ export default function createSource(host: SourceHost): Source {
       }
       if (!entry) {
         throw new Error(
-          `Cenele: couldn't resolve volume ${volume.id} — meta lookup mismatch.`,
+          `cenele: couldn't resolve volume ${volume.id} — meta lookup mismatch.`,
         );
       }
 
@@ -286,7 +287,7 @@ export default function createSource(host: SourceHost): Source {
         // rendered alongside the volumes accordion, which itself comes
         // from getNovel), but guard with a clear message.
         throw new Error(
-          "Cenele: searchChapters called before getNovel — internal state is missing.",
+          "cenele: searchChapters called before getNovel — internal state is missing.",
         );
       }
       const items = await callChapterSearch(
@@ -299,10 +300,27 @@ export default function createSource(host: SourceHost): Source {
       // in the volume listing share the same numeric id (lets the
       // detail-view click hand off to the chapter reader). Chapters
       // present in the search but missing from the cached map are
-      // assigned synthetic ids beyond the highest existing one — they
-      // still render but won't deep-link until the user fetches the
-      // owning volume.
+      // assigned synthetic ids beyond the highest id any volume will
+      // ever assign — they still render but won't deep-link until the
+      // user fetches the owning volume.
+      //
+      // The ceiling is computed from `volumeIndex`, NOT from
+      // `chapterIdByUrl`. chapterIdByUrl is empty until a volume is
+      // actually expanded, so walking it alone starts the counter at 0
+      // and hands out 1, 2, 3 … — precisely volume 1's real chapter ids.
+      // A search run before any expand (the common case: the chapter
+      // search input sits above a collapsed accordion) therefore minted
+      // ids that collided with real chapters, and the collision only
+      // surfaced later, when the user expanded volume 1 and two
+      // different chapters claimed the same id. volumeIndex is populated
+      // by getNovel from the meta_only response and covers every chapter
+      // the novel has, expanded or not, so `startId + count - 1` across
+      // it is the real ceiling and is always known here.
       let nextSynthetic = 0;
+      for (const entry of cached.volumeIndex.values()) {
+        const lastId = entry.startId + entry.count - 1;
+        if (lastId > nextSynthetic) nextSynthetic = lastId;
+      }
       for (const id of cached.chapterIdByUrl.values()) {
         if (id > nextSynthetic) nextSynthetic = id;
       }
@@ -324,7 +342,24 @@ export default function createSource(host: SourceHost): Source {
       host.log("debug", `getChapterContent(#${chapter.id} ${chapter.title})`);
       const resp = await host.fetch(chapter.url);
       const doc = parseHtml(resp.text);
-      return extractChapterLines(doc);
+      const lines = extractChapterLines(doc);
+      // Refuse loudly rather than hand back a hollow chapter.
+      // `extractChapterLines` falls back to `doc.body` and returns `[]`
+      // when nothing matches, so a blocked or errored page served with
+      // HTTP 200 would otherwise import as a blank chapter —
+      // indistinguishable from a chapter that is genuinely empty, and
+      // silent at every layer above this one. The URL is in the message
+      // because it is the only handle a user has when reporting it. Same
+      // ruling as kolnovel's getChapterContent, sunovels'
+      // parseChapterLines and seanovel's getChapterContent.
+      if (lines.length === 0) {
+        throw new Error(
+          `cenele: chapter body at ${chapter.url} parsed to zero lines — the page ` +
+            "carried no readable paragraphs (the layout may have changed, or this " +
+            "response was blocked/errored despite an HTTP 200).",
+        );
+      }
+      return lines;
     },
   };
 }
@@ -421,13 +456,13 @@ export function parseSearchPage(
 
 // ── chapter-list AJAX ──────────────────────────────────────────────────────
 
+/** One volume as the `meta_only` AJAX describes it. This is the only
+ *  place volumes come from — the redesigned novel page ships no volume
+ *  markup at all — so `count` is always known. */
 interface VolumeShell {
   num: number;
   label: string;
-  /** Chapter count when known (always present on responses from the
-   *  meta_only AJAX; absent for shells parsed straight out of the
-   *  page HTML, which doesn't include counts). */
-  count?: number;
+  count: number;
 }
 
 interface VolumeMetaResponse {
@@ -463,7 +498,7 @@ async function fetchVolumeMeta(
   const parsed = safeJson<ChaptersPageResponse>(resp.text);
   if (!parsed || !parsed.success || !parsed.volumes) {
     throw new Error(
-      "Cenele: meta_only chapters request failed — server returned no volumes.",
+      "cenele: meta_only chapters request failed — server returned no volumes.",
     );
   }
   return parsed.volumes.map((v) => ({
@@ -497,7 +532,7 @@ async function fetchVolumeChapters(
     const parsed = safeJson<ChaptersPageResponse>(resp.text);
     if (!parsed || !parsed.success) {
       throw new Error(
-        `Cenele: failed to fetch chapters page ${page} for volume ${volume}.`,
+        `cenele: failed to fetch chapters page ${page} for volume ${volume}.`,
       );
     }
     const chunk = parseChapterListHtml(parsed.html, host);
@@ -596,7 +631,7 @@ async function callChapterSearch(
   });
   const parsed = safeJson<ChapterSearchResponse>(resp.text);
   if (!parsed || !parsed.success || !parsed.items) {
-    throw new Error("Cenele: chapter search returned an unexpected response.");
+    throw new Error("cenele: chapter search returned an unexpected response.");
   }
   return parsed.items.map((item) => {
     // Reuse the same prefix-+-subtitle composition as the volume
@@ -637,9 +672,6 @@ interface ParsedNovelPage {
   meta: SourceNovelMeta[];
   mangaId: string;
   chaptersNonce: string;
-  /** Pre-rendered volume shells from the page HTML. May be empty when
-   *  the theme decides to defer rendering until the chapters tab opens. */
-  volumeShells: VolumeShell[];
 }
 
 export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage {
@@ -647,7 +679,7 @@ export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage 
   const config = extractNovelConfig(html);
   if (!config) {
     throw new Error(
-      `Cenele: couldn't find nhvNovelV2 config on ${pageUrl}. The site layout may have changed, or this isn't a novel page.`,
+      `cenele: couldn't find nhvNovelV2 config on ${pageUrl}. The site layout may have changed, or this isn't a novel page.`,
     );
   }
 
@@ -709,7 +741,6 @@ export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage 
   }
 
   const description = extractDescription(doc);
-  const volumeShells = extractVolumeShells(doc);
 
   return {
     title,
@@ -722,7 +753,6 @@ export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage 
     meta,
     mangaId: config.postId,
     chaptersNonce: config.chaptersNonce,
-    volumeShells,
   };
 }
 
@@ -744,39 +774,49 @@ function extractDescription(doc: Document): string | undefined {
   return cleaned.length > 1500 ? cleaned.slice(0, 1500).trim() + "…" : cleaned;
 }
 
-/** The redesigned novel page ships no volume markup — the chapters tab
- *  loads volumes over AJAX. getNovel gets the canonical list from
- *  fetchVolumeMeta's `meta_only=1` call, so there is nothing to scrape
- *  here. Kept (returning empty) so ParsedNovelPage's shape is stable. */
-function extractVolumeShells(_doc: Document): VolumeShell[] {
-  return [];
-}
-
 // ── homepage parsing ───────────────────────────────────────────────────────
 
-function parseHomeSections(doc: Document): SourceSection[] {
+export function parseHomeSections(doc: Document, locale: Locale = "ar"): SourceSection[] {
   const sections: SourceSection[] = [];
-  // Walk each themed nhv-section in document order. We support four
-  // shapes the live site renders; unrecognized sections (theme A/B
-  // tests, ad blocks) are silently skipped.
-  let idx = 0;
-  for (const sec of Array.from(doc.querySelectorAll("section.nhv-section"))) {
-    const id = `home-${idx}`;
-    const title = sanitizeText(sec.querySelector(".nhv-title")?.textContent);
-    if (!title) continue;
-    let cards: NovelCard[] = [];
+  // Walk the themed sections in document order. Most live under
+  // `section.nhv-section`; the gems leaderboard is a bare
+  // `section.nhv-gems-lb` outside that family (its own child theme
+  // plugin, not the "nhv-section" shell the others share). We support
+  // five shapes the live site has rendered; unrecognized sections
+  // (theme A/B tests, ad blocks, the app-store hero) are silently
+  // skipped. Ids are the section's own class name, not a document-order
+  // index — stable across a run where, say, "popular" has no cards
+  // today and "gems" does, so the store can cache/key on them safely.
+  for (const sec of Array.from(doc.querySelectorAll("section.nhv-section, section.nhv-gems-lb"))) {
+    const heading = sanitizeText(sec.querySelector(".nhv-title")?.textContent);
+    let id: string;
+    let title = heading;
+    let cards: NovelCard[];
     if (sec.classList.contains("nhv-popular")) {
+      id = "popular";
       cards = parsePopularCards(sec);
     } else if (sec.classList.contains("nhv-newseries")) {
+      id = "newseries";
+      title = heading || strings(locale)("sectionNewSeries");
       cards = parseNewseriesCards(sec);
     } else if (sec.classList.contains("nhv-manual")) {
+      id = "manual";
       cards = parseManualCards(sec);
     } else if (sec.classList.contains("nhv-newreleases")) {
+      id = "newreleases";
       cards = parseNewreleasesCards(sec);
+    } else if (sec.classList.contains("nhv-gems-lb")) {
+      // The gems leaderboard ships its own <h2> heading, not the
+      // .nhv-title the other sections use — this fallback is the one
+      // that's actually live, not just defensive.
+      id = "gems";
+      title = heading || strings(locale)("sectionGems");
+      cards = parseGemsRows(sec);
+    } else {
+      continue;
     }
-    if (cards.length === 0) continue;
+    if (!title || cards.length === 0) continue;
     sections.push({ id, title, cards });
-    idx++;
   }
   return sections;
 }
@@ -860,6 +900,35 @@ function parseNewreleasesCards(sec: Element): NovelCard[] {
   return out;
 }
 
+/** The gems leaderboard: ranked rows, each an `a.nhv-gems-lb__identity`
+ *  anchor to a /cont/ novel. Its cover is `img.nhv-gems-lb__novel-cover`
+ *  itself — unlike the other branches' `img.nhv-prog-img`, the class sits
+ *  directly on the <img>, not on a wrapper — so `pickImageSrc` still
+ *  applies unchanged, just against a different selector. Rank and gem
+ *  count are deliberately dropped: NovelCard has no field for either, and
+ *  folding them into the subtitle would put a number where a translated
+ *  title belongs. The identity anchor's own text also carries a "boosted
+ *  novel" label glued on with no separator (`<small>` right after the
+ *  `<strong>` title, no whitespace between), so the title is read from
+ *  the `<strong>` specifically rather than the anchor's full textContent. */
+function parseGemsRows(sec: Element): NovelCard[] {
+  const out: NovelCard[] = [];
+  for (const row of Array.from(sec.querySelectorAll(".nhv-gems-lb__row--novel"))) {
+    const link = row.querySelector(".nhv-gems-lb__identity") as HTMLAnchorElement | null;
+    const href = link?.getAttribute("href") || "";
+    if (!isNovelHref(href)) continue;
+    const title = sanitizeText(link?.querySelector("strong")?.textContent ?? link?.textContent);
+    if (!title) continue;
+    const img = row.querySelector("img.nhv-gems-lb__novel-cover") as HTMLImageElement | null;
+    out.push({
+      url: absoluteUrl(href, BASE_URL),
+      title,
+      coverUrl: pickImageSrc(img),
+    });
+  }
+  return out;
+}
+
 /** Cenele novel pages live under `/cont/<slug>/`. We filter so cards
  *  linking to chapter URLs (which also live under /cont/) are skipped —
  *  the store UI assumes a click navigates to a novel detail view. */
@@ -897,16 +966,51 @@ export function extractChapterLines(doc: Document): SourceLine[] {
 
   const items = root.querySelectorAll("p, img");
   const lines: SourceLine[] = [];
-  const seenText = new Set<string>();
-  const seenImage = new Set<string>();
+  // Dedup against the immediately-preceding line of the SAME TYPE only —
+  // NOT "seen anywhere in the chapter", and NOT "the immediately preceding
+  // element regardless of type" either (see the known limitation below).
+  //
+  // What this catches: the site occasionally rendering the exact same
+  // <p>/<img> twice in a row (a copy-paste artifact in its markup) — this
+  // is an OBSERVED site bug (see the README's decoy-stripping section).
+  //
+  // What this deliberately does NOT catch, and why: a live chapter can
+  // legitimately repeat a short line — "لكن…" ("But…") as its own one-word
+  // paragraph, e.g. — several times at unrelated points in the narrative.
+  // A whole-chapter Set (the previous implementation) collapsed those into
+  // one, silently dropping real prose; that failure was also OBSERVED on
+  // the real site (see the report for the task that introduced this fix).
+  // Weighing the two: silently deleting a reader's book is strictly worse
+  // than leaving a harmless visible duplicate line in it, and we have
+  // real-site evidence for the deletion failure and none for the
+  // duplication one, so adjacency-only was kept as is rather than
+  // redesigned into something that tries to catch both.
+  //
+  // KNOWN LIMITATION this trade-off accepts: lastText/lastImage are each
+  // tracked independently per element type, so "adjacent" means adjacent
+  // within that type's own sub-sequence of `items`, not adjacent in raw
+  // document order. A duplicated MULTI-ELEMENT RUN — e.g. <p>A</p><img>X
+  // </img><p>B</p> immediately followed by the same run again — is NOT
+  // caught as a whole: the repeated <p>A</p> and <p>B</p> both survive
+  // (visible duplication, the accepted trade-off), but the repeated <img>X
+  // is incorrectly deduped away (because nothing of type "image" occurred
+  // between the two <img>X elements, even though real content did) — a
+  // silent single-image loss inside an otherwise-duplicated run. This has
+  // never been observed on the live site (every observed dedup-relevant
+  // bug so far has been a single element repeated back to back, not a
+  // multi-element run), so it's recorded here rather than designed around
+  // speculatively. See this file's test for a pinned example of the
+  // current behavior.
+  let lastText: string | null = null;
+  let lastImage: string | null = null;
   for (const el of Array.from(items)) {
     if (el.tagName === "IMG") {
       const img = el as HTMLImageElement;
       if (isDecorativeImage(img)) continue;
       const src = absoluteImageSrc(img);
       if (!src) continue;
-      if (seenImage.has(src)) continue;
-      seenImage.add(src);
+      if (src === lastImage) continue;
+      lastImage = src;
       lines.push({ type: "image", content: src });
       continue;
     }
@@ -915,8 +1019,8 @@ export function extractChapterLines(doc: Document): SourceLine[] {
     const text = paragraphText(p);
     if (text.length === 0) continue;
     if (looksLikePiracyDecoy(text)) continue;
-    if (seenText.has(text)) continue;
-    seenText.add(text);
+    if (text === lastText) continue;
+    lastText = text;
     lines.push({ type: "text", content: text });
   }
   return lines;
@@ -962,18 +1066,54 @@ export function hasHiddenStyle(el: Element): boolean {
  *  paragraphs that ONLY contain the piracy boilerplate (which sometimes
  *  appears outside aria-hidden wrappers when the theme rolls a new
  *  variant) get filtered by keyword. The boilerplate phrases here are
- *  unique enough that no real chapter line would match. */
+ *  unique enough that no real chapter line would match.
+ *
+ *  Matching is done against `normalizeDecoyText(text)`, NOT the raw
+ *  string — see that function for why. Without it this whole check was
+ *  inert against everything the live theme emits today. */
 export function looksLikePiracyDecoy(text: string): boolean {
-  // Strip zero-width joiners/spaces the decoys insert between letters
-  // to defeat substring matching.
-  const normalized = text.replace(/[​-‏‪-‮⁠-⁯︀-️]/g, "");
+  const normalized = normalizeDecoyText(text);
   if (/مسروقة/.test(normalized) && /فضاء الروايات|cenele\.com/.test(normalized)) {
+    return true;
+  }
+  // The wording the live theme ships as of the 2026-09-18 capture:
+  // "this app STEALS from the site and app <site name>" — "يسرق" rather
+  // than the older "مسروقة". Paired with the site's own name so an
+  // ordinary chapter line that happens to use the verb can't match.
+  if (/يسرق/.test(normalized) && /فضاء الروايات|cenele\.com/.test(normalized)) {
     return true;
   }
   if (/فضاء الروايات/.test(normalized) && /تطبيقنا|تطبيق فضاء/.test(normalized)) {
     return true;
   }
   return false;
+}
+
+/** Undo the character-level obfuscation the decoys use to defeat
+ *  substring matching, so `looksLikePiracyDecoy`'s keywords can be
+ *  written the way the words are actually spelled. Exported so the test
+ *  suite can derive a marker from the committed capture using the same
+ *  normalization the filter itself applies.
+ *
+ *  Three separate tricks, all present in tests/fixtures/chapter.html:
+ *
+ *   1. Arabic PRESENTATION FORMS in place of the ordinary letters
+ *      (U+FEDF `\u{FEDF}` for `\u{0644}`, U+FEFB `\u{FEFB}` for the `\u{0644}\u{0627}` ligature, ...).
+ *      `String.prototype.normalize("NFKC")` maps every one of them back
+ *      to its canonical letter — including decomposing the ligature into
+ *      two characters, which a per-character table would not do.
+ *   2. TATWEEL (U+0640, `\u{0640}`) inserted between letters. It is a pure
+ *      justification glyph with no phonetic value, so stripping it is
+ *      lossless for matching purposes.
+ *   3. Zero-width joiners/spaces and bidi controls between letters.
+ *
+ *  Order matters: NFKC first (it can emit characters the later strips
+ *  need to see), then tatweel, then the zero-width class. */
+export function normalizeDecoyText(text: string): string {
+  return text
+    .normalize("NFKC")
+    .replaceAll("\u0640", "")
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufe00-\ufe0f]/g, "");
 }
 
 function isDecorativeImage(img: HTMLImageElement): boolean {

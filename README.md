@@ -296,22 +296,24 @@ const host = createTestHost({
 });
 ```
 
-Fixtures are **derived from** real markup captured from the live site, not invented from
-whole cloth: every element and attribute a fixture contains should be copied verbatim
-from a page the site actually served, then trimmed down to just what your parser reads.
-The verbatim part is what matters, not the trimming — a hand-invented fixture only ever
-proves your parser agrees with its own author's assumptions about the site's markup,
-which is exactly the failure mode a fixture test exists to catch; copying real markup and
-cutting it down still lets a redesign of the parts your parser *does* read show up as a
-failing test, before a user hits it live.
+Fixtures are **unedited captures of a page the live site actually served** — not invented
+from whole cloth, and not trimmed down to what your parser reads. A hand-invented fixture
+only ever proves your parser agrees with its own author's assumptions about the site's
+markup, which is exactly the failure mode a fixture test exists to catch.
 
-Trimming does give something up: a full, untrimmed capture would also catch a change to
-markup your parser doesn't currently read (e.g. a wrapper element it ignores today that
-later gains significance), which a trimmed fixture by definition cannot. The fixtures
-under `extensions/*/tests/fixtures/` in this repo are exactly this trade-off already
-made — a few-hundred-byte to few-KB skeleton, not the hundreds of KB a real Madara/
-WordPress page actually weighs, but every tag, class and attribute in them was copied
-from a real capture and only re-indented for readability, not invented.
+Trimming used to be the convention here, and it gave something up: a trimmed fixture
+cannot, by definition, catch a change to markup your parser doesn't currently read (a
+wrapper element it ignores today that later gains significance), and it quietly invites
+editing a capture until the test passes. It was done for a mechanical reason — a live
+page carries an external `<script src>`/`<link>` for every ads, analytics and framework
+chunk, and under happy-dom each disabled load dispatched an error event that killed the
+whole run. `vitest.config.ts` now configures happy-dom to survive exactly that (see its
+own comment for the measurements), so a capture can be committed as it arrived.
+
+Some fixtures under `extensions/*/tests/fixtures/` predate that config change and still
+carry the marks of it — `extensions/cenele`'s four, in particular, had their
+`<script>`/`<link>` tags stripped at capture time. **A recapture must not repeat that
+stripping.** Save the page as served.
 
 **Read fixture files with `fileURLToPath(import.meta.url)` + `path.join`, never
 `new URL(...)`.** This suite runs under `environment: "happy-dom"` (see
@@ -333,6 +335,55 @@ const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 `pnpm test` runs every extension's suite plus the contract package's and the scripts'
 own tests. `pnpm test:watch` re-runs on save.
 
+### Probing a live site (contributor tooling)
+
+Fixture tests catch a parser regression; they can never catch the site itself changing
+underneath the extension. `scripts/probe.ts` is a separate harness for that: it drives a
+real extension's `Source` against its live site through a network-backed `SourceHost`
+and prints a PASS/FAIL line per method actually exercised (`getHomeSections`, `search`,
+`getNovel`, `getVolumeChapters` when the novel needs it, `getChapterContent`, and
+`searchChapters` when the source implements it). If any of those fail, the harness
+throws — naming which ones — so the process exit code always matches what the printed
+lines say; it does not silently exit 0 just because the `it()` block itself resolved.
+
+```bash
+PROBE_ID=cenele pnpm probe
+PROBE_ID=cenele PROBE_QUERY="سيد" pnpm probe
+```
+
+It runs under its own `scripts/probe.config.ts`, not the main `vitest.config.ts` —
+`pnpm test` never collects it, because it hits the network, depends on whatever the live
+site currently serves, and is not something CI should run on every PR. Use it by hand
+when you suspect a site has changed, or after touching an extension's parsing to sanity
+check it against the real thing before you write (or update) its fixtures.
+
+Three things about it are easy to mistake for bugs:
+
+- **It shells out to `curl` instead of using `fetch`.** Under `happy-dom` (needed for
+  `DOMParser`), the global `fetch` is happy-dom's own CORS-enforcing implementation and
+  refuses every cross-origin read. `curl`'s `-b`/`-c` flags also give it a real
+  cookie-jar, which is exactly the session semantics `SourceHost.fetch` promises —
+  cenele scrapes a session-scoped WordPress nonce off one page and replays it against
+  `admin-ajax.php` later, and that breaks without a shared jar.
+- **Script evaluation is disabled in `probe.config.ts`.** Live pages carry ad/analytics
+  tags and the site's own bundles; happy-dom executes inline `<script>` on insert, and
+  that code throws outside a real browser, surfacing as a bogus parse failure.
+  Extensions only ever *read* the parsed tree — cenele reads its config out of a
+  script's `textContent`, it never runs it — so disabling evaluation changes nothing an
+  extension can observe.
+- **`probe.config.ts` also sets `handleDisabledFileLoadingAsSuccess`.** Live pages also
+  carry `<script src="...">` tags. With file loading disabled (above) but this flag
+  off, happy-dom's default is to *dispatch an error event* for each one it refuses to
+  load — and that dispatch throws, because the document these extensions parse into
+  (a bare `DOMParser` document, not a real browser tab) has no `defaultView` for the
+  error path to fall back to. Left unset, a live page with several such tags turns into
+  a wall of unhandled-rejection noise and a non-zero exit even when every probed method
+  passed. The flag makes the disabled load report a synthetic `load` event instead,
+  which is exactly as inert as the error would have been — nothing here ever executes
+  the script either way. See the comment beside it in `probe.config.ts` for the exact
+  failure this works around, and the `@ts-expect-error` next to it (vitest's vendored
+  happy-dom types don't know this field yet, even though the installed happy-dom does).
+
 ## Rules
 
 - **Capability only via `host`.** No `fetch`/`XMLHttpRequest`, no `window`, no Node or
@@ -346,10 +397,25 @@ own tests. `pnpm test:watch` re-runs on save.
 - **Search is Enter-only.** Implement `search(query, page)`; there is no suggest/
   autocomplete method anywhere in the interface, and adding one yourself does nothing —
   the app never calls it.
+- **Prefix every thrown error with the manifest `id`.** `throw new Error(\`cenele: …\`)`,
+  not the site's display name — `CONTRIBUTING.md`'s bug-report section asks users for the
+  id, and an error branded "Sea Novel:" for `seanovel` sends them looking for something
+  that isn't in the catalogue. Each extension's test suite reads the id straight out of
+  its own `manifest.json` and asserts on it, so renaming one fails the build.
+- **An empty search query is a hollow result, not a request.** `search("")` returns
+  `{ cards: [], hasMore: false, query: "", page: <n> }` without calling the site. There is
+  nothing to search for; returning the front of the catalogue instead makes "no query" look
+  like a result set the user asked for.
+- **Per-chapter and per-page progress logs at `debug`, not `info`.** Importing a
+  1,500-chapter novel calls `getChapterContent` 1,500 times. One-per-user-action calls
+  (`getHomeSections`, `search`, `getNovel`) are the ones that belong at `info`.
 - **Bump the version on every code change.** `scripts/check-version-bump.ts` runs in CI
   on every PR and fails it if an already-published extension's files changed but its
   manifest `version` didn't move — a stale version means a host that treats `(id,
-  version)` as an immutable pair would never see your new code.
+  version)` as an immutable pair would never see your new code. "Changed" is wider than
+  `extensions/<id>/`: `scripts/build.ts` bundles, so `packages/extension-api` is inlined
+  verbatim into every published bundle. A change under `packages/`, or to
+  `scripts/build.ts` itself, therefore requires a version bump on **every** extension.
 - **Icon is a 128×128 PNG named exactly `icon.png`.** Only the filename is validated (see [Manifest reference](#manifest-reference)) — 128×128 is convention, matching what `pnpm new-extension` generates.
 - **Keep bundles small.** `scripts/build.ts` refuses to bundle anything over 512 KB
   minified. Going over almost always means a heavy dependency slipped in that belongs on

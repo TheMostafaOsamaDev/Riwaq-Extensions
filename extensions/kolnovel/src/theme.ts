@@ -39,16 +39,75 @@ export function parseHomeSections(doc: Document, baseUrl: string, host: SourceHo
   // Each shape has its own card extractor; the union of their outputs
   // becomes the SourceSection.cards array.
   const sections: SourceSection[] = [];
-  let idx = 0;
+  const usedIds = new Set<string>();
   const candidates = doc.querySelectorAll(".trendarea, .homehot, .bixbox");
   for (const el of Array.from(candidates)) {
-    const section = parseSectionElement(el, `home-${idx}`, baseUrl, host);
+    const section = parseSectionElement(el, sectionIdFor(el), baseUrl, host);
     if (section && section.cards.length > 0) {
-      sections.push(section);
-      idx++;
+      sections.push({ ...section, id: uniqueSectionId(section.id, usedIds) });
     }
   }
   return sections;
+}
+
+/** Collapse a heading into a stable, printable id fragment: keep letters
+ *  and digits of ANY script (these headings are Arabic) and turn every run
+ *  of anything else into one dash. */
+function slugify(text: string): string {
+  return text
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+}
+
+/** A section's `id`, derived from WHAT THE SECTION IS rather than from
+ *  where it happened to land in the list.
+ *
+ *  `SourceSection.id` is contracted to be a stable identifier useful for
+ *  caching (see @riwaq/extension-api). A document-order `home-${idx}` —
+ *  which this used to emit, incremented only for sections that survived
+ *  the zero-cards filter — is not: it reindexes every section below any
+ *  row that happened to render no cards on a given run, so yesterday's
+ *  `home-2` is today's `home-1` and every cache keyed on it is silently
+ *  wrong. extensions/cenele abandoned exactly this scheme for exactly
+ *  this reason, and keys off each section's own CSS class instead.
+ *
+ *  The two singleton shapes get their shape name. Everything else is a
+ *  `.bixbox`, of which the homepage renders several, so those take a
+ *  further discriminator: the `order`/`status` query of the section's own
+ *  "see more" link (the site's own name for what the row lists), falling
+ *  back to a slug of the heading. */
+function sectionIdFor(el: Element): string {
+  if (el.classList.contains("trendarea")) return "trending";
+  if (el.classList.contains("homehot")) return "hot";
+  const viewMoreHref =
+    (el.querySelector(".releases .vl") as HTMLAnchorElement | null)?.getAttribute("href") ?? "";
+  if (viewMoreHref) {
+    // Not resolved against baseUrl: only the query matters here, and a
+    // dummy origin keeps this independent of which mirror host we were
+    // handed.
+    try {
+      const params = new URL(viewMoreHref, "https://kolnovel.invalid/").searchParams;
+      const key = params.get("order") || params.get("status") || params.get("type");
+      if (key) return `bixbox-${slugify(key)}`;
+    } catch {
+      // Fall through to the heading slug.
+    }
+  }
+  const heading = el.querySelector(".releases h1, .releases h2, .releases h3");
+  return `bixbox-${slugify(sanitizeText(heading?.textContent)) || "section"}`;
+}
+
+/** Two sections could in principle derive the same key (two rails with the
+ *  same heading or the same `order=`). Ids must stay distinct within one
+ *  response, so a collision gets a numeric suffix — deterministic, and
+ *  only ever affecting the duplicate. */
+function uniqueSectionId(base: string, used: Set<string>): string {
+  let id = base;
+  let n = 2;
+  while (used.has(id)) id = `${base}-${n++}`;
+  used.add(id);
+  return id;
 }
 
 function parseSectionElement(
@@ -280,9 +339,9 @@ export function parseNovelPage(
 ): SourceNovel {
   const sertobig = doc.querySelector(".sertobig") ?? doc;
 
-  // Empty (not "Untitled") when neither selector yields a title — the store
-  // UI's own display-time fallback localizes a blank title, instead of a
-  // locale-frozen literal getting baked into the novel's persisted data.
+  // Never a literal "Untitled": either a real title, or this function
+  // refuses outright (see the guard below). A locale-frozen literal must
+  // never get baked into the novel's persisted data.
   const title =
     sanitizeText(sertobig.querySelector("h1.entry-title")?.textContent) ||
     sanitizeText(doc.querySelector("h1.entry-title")?.textContent);
@@ -341,6 +400,30 @@ export function parseNovelPage(
   const description = descEl
     ? extractDescriptionText(descEl)
     : undefined;
+
+  // A page that yields no title at all — a layout change, an anti-bot
+  // interstitial or an error page served with HTTP 200, a redirect that
+  // landed somewhere else — must not silently produce a structurally
+  // valid but empty SourceNovel. `title` falls back to "", `tags` to []
+  // and `volumes` to [], so without this the caller imports a book with
+  // no title and no chapters and nothing anywhere says why. Refuse
+  // loudly instead, naming the page — the same ruling sunovels'
+  // parseNovelPage, cenele's parseNovelPage and seanovel's getNovel
+  // already apply to their own containers.
+  //
+  // Checking the DERIVED title rather than re-querying `.sertobig`
+  // separately also covers the case where the container is present but
+  // every heading inside it is empty. Deliberately NOT extended to
+  // `volumes.length === 0`: a real novel page with no chapters published
+  // yet is a thing this site can legitimately serve, and refusing it
+  // would deny the user a novel the site itself renders.
+  if (!title) {
+    throw new Error(
+      `kolnovel: couldn't find a novel title on ${pageUrl} (h1.entry-title is missing or ` +
+        "empty) — the layout may have changed, or this page was blocked/errored despite " +
+        "an HTTP 200.",
+    );
+  }
 
   const volumes = parseVolumes(doc, pageUrl, host);
 
@@ -579,7 +662,7 @@ function stripIgnored(line: string): string {
  *  (current markup), then `.entry-content`, then body. `baseUrl` absolutizes
  *  relative image srcs. Drops decoy paragraphs (rotating hidden hex classes
  *  / inline hide style), strips the ad string, and dedups repeated
- *  text/images. Used both as the primary read (most chapters) and, when it
+ *  text/images ADJACENTLY ONLY — see the comment at the dedup site. Used both as the primary read (most chapters) and, when it
  *  yields nothing, as the signal that a chapter is PDF-only — see
  *  `getChapterContent` in index.ts. */
 export function parseChapterContent(doc: Document, baseUrl: string): SourceLine[] {
@@ -592,16 +675,46 @@ export function parseChapterContent(doc: Document, baseUrl: string): SourceLine[
 
   const items = root.querySelectorAll("p, img");
   const lines: SourceLine[] = [];
-  const seenText = new Set<string>();
-  const seenImage = new Set<string>();
+  // Dedup against the immediately-preceding line of the SAME TYPE only —
+  // NOT "seen anywhere in the chapter", which is what this used to do.
+  //
+  // What this catches: the site rendering the exact same <p>/<img> twice
+  // in a row (a copy-paste artifact in its markup), which the committed
+  // chapter.html fixture reproduces.
+  //
+  // What it deliberately does NOT catch, and why: a chapter can
+  // legitimately repeat a short line — a one-word paragraph, an
+  // interjection — several times at unrelated points in the narrative. A
+  // whole-chapter Set collapsed those into one, silently dropping real
+  // prose. That is not a hypothetical here: extensions/cenele hit exactly
+  // this on a live capture (three unrelated one-word paragraphs, all
+  // identical, two of them deleted from the imported book) and its README
+  // records it. Silently deleting a reader's book is strictly worse than
+  // leaving a harmless visible duplicate line in it. No loss is
+  // demonstrated in kolnovel's own live capture (chapter-live.html: 163
+  // kept paragraphs, 163 distinct, so both strategies produce the same
+  // output there) — this is the known-good fix ported before the site
+  // hands us the case, not after.
+  //
+  // KNOWN LIMITATION this trade-off accepts, identical to cenele's:
+  // lastText/lastImage are tracked independently per element type, so
+  // "adjacent" means adjacent within that type's own sub-sequence, not in
+  // raw document order. A duplicated MULTI-ELEMENT RUN (<p>A</p><img>X
+  // </img><p>B</p> immediately repeated) is not caught as a whole — the
+  // repeated <p>s survive as visible duplicates (the accepted trade-off)
+  // but the repeated <img> is deduped away even though real content sits
+  // between the two occurrences. Never observed live; recorded rather
+  // than designed around speculatively.
+  let lastText: string | null = null;
+  let lastImage: string | null = null;
   for (const el of Array.from(items)) {
     if (el.tagName === "IMG") {
       const img = el as HTMLImageElement;
       if (isDecorativeImage(img)) continue;
       const src = absoluteImageSrc(img, baseUrl);
       if (!src) continue;
-      if (seenImage.has(src)) continue;
-      seenImage.add(src);
+      if (src === lastImage) continue;
+      lastImage = src;
       lines.push({ type: "image", content: src });
       continue;
     }
@@ -612,8 +725,8 @@ export function parseChapterContent(doc: Document, baseUrl: string): SourceLine[
     if (rawText.length === 0) continue;
     const text = stripIgnored(rawText);
     if (text.length === 0) continue;
-    if (seenText.has(text)) continue;
-    seenText.add(text);
+    if (text === lastText) continue;
+    lastText = text;
     lines.push({ type: "text", content: text });
   }
   return lines;

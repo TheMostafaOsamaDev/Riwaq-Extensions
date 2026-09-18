@@ -5,8 +5,18 @@ import type { Locale } from "@riwaq/extension-api";
  *  the app's message catalogue. Values match what Riwaq shipped before the
  *  split, so imported books keep their existing titles. */
 const CATALOG = {
-  en: { volumeFallback: "Volume {n}", chapterNoTitleFallback: "{n} - No Title" },
-  ar: { volumeFallback: "المجلد {n}", chapterNoTitleFallback: "{n} - بلا عنوان" },
+  en: {
+    volumeFallback: "Volume {n}",
+    chapterNoTitleFallback: "{n} - No Title",
+    sectionNewSeries: "New Series",
+    sectionGems: "Gems Leaderboard",
+  },
+  ar: {
+    volumeFallback: "المجلد {n}",
+    chapterNoTitleFallback: "{n} - بلا عنوان",
+    sectionNewSeries: "سلاسل جديدة",
+    sectionGems: "لوحة الجواهر",
+  },
 } satisfies Record<Locale, Record<string, string>>;
 
 export function strings(locale: Locale) {
