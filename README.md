@@ -398,7 +398,10 @@ Three things about it are easy to mistake for bugs:
 - **Bump the version on every code change.** `scripts/check-version-bump.ts` runs in CI
   on every PR and fails it if an already-published extension's files changed but its
   manifest `version` didn't move — a stale version means a host that treats `(id,
-  version)` as an immutable pair would never see your new code.
+  version)` as an immutable pair would never see your new code. "Changed" is wider than
+  `extensions/<id>/`: `scripts/build.ts` bundles, so `packages/extension-api` is inlined
+  verbatim into every published bundle. A change under `packages/`, or to
+  `scripts/build.ts` itself, therefore requires a version bump on **every** extension.
 - **Icon is a 128×128 PNG named exactly `icon.png`.** Only the filename is validated (see [Manifest reference](#manifest-reference)) — 128×128 is convention, matching what `pnpm new-extension` generates.
 - **Keep bundles small.** `scripts/build.ts` refuses to bundle anything over 512 KB
   minified. Going over almost always means a heavy dependency slipped in that belongs on

@@ -4,7 +4,9 @@
 
 ## Checklist
 
-- [ ] `manifest.json`'s `version` was bumped, if any extension's files changed
+- [ ] `manifest.json`'s `version` was bumped, if any extension's files changed — and on
+      **every** extension, if `packages/` or `scripts/build.ts` changed (both are inlined
+      into every published bundle)
 - [ ] Tests added or updated for the change
 - [ ] New/changed fixtures under `tests/fixtures/` are derived from real markup captured
       from the live site (elements/attributes copied verbatim, then trimmed to what the

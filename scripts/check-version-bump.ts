@@ -6,14 +6,20 @@
 // that treats (id, version) as an immutable, cacheable pair would never
 // see the new code.
 //
-// `decideVersionBumps` is a pure function over already-collected data and
-// is what check-version-bump.test.ts exercises with fabricated inputs.
+// "Changed" means "changed in a way that reaches a published bundle",
+// which is wider than `extensions/`: build.ts bundles, so
+// packages/extension-api is inlined verbatim into all four served
+// bundles. See SHARED_BUNDLE_PATHS.
+//
+// `decideChangedExtensionIds` and `decideVersionBumps` are pure functions
+// over already-collected data and are what check-version-bump.test.ts
+// exercises with fabricated inputs.
 // Everything else in this file is git/filesystem glue that turns the real
 // repository state into that input shape; it deliberately has no
 // exported unit tests of its own (see the brief: "test the comparison
 // logic, not git").
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { loadManifest } from "./manifest";
@@ -55,6 +61,58 @@ export interface VersionBumpCheckResult {
   /** Human-readable, one per changed extension (or a single explanatory
    *  note when the check is skipped) — printed as-is by `main`. */
   notes: string[];
+}
+
+/** Paths whose contents end up INSIDE every published extension bundle,
+ *  even though they live outside `extensions/`.
+ *
+ *  `scripts/build.ts` runs esbuild with `bundle: true`, so
+ *  `packages/extension-api` is inlined verbatim into each bundle rather
+ *  than imported at runtime (`grep -c '^import' dist/*\/index.js` → 0).
+ *  A one-line edit to `packages/extension-api/src/dom.ts`, or to the
+ *  esbuild settings in `scripts/build.ts` itself, therefore changes all
+ *  four SERVED bundles while touching nothing under `extensions/` — and
+ *  this check used to diff `-- extensions` only, print "no extensions
+ *  changed", and let publish.yml republish every bundle under its
+ *  already-published `(id, version)` pair. A reader that treats that pair
+ *  as immutable and cacheable would never see the new code.
+ *
+ *  Deliberately coarse: one changed file anywhere under `packages/` marks
+ *  EVERY extension changed. Resolving which extensions actually import
+ *  the touched module would need a real import graph, and with a single
+ *  shared package that every extension depends on, the answer is "all of
+ *  them" anyway. Over-reporting costs a version bump nobody strictly
+ *  needed; under-reporting silently overwrites a published version. */
+const SHARED_BUNDLE_PATHS = ["packages/", "scripts/build.ts"];
+
+/** True when `path` is one of the shared inputs above. Prefix match for
+ *  the directory entry, exact match for the file. */
+function isSharedBundlePath(path: string): boolean {
+  return SHARED_BUNDLE_PATHS.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p));
+}
+
+/**
+ * Pure decision function: map a list of changed repository paths onto the
+ * extension ids whose published bundle those changes affect.
+ *
+ * `allExtensionIds` is every extension that exists at HEAD — needed
+ * because a change to a shared bundle input (see SHARED_BUNDLE_PATHS)
+ * affects extensions whose own directories are untouched, so they cannot
+ * be discovered from the changed paths themselves.
+ */
+export function decideChangedExtensionIds(
+  changedPaths: string[],
+  allExtensionIds: string[],
+): string[] {
+  const ids = new Set<string>();
+  for (const raw of changedPaths) {
+    const path = raw.trim();
+    if (path.length === 0) continue;
+    if (isSharedBundlePath(path)) return [...allExtensionIds].sort();
+    const match = /^extensions\/([^/]+)\//.exec(path);
+    if (match) ids.add(match[1]);
+  }
+  return [...ids].sort();
 }
 
 /**
@@ -138,16 +196,30 @@ function getMergeBase(remote: string, baseRef: string): string {
   return git(["merge-base", `${remote}/${baseRef}`, "HEAD"]).trim();
 }
 
-/** Extension ids under extensions/ with at least one changed file
- *  between `mergeBase` and HEAD. */
+/** Every extension directory that exists at HEAD — the working tree is
+ *  HEAD in CI, and this script is only ever meaningful there. */
+function listExtensionIds(): string[] {
+  if (!existsSync(EXTENSIONS_DIR)) return [];
+  return readdirSync(EXTENSIONS_DIR, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort();
+}
+
+/** Extension ids whose published bundle changed between `mergeBase` and
+ *  HEAD. The diff is deliberately NOT scoped to `extensions` alone — see
+ *  SHARED_BUNDLE_PATHS for what else ends up inside a bundle. */
 function getChangedExtensionIds(mergeBase: string): string[] {
-  const output = git(["diff", "--name-only", `${mergeBase}...HEAD`, "--", "extensions"]);
-  const ids = new Set<string>();
-  for (const line of output.split("\n")) {
-    const match = /^extensions\/([^/]+)\//.exec(line.trim());
-    if (match) ids.add(match[1]);
-  }
-  return [...ids].sort();
+  const output = git([
+    "diff",
+    "--name-only",
+    `${mergeBase}...HEAD`,
+    "--",
+    "extensions",
+    "packages",
+    "scripts/build.ts",
+  ]);
+  return decideChangedExtensionIds(output.split("\n"), listExtensionIds());
 }
 
 function loadCurrentVersions(ids: string[]): Map<string, string> {
@@ -224,7 +296,9 @@ function main(): void {
 
   const changedIds = getChangedExtensionIds(mergeBase);
   if (changedIds.length === 0) {
-    console.log("check-version-bump: no extensions changed — nothing to check.");
+    console.log(
+      "check-version-bump: nothing that reaches a published bundle changed — nothing to check.",
+    );
     return;
   }
 
