@@ -8,12 +8,13 @@ import createSource, {
   hasHiddenStyle,
   isDecoyElement,
   looksLikePiracyDecoy,
+  normalizeDecoyText,
   parseHomeSections,
   parseNovelPage,
   searchUrl,
   parseSearchPage,
 } from "../src/index";
-import { parseHtml } from "@riwaq/extension-api";
+import { parseHtml, sanitizeText } from "@riwaq/extension-api";
 import { createTestHost } from "@riwaq/extension-api/testing";
 
 // Deliberately not `readFileSync(new URL("./fixtures/novel.html", import.meta.url), ...)`:
@@ -30,6 +31,31 @@ const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 const searchHtml = readFileSync(join(FIXTURES_DIR, "search.html"), "utf8");
 const chapterHtml = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
 const homeHtml = readFileSync(join(FIXTURES_DIR, "home.html"), "utf8");
+
+/** The piracy boilerplate exactly as tests/fixtures/chapter.html carries
+ *  it. DERIVED from the capture, never typed out here: the live theme
+ *  obfuscates this text with tatweel (U+0640) and Arabic presentation
+ *  forms, so a hand-written copy of the phrase is a DIFFERENT string from
+ *  the one the site actually emits — and matching the hand-written one
+ *  while missing the real one is precisely the bug these tests exist to
+ *  keep out. Throws rather than returning "" when the fixture stops
+ *  carrying a decoy at all, so that shows up as a loud failure instead of
+ *  quietly making every assertion built on it vacuous. */
+function liveDecoyText(): string {
+  const doc = new DOMParser().parseFromString(chapterHtml, "text/html");
+  const el = doc.querySelector('[data-nosnippet="true"]');
+  if (!el) {
+    throw new Error(
+      "fixtures/chapter.html no longer contains a [data-nosnippet=\"true\"] decoy — " +
+        "recapture it or these decoy tests prove nothing.",
+    );
+  }
+  const text = sanitizeText(el.textContent);
+  if (text.length === 0) {
+    throw new Error("fixtures/chapter.html's first decoy element is empty.");
+  }
+  return text;
+}
 
 describe("extractNovelConfig", () => {
   it("reads postId and chaptersNonce from nhvNovelV2", () => {
@@ -215,10 +241,18 @@ describe("parseSearchPage", () => {
 
 describe("parseHomeSections", () => {
   it("parses the new-series slider as its own section", () => {
-    const sections = parseHomeSections(parseHtml(homeHtml));
+    const doc = parseHtml(homeHtml);
+    const sections = parseHomeSections(doc);
     const newseries = sections.find((s) => s.id === "newseries");
     expect(newseries).toBeDefined();
-    expect(newseries!.cards.length).toBeGreaterThan(0);
+    // Fixture-derived, not a floor: one card per `article.nhv-feature` the
+    // captured slider actually renders. `length > 0` would pass for a
+    // parser that surfaced 1 of N.
+    const featureCount = doc.querySelectorAll(
+      "section.nhv-newseries article.nhv-feature",
+    ).length;
+    expect(featureCount).toBeGreaterThan(0);
+    expect(newseries!.cards).toHaveLength(featureCount);
     for (const card of newseries!.cards) {
       expect(card.url).toMatch(/^https:\/\/cenele\.com\/cont\//);
       expect(card.title).not.toBe("");
@@ -345,12 +379,60 @@ describe("extractChapterLines", () => {
     // just that it exists.
     expect(lines.filter((l) => l.content === "لكن…")).toHaveLength(3);
 
-    // None of the stripped decoy boilerplate — nor its tatweel-obfuscated
-    // form — leaks into the output.
+    // None of the decoy boilerplate leaks into the output. The marker is
+    // a slice of the REAL decoy string this capture carries (see
+    // liveDecoyText), not a phrase typed here — the previous version of
+    // this check looked for a hand-spelled keyword that occurs zero times
+    // in all four cenele fixtures, so it passed for an implementation
+    // that stripped nothing at all.
+    //
+    // This is a FLOOR, not a proof: as of this capture every decoy is a
+    // <section> sibling with no <p> inside it, and extractChapterLines
+    // only ever reads `p, img`, so nothing can leak here regardless of
+    // what either filter does. The non-vacuous proof that the keyword net
+    // actually matches this exact string is the two tests immediately
+    // below.
+    const decoyMarker = liveDecoyText().slice(-40);
     for (const line of lines) {
-      expect(looksLikePiracyDecoy(line.content)).toBe(false);
-      expect(line.content).not.toContain("يسرق");
+      expect(line.content).not.toContain(decoyMarker);
     }
+  });
+
+  it("the keyword net matches the live capture's own boilerplate, obfuscation and all", () => {
+    // The check that would have caught the real bug: looksLikePiracyDecoy
+    // normalized only zero-width characters, and the live decoys are
+    // obfuscated with tatweel + Arabic presentation forms instead, so the
+    // whole "final-line safety net" was inert against everything the site
+    // emits. Fed the capture's own string, it must fire.
+    const decoy = liveDecoyText();
+    expect(looksLikePiracyDecoy(decoy)).toBe(true);
+    // And it must still be the obfuscated form that was matched — i.e.
+    // normalization is what makes it match, not the raw text happening to
+    // spell the keywords out.
+    expect(decoy).not.toContain("يسرق");
+    expect(normalizeDecoyText(decoy)).toContain("يسرق");
+  });
+
+  it("strips an unwrapped copy of the live decoy — the variant the structural filter cannot see", () => {
+    // The structural filter only removes elements carrying a decoy marker
+    // (aria-hidden / data-nosnippet / role=presentation / a hiding style).
+    // When the theme rolls a variant that carries none of them — which the
+    // README records it having done before — the keyword net is the only
+    // thing left. This presents the capture's REAL boilerplate as a bare
+    // <p> with no attributes, which is exactly that case.
+    const decoy = liveDecoyText();
+    const doc = new DOMParser().parseFromString(
+      `<div class="reading-content"><div class="text-left">
+        <p>سطر حقيقي قبل الفخ.</p>
+        <p>${decoy}</p>
+        <p>سطر حقيقي بعد الفخ.</p>
+      </div></div>`,
+      "text/html",
+    );
+    expect(extractChapterLines(doc)).toEqual([
+      { type: "text", content: "سطر حقيقي قبل الفخ." },
+      { type: "text", content: "سطر حقيقي بعد الفخ." },
+    ]);
   });
 
   // Synthetic (not a live capture): the live site sampled during this
@@ -624,5 +706,41 @@ describe("createSource (end-to-end via createTestHost)", () => {
     const source = createSource(createTestHost());
     expect(source.canHandle("https://cenele.com/cont/pursuit/")).toBe(true);
     expect(source.canHandle("https://example.com/")).toBe(false);
+  });
+
+  it("getChapterContent() fetches the chapter URL and returns the parsed body", async () => {
+    const url = "https://cenele.com/cont/create-heaven-riwya/chapter-1/";
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const host = createTestHost({ responses: { [url]: chapterHtml }, calls });
+
+    const lines = await createSource(host).getChapterContent({
+      id: 1,
+      title: "الفصل الأول",
+      url,
+      lines: [],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(url);
+    expect(calls[0].method).toBe("GET");
+    expect(lines).toHaveLength(217);
+    expect(lines[0]).toEqual({ type: "text", content: "الفصل الأول: التجنيد الإجباري" });
+  });
+
+  it("getChapterContent() refuses a page that parses to zero lines instead of importing a blank chapter", async () => {
+    // A blocked or errored response served with HTTP 200 —
+    // extractChapterLines falls back to `doc.body` and finds no
+    // paragraphs. Returning [] here would import a chapter the reader
+    // renders as a blank page, indistinguishable from a genuinely empty
+    // one and silent at every layer above. The chapter URL must be in the
+    // message: it is the only handle a user has when reporting it.
+    const url = "https://cenele.com/cont/create-heaven-riwya/chapter-99/";
+    const host = createTestHost({
+      responses: { [url]: "<html><body><div class=\"reading-content\"></div></body></html>" },
+    });
+
+    await expect(
+      createSource(host).getChapterContent({ id: 99, title: "x", url, lines: [] }),
+    ).rejects.toThrow(url);
   });
 });

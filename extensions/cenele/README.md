@@ -205,10 +205,21 @@ We `.remove()` matching elements before walking paragraphs, so a real
 text intact.
 
 `looksLikePiracyDecoy` is a final-line keyword check for paragraphs
-that slip past the structural filter — it matches on the boilerplate
-"مسروقة" + "فضاء الروايات / cenele.com" combo, which is unique
-enough to never hit real content. The match normalizes zero-width
-joiners the decoys insert between letters.
+that slip past the structural filter. It matches on a site-name keyword
+paired with one of the boilerplate verbs ("مسروقة" or, in the current
+wording, "يسرق"), a combination unique enough to never hit real content.
+
+**It matches against `normalizeDecoyText(text)`, never the raw string,
+and that is not optional.** The decoys are obfuscated at the character
+level three different ways at once — Arabic presentation forms in place
+of the ordinary letters, tatweel (U+0640) between letters, and
+zero-width/bidi controls — and for a long time this check normalized
+only the third of those, which made it match nothing the live site
+emitted. `normalizeDecoyText` applies `NFKC` (which also decomposes the
+`لا` presentation ligature), then strips tatweel, then strips the
+zero-width class. If the keyword list is ever extended, spell the new
+keyword the ordinary way and let the normalizer do the work — do not
+try to write the obfuscated form out.
 
 Two independent live-site runs back these numbers — neither figure below
 is invented, and each is attributed to where it was recorded:
@@ -247,7 +258,8 @@ zero-width joiners `looksLikePiracyDecoy`'s own comment describes) — e.g.
 `هـٰـذَا اﻟـتـطـبـيـق يـسـرـق مِـن مـوـقـع وـتـطـبـيـق فــضـاـء
 اﻟـرـوـاـيـاـت`. No unhidden decoy paragraph turned up in any of the 11
 chapters sampled, so `looksLikePiracyDecoy` never actually fires against
-live content right now — it's kept as defense-in-depth for a decoy that
+live content in the extraction path right now — it's kept as
+defense-in-depth for a decoy that
 slips past the structural filter (its own dedicated unit tests still
 exercise it directly), and `extractChapterLines`'s test file keeps a
 synthetic snippet exercising that whole integration path (nested decoy,
@@ -255,7 +267,10 @@ whole-`<p>` decoy, and the keyword net) so none of it goes untested just
 because the live site doesn't happen to need it at the moment. If a future
 re-check finds unhidden "مسروقة" decoys again, or finds "يسرق" ones
 slipping past the structural filter, extend the keyword regex rather than
-assuming the old one still matches what ships.
+assuming the old one still matches what ships. The test suite pins the
+net against the capture's own decoy string (see `liveDecoyText` in
+`tests/cenele.test.ts`) precisely so "the keywords no longer match what
+ships" fails loudly instead of passing silently.
 
 **Dedup is adjacency-only, not whole-chapter.** `extractChapterLines` used
 to dedup repeated text/images against every line seen anywhere earlier in

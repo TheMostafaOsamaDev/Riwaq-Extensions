@@ -325,7 +325,24 @@ export default function createSource(host: SourceHost): Source {
       host.log("debug", `getChapterContent(#${chapter.id} ${chapter.title})`);
       const resp = await host.fetch(chapter.url);
       const doc = parseHtml(resp.text);
-      return extractChapterLines(doc);
+      const lines = extractChapterLines(doc);
+      // Refuse loudly rather than hand back a hollow chapter.
+      // `extractChapterLines` falls back to `doc.body` and returns `[]`
+      // when nothing matches, so a blocked or errored page served with
+      // HTTP 200 would otherwise import as a blank chapter —
+      // indistinguishable from a chapter that is genuinely empty, and
+      // silent at every layer above this one. The URL is in the message
+      // because it is the only handle a user has when reporting it. Same
+      // ruling as kolnovel's getChapterContent, sunovels'
+      // parseChapterLines and seanovel's getChapterContent.
+      if (lines.length === 0) {
+        throw new Error(
+          `Cenele: chapter body at ${chapter.url} parsed to zero lines — the page ` +
+            "carried no readable paragraphs (the layout may have changed, or this " +
+            "response was blocked/errored despite an HTTP 200).",
+        );
+      }
+      return lines;
     },
   };
 }
@@ -1045,18 +1062,54 @@ export function hasHiddenStyle(el: Element): boolean {
  *  paragraphs that ONLY contain the piracy boilerplate (which sometimes
  *  appears outside aria-hidden wrappers when the theme rolls a new
  *  variant) get filtered by keyword. The boilerplate phrases here are
- *  unique enough that no real chapter line would match. */
+ *  unique enough that no real chapter line would match.
+ *
+ *  Matching is done against `normalizeDecoyText(text)`, NOT the raw
+ *  string — see that function for why. Without it this whole check was
+ *  inert against everything the live theme emits today. */
 export function looksLikePiracyDecoy(text: string): boolean {
-  // Strip zero-width joiners/spaces the decoys insert between letters
-  // to defeat substring matching.
-  const normalized = text.replace(/[​-‏‪-‮⁠-⁯︀-️]/g, "");
+  const normalized = normalizeDecoyText(text);
   if (/مسروقة/.test(normalized) && /فضاء الروايات|cenele\.com/.test(normalized)) {
+    return true;
+  }
+  // The wording the live theme ships as of the 2026-09-18 capture:
+  // "this app STEALS from the site and app <site name>" — "يسرق" rather
+  // than the older "مسروقة". Paired with the site's own name so an
+  // ordinary chapter line that happens to use the verb can't match.
+  if (/يسرق/.test(normalized) && /فضاء الروايات|cenele\.com/.test(normalized)) {
     return true;
   }
   if (/فضاء الروايات/.test(normalized) && /تطبيقنا|تطبيق فضاء/.test(normalized)) {
     return true;
   }
   return false;
+}
+
+/** Undo the character-level obfuscation the decoys use to defeat
+ *  substring matching, so `looksLikePiracyDecoy`'s keywords can be
+ *  written the way the words are actually spelled. Exported so the test
+ *  suite can derive a marker from the committed capture using the same
+ *  normalization the filter itself applies.
+ *
+ *  Three separate tricks, all present in tests/fixtures/chapter.html:
+ *
+ *   1. Arabic PRESENTATION FORMS in place of the ordinary letters
+ *      (U+FEDF `\u{FEDF}` for `\u{0644}`, U+FEFB `\u{FEFB}` for the `\u{0644}\u{0627}` ligature, ...).
+ *      `String.prototype.normalize("NFKC")` maps every one of them back
+ *      to its canonical letter — including decomposing the ligature into
+ *      two characters, which a per-character table would not do.
+ *   2. TATWEEL (U+0640, `\u{0640}`) inserted between letters. It is a pure
+ *      justification glyph with no phonetic value, so stripping it is
+ *      lossless for matching purposes.
+ *   3. Zero-width joiners/spaces and bidi controls between letters.
+ *
+ *  Order matters: NFKC first (it can emit characters the later strips
+ *  need to see), then tatweel, then the zero-width class. */
+export function normalizeDecoyText(text: string): string {
+  return text
+    .normalize("NFKC")
+    .replaceAll("\u0640", "")
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufe00-\ufe0f]/g, "");
 }
 
 function isDecorativeImage(img: HTMLImageElement): boolean {
