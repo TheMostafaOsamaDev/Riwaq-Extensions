@@ -111,13 +111,26 @@ to `.chaptersList` for exactly this reason, and
 `tests/sunovels.test.ts` pins it with a fixture-derived check (not just a
 row-count bound) that would fail if that scoping were ever dropped.
 
-`getVolumeChapters(novelUrl, volume)` derives the page count from
-`volume.chapterCount` (`Math.ceil(count / 50)`, at least 1) rather than a
-hardcoded number — this bounds the *over*-counting case only (the real
-list may run out before the computed page count is reached; that's fine,
-see below). It does not cover *under*-counting: if the site has grown
-past what `chapterCount` reported, the loop never attempts the later
-pages at all, and nothing signals that either. Pages are fetched
+`getVolumeChapters(novelUrl, volume)` walks from page 0 until a page
+comes back with **no rows**, bounded only by `MAX_CHAPTER_PAGES` (200, so
+a site that never stops answering cannot hang an import).
+`volume.chapterCount` is **advisory** — it appears in the progress log and
+triggers a `warn` when it is zero, and nothing else.
+
+That is a deliberate reversal. The loop used to run `page <
+Math.max(1, Math.ceil(chapterCount / 50))`, i.e. `chapterCount` was a
+*ceiling*. But `chapterCount` comes from `parseChaptersCount`, whose own
+comment flags the inline RSC payload it regexes as a live drift risk —
+and on drift it returns `0`, not an error. A ceiling of
+`Math.max(1, 0)` is **one page**, so a payload change would have made
+every novel on the site silently import exactly its first 50 chapters,
+with nothing anywhere saying so. The same ceiling also under-fetched
+whenever the count was merely stale, which it is daily. A zero count is
+now the drift signal and is logged as a `warn`; the walk itself is
+bounded by what the site actually serves. The cost is one extra request
+per volume — the empty page that ends the walk.
+
+Pages are fetched
 **sequentially** — never concurrently; firing dozens of requests at once
 at a third-party site invites rate-limiting for no gain on a list the
 user is waiting to scroll — and the loop stops as soon as a page yields

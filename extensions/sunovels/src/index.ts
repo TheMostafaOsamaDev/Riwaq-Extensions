@@ -68,6 +68,15 @@ import { strings } from "./strings";
  *  directly against the live site, scoped to `.chaptersList`. */
 const PER_PAGE = 50;
 
+/** Hard cap on the chapter-list pagination loop. The loop's real stop
+ *  condition is a page that yields no rows (see `getVolumeChapters`);
+ *  this only exists so a site that never stops answering with rows
+ *  cannot hang an import. 200 pages is 10,000 chapters at `PER_PAGE` —
+ *  comfortably past the longest novel this site hosts (1,582 chapters as
+ *  of this task). Same guard extensions/cenele applies with
+ *  `MAX_VOLUME_PAGES`. */
+const MAX_CHAPTER_PAGES = 200;
+
 // Exported so the later tasks that build getHomeSections/search/getNovel/
 // getChapterContent against this manifest's baseUrl (all landing in this
 // same file) have one source of truth for it, matching how it's used here.
@@ -757,19 +766,28 @@ export default function createSource(host: SourceHost): Source {
      *  site invites rate-limiting for no gain on a list the user is
      *  waiting to scroll), and stops as soon as a page yields no rows.
      *
-     *  Page count is derived from `volume.chapterCount`
-     *  (`Math.ceil(count / PER_PAGE)`, at least 1) rather than a
-     *  hardcoded number — that count drifts daily as the site adds
-     *  chapters, and chapter numbering itself is sparse (this
-     *  extension's example novel has 1582 chapters whose newest is
-     *  numbered 1611). This bounds the OVER-counting case: nothing here
-     *  may assume the real list runs out exactly where `chapterCount`
-     *  predicts, so the empty-page stop (see `parseChapterRows`) is what
-     *  actually terminates the loop, not reaching the computed page
-     *  count. It does NOT cover the opposite, UNDER-counting case — if
-     *  the site has grown past what `chapterCount` reported (stale by
-     *  the time this runs), the loop never attempts the later pages at
-     *  all, and nothing here signals that under-fetch either.
+     *  **The empty page is the only stop condition.** `chapterCount` is
+     *  advisory: it is read out of the RSC payload by `parseChaptersCount`,
+     *  which that function's own comment flags as vulnerable to payload
+     *  drift — and on drift it returns 0, not an error. Deriving the page
+     *  count from it (`Math.ceil(count / PER_PAGE)`, at least 1) and
+     *  looping `page < totalPages`, which this used to do, turned that 0
+     *  into "exactly one page", so EVERY novel on the site would have
+     *  silently yielded exactly its first 50 chapters with nothing
+     *  anywhere saying so. It also never covered the under-counting case:
+     *  a count that is stale by the time this runs (the site adds chapters
+     *  daily) left the later pages unfetched.
+     *
+     *  So `chapterCount` is used for two things only — a `warn` when it is
+     *  absent or zero, which is the drift signal, and the progress log —
+     *  and the loop runs until a page comes back with no rows, bounded by
+     *  `MAX_CHAPTER_PAGES` so a site that never stops answering cannot
+     *  hang an import. The cost is one extra request per volume (the empty
+     *  page that ends the walk); the alternative was a silent truncation.
+     *
+     *  A MISSING `.chaptersList` is not an empty one: `parseChapterRows`
+     *  throws for that, so a blocked/errored page mid-sequence propagates
+     *  instead of reading as the end of the list.
      *
      *  The slug comes from `volume.key` (set by getNovel) rather than
      *  re-deriving it from `novelUrl`, since `key` is the value this
@@ -778,15 +796,33 @@ export default function createSource(host: SourceHost): Source {
      *  only as a fallback for a volume whose `key` is somehow absent. */
     async getVolumeChapters(novelUrl: string, volume: SourceVolume): Promise<SourceChapter[]> {
       const slug = volume.key || slugFromUrl(novelUrl);
-      const totalPages = Math.max(1, Math.ceil((volume.chapterCount ?? 0) / PER_PAGE));
+      const chapterCount = volume.chapterCount ?? 0;
+      if (chapterCount <= 0) {
+        // parseChaptersCount returned 0 — either the novel really has no
+        // chapters, or the RSC payload shape it regexes has drifted. Both
+        // are worth knowing about, and this is the only place either one
+        // is observable.
+        host.log(
+          "warn",
+          `sunovels: ${novelUrl} carries no chapter count (parseChaptersCount returned 0) — ` +
+            "walking the chapter list until a page comes back empty. If this novel does have " +
+            "chapters, the inline RSC payload's shape has drifted.",
+        );
+      }
+      // Advisory only — the loop is NOT bounded by this. See the doc
+      // comment above.
+      const expectedPages = Math.max(1, Math.ceil(chapterCount / PER_PAGE));
       const seen = new Set<string>();
       const chapters: SourceChapter[] = [];
 
-      for (let page = 0; page < totalPages; page++) {
+      for (let page = 0; page < MAX_CHAPTER_PAGES; page++) {
         const url = chapterPageUrl(slug, page);
         // debug, not info: a 1,582-chapter novel walks ~32 pages here, and
         // per-page progress at info buries everything else in the log.
-        host.log("debug", `getVolumeChapters(${novelUrl}) page ${page}/${totalPages - 1}`);
+        host.log(
+          "debug",
+          `getVolumeChapters(${novelUrl}) page ${page} (chapterCount implies ~${expectedPages})`,
+        );
         const resp = await host.fetch(url);
         // parseChapterRows throws (rather than returning []) when the
         // container is missing entirely — a blocked/errored page, not a

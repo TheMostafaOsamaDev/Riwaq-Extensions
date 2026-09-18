@@ -585,16 +585,23 @@ describe("parseChapterRows", () => {
 });
 
 describe("getVolumeChapters", () => {
+  /** A chapter-list page that renders the container with no rows in it —
+   *  the site's own "you are past the end" shape, and the ONLY thing that
+   *  stops the pagination walk (see getVolumeChapters' doc comment).
+   *  Distinct from a page with no `.chaptersList` at all, which throws. */
+  const EMPTY_PAGE = `<html><body><ul class="chaptersList"></ul></body></html>`;
+
   const twoPageHost = () =>
     createTestHost({
       responses: {
         "activeTab=chapters&page=0": chaptersPage0Html,
         "activeTab=chapters&page=1": chaptersPage1Html,
+        "activeTab=chapters&page=2": EMPTY_PAGE,
       },
       locale: "ar",
     });
 
-  it("walks every page implied by chapterCount and de-duplicates across them", async () => {
+  it("walks until a page comes back empty and de-duplicates across pages", async () => {
     const src = createSource(twoPageHost());
     const chapters = await src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
       id: 1,
@@ -619,6 +626,7 @@ describe("getVolumeChapters", () => {
       responses: {
         "activeTab=chapters&page=0": chaptersPage0Html,
         "activeTab=chapters&page=1": chaptersPage0Html,
+        "activeTab=chapters&page=2": EMPTY_PAGE,
       },
     });
     const src = createSource(host);
@@ -633,21 +641,26 @@ describe("getVolumeChapters", () => {
     expect(new Set(chapters.map((c) => c.url)).size).toBe(50);
   });
 
-  it("derives the page count from chapterCount rather than a hardcoded number of pages", async () => {
+  // chapterCount is a FLOOR, not a ceiling. It is read out of the inline
+  // RSC payload by parseChaptersCount, whose own comment flags that
+  // payload's shape as a live drift risk — and on drift it returns 0, not
+  // an error. The previous implementation looped `page < Math.max(1,
+  // ceil(count / PER_PAGE))`, which turned a drifted 0 into "exactly one
+  // page": every novel on the site would have silently imported its first
+  // 50 chapters and stopped. It also under-fetched whenever the count was
+  // merely stale, which it is daily.
+  it("walks past the page count chapterCount implies, rather than truncating there", async () => {
     const calls: Array<{ url: string; method: string }> = [];
     const host = createTestHost({
       responses: {
         "activeTab=chapters&page=0": chaptersPage0Html,
         "activeTab=chapters&page=1": chaptersPage1Html,
+        "activeTab=chapters&page=2": EMPTY_PAGE,
       },
       calls,
     });
     const src = createSource(host);
-    // chapterCount worth exactly one page (50) must fetch ONLY page 0 —
-    // an implementation that ignores chapterCount and always walks every
-    // fixture it can find would over-fetch here and this would catch it,
-    // even though page 1's fixture is readily available and would
-    // "succeed" if fetched.
+    // chapterCount claims one page. The site has two.
     const chapters = await src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
       id: 1,
       title: "all",
@@ -655,16 +668,26 @@ describe("getVolumeChapters", () => {
       chapterCount: 50,
       key: "shadow-slave",
     });
-    expect(chapters).toHaveLength(50);
-    expect(calls).toHaveLength(1);
+    expect(chapters).toHaveLength(100);
+    expect(calls).toHaveLength(3);
   });
 
-  it("still fetches at least one page when chapterCount is 0", async () => {
+  it("imports the whole novel, and warns, when chapterCount is 0", async () => {
+    // A zero count is the drift signal — the only place it is observable
+    // at all — so it must be logged, and it must NOT bound the walk.
+    const logs: Array<{ level: string; message: string }> = [];
     const calls: Array<{ url: string; method: string }> = [];
-    const host = createTestHost({
-      responses: { "activeTab=chapters&page=0": chaptersPage0Html },
-      calls,
-    });
+    const host = {
+      ...createTestHost({
+        responses: {
+          "activeTab=chapters&page=0": chaptersPage0Html,
+          "activeTab=chapters&page=1": chaptersPage1Html,
+          "activeTab=chapters&page=2": EMPTY_PAGE,
+        },
+        calls,
+      }),
+      log: (level: string, message: string) => logs.push({ level, message }),
+    } as SourceHost;
     const src = createSource(host);
     const chapters = await src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
       id: 1,
@@ -673,8 +696,49 @@ describe("getVolumeChapters", () => {
       chapterCount: 0,
       key: "shadow-slave",
     });
-    expect(calls).toHaveLength(1);
+    expect(chapters).toHaveLength(100);
+    expect(calls).toHaveLength(3);
+    const warning = logs.find((l) => l.level === "warn");
+    expect(warning).toBeDefined();
+    expect(warning!.message).toContain("parseChaptersCount returned 0");
+  });
+
+  it("stops at MAX_CHAPTER_PAGES when the site never answers with an empty page", async () => {
+    // The empty page is the only stop condition, so a site that always
+    // answers with rows must still terminate. The cap is 200 pages
+    // (MAX_CHAPTER_PAGES in ../src/index.ts).
+    const calls: Array<{ url: string; method: string }> = [];
+    // One key matching EVERY page url, so page 200 is served just like
+    // page 0 — the loop can only end by reaching the cap.
+    const host = createTestHost({
+      responses: { "activeTab=chapters": chaptersPage0Html },
+      calls,
+    });
+    const chapters = await createSource(host).getVolumeChapters!(
+      "https://sunovels.com/novel/shadow-slave",
+      // A perfectly ordinary chapterCount: it is advisory and must not
+      // bound the walk, so the 200 calls below can only come from the cap.
+      { id: 1, title: "all", chapters: [], chapterCount: 100, key: "shadow-slave" },
+    );
+    expect(calls).toHaveLength(200);
+    // Every page returned the same 50 rows, all deduped away after the first.
     expect(chapters).toHaveLength(50);
+  });
+
+  it("does not warn when chapterCount is present", async () => {
+    const logs: Array<{ level: string; message: string }> = [];
+    const host = {
+      ...twoPageHost(),
+      log: (level: string, message: string) => logs.push({ level, message }),
+    } as SourceHost;
+    await createSource(host).getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
+      id: 1,
+      title: "all",
+      chapters: [],
+      chapterCount: 100,
+      key: "shadow-slave",
+    });
+    expect(logs.some((l) => l.level === "warn")).toBe(false);
   });
 
   it("stops fetching once a page yields no rows, without erroring on later pages", async () => {
