@@ -945,15 +945,41 @@ export function extractChapterLines(doc: Document): SourceLine[] {
 
   const items = root.querySelectorAll("p, img");
   const lines: SourceLine[] = [];
-  // Dedup against the immediately-preceding line of the same type only —
-  // NOT "seen anywhere in the chapter". The bug this guards against is the
-  // site occasionally rendering the exact same <p>/<img> twice in a row
-  // (a copy-paste artifact in its markup); a live chapter can legitimately
-  // repeat a short line — "لكن…" ("But…") as its own one-word paragraph,
-  // e.g. — several times at unrelated points in the narrative, and a
-  // whole-chapter Set previously collapsed those into one, silently
-  // dropping real prose. Adjacency-only catches the actual site glitch
-  // without discarding a real repeated beat that isn't adjacent.
+  // Dedup against the immediately-preceding line of the SAME TYPE only —
+  // NOT "seen anywhere in the chapter", and NOT "the immediately preceding
+  // element regardless of type" either (see the known limitation below).
+  //
+  // What this catches: the site occasionally rendering the exact same
+  // <p>/<img> twice in a row (a copy-paste artifact in its markup) — this
+  // is an OBSERVED site bug (see the README's decoy-stripping section).
+  //
+  // What this deliberately does NOT catch, and why: a live chapter can
+  // legitimately repeat a short line — "لكن…" ("But…") as its own one-word
+  // paragraph, e.g. — several times at unrelated points in the narrative.
+  // A whole-chapter Set (the previous implementation) collapsed those into
+  // one, silently dropping real prose; that failure was also OBSERVED on
+  // the real site (see the report for the task that introduced this fix).
+  // Weighing the two: silently deleting a reader's book is strictly worse
+  // than leaving a harmless visible duplicate line in it, and we have
+  // real-site evidence for the deletion failure and none for the
+  // duplication one, so adjacency-only was kept as is rather than
+  // redesigned into something that tries to catch both.
+  //
+  // KNOWN LIMITATION this trade-off accepts: lastText/lastImage are each
+  // tracked independently per element type, so "adjacent" means adjacent
+  // within that type's own sub-sequence of `items`, not adjacent in raw
+  // document order. A duplicated MULTI-ELEMENT RUN — e.g. <p>A</p><img>X
+  // </img><p>B</p> immediately followed by the same run again — is NOT
+  // caught as a whole: the repeated <p>A</p> and <p>B</p> both survive
+  // (visible duplication, the accepted trade-off), but the repeated <img>X
+  // is incorrectly deduped away (because nothing of type "image" occurred
+  // between the two <img>X elements, even though real content did) — a
+  // silent single-image loss inside an otherwise-duplicated run. This has
+  // never been observed on the live site (every observed dedup-relevant
+  // bug so far has been a single element repeated back to back, not a
+  // multi-element run), so it's recorded here rather than designed around
+  // speculatively. See this file's test for a pinned example of the
+  // current behavior.
   let lastText: string | null = null;
   let lastImage: string | null = null;
   for (const el of Array.from(items)) {

@@ -294,15 +294,30 @@ describe("parseHomeSections", () => {
 
 describe("extractChapterLines", () => {
   it("keeps every real chapter paragraph, in order, with no decoy boilerplate leaking through", () => {
-    // Non-vacuous check: the fixture must still carry decoy markup, even
-    // though (per the file-header comment above) it doesn't happen to be
-    // markup that changes this chapter's output.
-    const dataNosnippetCount = (chapterHtml.match(/data-nosnippet="true"/g) || []).length;
-    const ariaHiddenCount = (chapterHtml.match(/aria-hidden="true"/g) || []).length;
-    expect(dataNosnippetCount).toBeGreaterThan(0);
-    expect(ariaHiddenCount).toBeGreaterThan(0);
-
     const doc = new DOMParser().parseFromString(chapterHtml, "text/html");
+
+    // Non-vacuous check: the fixture must still carry decoy markup THAT
+    // isDecoyElement ACTUALLY MATCHES INSIDE THE CONTENT REGION
+    // extractChapterLines reads — not just "this attribute appears
+    // somewhere on the page". aria-hidden="true" alone is a bad proxy for
+    // that: it's a common accessibility attribute the theme also uses on
+    // ordinary page chrome (share-button SVG icons, etc.) well outside
+    // .reading-content — a whole-file count of it would stay green even
+    // if every real chapter-body decoy vanished, which is the exact
+    // hollowness this check exists to rule out. data-nosnippet="true" is
+    // fine to check file-wide (it's decoy-exclusive in this fixture — see
+    // the report), but aria-hidden needs to be scoped to the actual
+    // content region and to elements isDecoyElement would flag.
+    const contentRoot =
+      doc.querySelector(".reading-content .text-left") ||
+      doc.querySelector(".reading-content") ||
+      doc.querySelector(".entry-content") ||
+      doc.body;
+    const ariaHiddenDecoyCount = contentRoot.querySelectorAll('[aria-hidden="true"]').length;
+    const dataNosnippetCount = (chapterHtml.match(/data-nosnippet="true"/g) || []).length;
+    expect(ariaHiddenDecoyCount).toBeGreaterThan(0);
+    expect(dataNosnippetCount).toBeGreaterThan(0);
+
     const lines = extractChapterLines(doc);
 
     // 217 <p> elements in .reading-content .text-left, all real; a
@@ -426,6 +441,46 @@ describe("extractChapterLines", () => {
       "text/html",
     );
     expect(extractChapterLines(doc)).toEqual([{ type: "text", content: "نص الفصل هنا." }]);
+  });
+
+  // Documents a KNOWN LIMITATION (see the long comment at the dedup site in
+  // ../src/index.ts) — this pins the CURRENT behavior for review/regression
+  // purposes, it is not asserting this is the desired outcome. A duplicated
+  // multi-element run (<p>A</p><img>X</img><p>B</p> immediately repeated)
+  // is not deduped as a whole: lastText/lastImage are tracked per element
+  // type, so from the text-only sub-sequence's point of view A and B are
+  // never adjacent to their own repeat (B sits between them), and both
+  // survive as visible duplicates — the accepted trade-off. But from the
+  // image-only sub-sequence's point of view, the two <img>X occurrences
+  // ARE adjacent (no other image occurs between them), so the second one
+  // is silently dropped — a real, if narrow, silent-loss case this
+  // trade-off still accepts. If this test's expectations ever need to
+  // change because the dedup strategy was redesigned, that's a deliberate
+  // change to make with full knowledge of this case, not a fixture drift.
+  it("known limitation: a duplicated multi-element run isn't deduped as a whole (text duplicates survive, the repeated image is silently dropped)", () => {
+    const doc = new DOMParser().parseFromString(
+      `<div class="reading-content"><div class="text-left">
+        <p>A</p>
+        <img src="https://cenele.com/wp-content/uploads/2024/01/x.jpg" alt="x">
+        <p>B</p>
+        <p>A</p>
+        <img src="https://cenele.com/wp-content/uploads/2024/01/x.jpg" alt="x">
+        <p>B</p>
+      </div></div>`,
+      "text/html",
+    );
+    expect(extractChapterLines(doc)).toEqual([
+      { type: "text", content: "A" },
+      { type: "image", content: "https://cenele.com/wp-content/uploads/2024/01/x.jpg" },
+      { type: "text", content: "B" },
+      // The repeated run's <p>A</p> and <p>B</p> both survive (duplicated,
+      // visible) ...
+      { type: "text", content: "A" },
+      // ... but the run's repeated <img> does NOT survive: it was silently
+      // deduped away here, even though a real <p>B</p> sits between the
+      // two occurrences in the actual document.
+      { type: "text", content: "B" },
+    ]);
   });
 });
 
