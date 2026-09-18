@@ -41,16 +41,26 @@ describe("seanovel: createSource", () => {
 });
 
 describe("canHandle", () => {
-  const source = createSource(createTestHost());
-
   it("accepts seanovel novel and chapter URLs", () => {
+    const source = createSource(createTestHost());
     expect(source.canHandle("https://seanovel.org/novels/shadow-slave")).toBe(true);
     expect(source.canHandle("https://seanovel.org/novels/shadow-slave/chapters/1")).toBe(true);
     expect(source.canHandle("https://www.seanovel.org/novels/x")).toBe(true);
   });
 
   it("rejects other sites", () => {
+    const source = createSource(createTestHost());
     expect(source.canHandle("https://cenele.com/cont/x/")).toBe(false);
     expect(source.canHandle("not a url")).toBe(false);
+  });
+
+  it("rejects hostnames that merely contain seanovel.org as a substring", () => {
+    // A substring/suffix check (e.g. hostname.includes("seanovel.org"))
+    // would wrongly accept both of these. Only exact hostname membership
+    // in HOSTS should pass — the dangerous case is an attacker-controlled
+    // domain that happens to contain "seanovel.org" as a label or prefix.
+    const source = createSource(createTestHost());
+    expect(source.canHandle("https://notseanovel.org/novels/x")).toBe(false);
+    expect(source.canHandle("https://seanovel.org.evil.com/novels/x")).toBe(false);
   });
 });

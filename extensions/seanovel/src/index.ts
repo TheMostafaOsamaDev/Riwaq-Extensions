@@ -23,7 +23,8 @@ const BASE_URL = "https://seanovel.org";
 // Derived from BASE_URL rather than hand-duplicated, so there is one
 // source of truth for the hostname. Yields the same two hosts the brief
 // specifies: "seanovel.org" and "www.seanovel.org".
-const HOSTS = new Set([new URL(BASE_URL).hostname, `www.${new URL(BASE_URL).hostname}`]);
+const { hostname: BASE_HOSTNAME } = new URL(BASE_URL);
+const HOSTS = new Set([BASE_HOSTNAME, `www.${BASE_HOSTNAME}`]);
 
 export default function createSource(_host: SourceHost): Source {
   return {
