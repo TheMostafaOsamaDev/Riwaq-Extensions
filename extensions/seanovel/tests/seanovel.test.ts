@@ -352,6 +352,42 @@ describe("getNovel", () => {
     expect(novel.volumes[0].chapters).toHaveLength(novelDetail.chapters.length);
   });
 
+  it("does not warn when the chapter list already matches chapters_count", async () => {
+    const logs: Array<{ level: string; message: string }> = [];
+    const source = createSource({ ...novelHost(), log: (level, message) => logs.push({ level, message }) });
+    await source.getNovel(NOVEL_URL);
+    expect(logs.some((l) => l.level === "warn")).toBe(false);
+  });
+
+  it("warns (without throwing) when the chapter list disagrees with chapters_count", async () => {
+    // The "always one fully-populated volume, never lazy" design rests on
+    // `chapters` always matching `chapters_count`. Simulate the API
+    // breaking that promise — a truncated or paginated response — by
+    // dropping the fixture's last chapter while leaving chapters_count
+    // untouched.
+    expect(novelDetail.chapters_count).toBeDefined(); // fixture sanity
+    const shortChapters = novelDetail.chapters.slice(0, -1);
+    expect(shortChapters.length).toBe(novelDetail.chapters_count! - 1); // fixture sanity
+    const mismatched = JSON.stringify({ ...novelDetail, chapters: shortChapters });
+
+    const logs: Array<{ level: string; message: string }> = [];
+    const source = createSource({
+      ...createTestHost({ responses: { [`/api/novel/${novelDetail.slug}`]: mismatched } }),
+      log: (level, message) => logs.push({ level, message }),
+    });
+
+    const novel = await source.getNovel(NOVEL_URL);
+    // Still returns the (short) book rather than failing outright — the
+    // chapters that did come back are still a useful, readable novel.
+    expect(novel.volumes[0].chapters).toHaveLength(shortChapters.length);
+
+    const warning = logs.find((l) => l.level === "warn");
+    expect(warning).toBeDefined();
+    expect(warning!.message).toContain(String(novelDetail.chapters_count));
+    expect(warning!.message).toContain(String(shortChapters.length));
+    expect(warning!.message).toContain(novelDetail.slug);
+  });
+
   it("maps every chapter's id/title onto its own chapter-page URL, in source order", async () => {
     const novel = await createSource(novelHost()).getNovel(NOVEL_URL);
     const expected = novelDetail.chapters.map((c) => ({
@@ -362,6 +398,22 @@ describe("getNovel", () => {
     }));
     expect(novel.volumes[0].chapters).toEqual(expected);
     expect(novel.volumes[0].chapters[0].title).not.toBe("");
+  });
+
+  it("passes a non-integer chapter id straight through, unparsed and uncoerced", async () => {
+    // The fixture carries at least one chapter id that is not a plain
+    // integer (a fractional/inserted-chapter id like 1841.1). Named
+    // explicitly here — not just covered incidentally by the full-array
+    // `toEqual` above — so a future edit that "cleans up" chapter ids with
+    // e.g. parseInt/Math.round doesn't silently break this novel's chapter
+    // URLs. See task-3 fix report for how this was found.
+    const oddChapter = novelDetail.chapters.find((c) => !Number.isInteger(c.id));
+    expect(oddChapter).toBeDefined(); // fixture sanity: it is known to have one
+
+    const novel = await createSource(novelHost()).getNovel(NOVEL_URL);
+    const mapped = novel.volumes[0].chapters.find((c) => c.id === oddChapter!.id);
+    expect(mapped).toBeDefined();
+    expect(mapped!.url).toBe(`${NOVEL_URL}/chapters/${oddChapter!.id}`);
   });
 
   it("titles the pseudo-volume via strings(locale), not a raw literal shared by both locales", async () => {
@@ -473,6 +525,32 @@ describe("malformed API responses", () => {
     );
     await expect(source.getHomeSections()).rejects.toThrow(
       "Sea Novel: /api/novels did not return a list of novels.",
+    );
+  });
+
+  it("reports a branded error when /api/novel/<slug> parses as JSON `null` instead of a novel object", async () => {
+    // Regression test for finding F1: a response that parses successfully
+    // (so the JSON.parse guard above doesn't fire) as `null` would
+    // otherwise reach `data.origin` and throw a raw, unbranded
+    // "Cannot read properties of null" TypeError.
+    const source = createSource(
+      createTestHost({ responses: { "/api/novel/x": JSON.stringify(null) } }),
+    );
+    await expect(source.getNovel("https://seanovel.org/novels/x")).rejects.toThrow(
+      "Sea Novel: /api/novel/x did not return a novel object.",
+    );
+  });
+
+  it("reports a branded error when /api/novel/<slug> parses as a JSON array instead of a novel object", async () => {
+    // Same guard, different wrong shape — an array parses fine as JSON and
+    // is a plausible mix-up (e.g. the catalogue endpoint's shape leaking
+    // into the wrong route) that `typeof data === "object"` alone would
+    // not catch.
+    const source = createSource(
+      createTestHost({ responses: { "/api/novel/x": JSON.stringify([{ slug: "x" }]) } }),
+    );
+    await expect(source.getNovel("https://seanovel.org/novels/x")).rejects.toThrow(
+      "Sea Novel: /api/novel/x did not return a novel object.",
     );
   });
 });

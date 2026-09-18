@@ -188,7 +188,18 @@ export default function createSource(host: SourceHost): Source {
       const slug = slugFromUrl(url);
       host.log("info", `getNovel(${slug})`);
       const resp = await host.fetch(`${BASE_URL}/api/novel/${slug}`);
-      const data = parseJsonResponse(resp, `/api/novel/${slug}`) as NovelDetailRow;
+      const parsed = parseJsonResponse(resp, `/api/novel/${slug}`);
+      // Mirrors the shape checks its two siblings make after their own
+      // guarded parse: kolnovel's requestPdfUrl checks the decoded object,
+      // and fetchCatalogue above checks `!Array.isArray(rows)`. A response
+      // that parses successfully as `null`, a number, or an array (a
+      // maintenance/error payload that still happens to be valid JSON)
+      // would otherwise reach `data.origin` etc. below and throw a raw,
+      // unbranded TypeError.
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error(`Sea Novel: /api/novel/${slug} did not return a novel object.`);
+      }
+      const data = parsed as NovelDetailRow;
 
       const meta: SourceNovelMeta[] = [];
       if (data.origin) meta.push({ label: t("metaOrigin"), value: data.origin });
@@ -200,6 +211,24 @@ export default function createSource(host: SourceHost): Source {
         url: chapterUrl(slug, c.id),
         lines: [],
       }));
+
+      // The "always one fully-populated volume, never lazy" design (see the
+      // volumes comment below) rests entirely on `chapters` always carrying
+      // every chapter `chapters_count` claims to have. It does today (the
+      // committed fixture's 3180 matches exactly), but nothing on this end
+      // enforces that server-side — a truncated or paginated response for
+      // an unusually large novel would otherwise silently produce a
+      // shorter book with no signal anywhere. Warn rather than throw: see
+      // task-3 fix report for the reasoning (short version — the chapters
+      // that DID come back are still a useful, readable book, and a hard
+      // failure would deny the user all of them over what may well be a
+      // transient or self-correcting API inconsistency).
+      if (data.chapters_count !== undefined && chapters.length !== data.chapters_count) {
+        host.log(
+          "warn",
+          `Sea Novel: /api/novel/${slug} claims chapters_count=${data.chapters_count} but returned ${chapters.length} chapters.`,
+        );
+      }
 
       return {
         title: data.title_ar,
