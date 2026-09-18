@@ -625,8 +625,17 @@ describe("getChapterContent", () => {
     // TWO sr-only paragraphs inside article.reader-content, not one — a
     // matching one appears after the last real paragraph
     // ("chapter N of <novel> ended, keep reading on seanovel.org...").
-    // Confirm the fixture actually has both before trusting the
-    // assertion below.
+    // Confirm the fixture actually has both before trusting the assertion
+    // below. Derived from the fixture's structure rather than asserted as
+    // a bare count: the expected shape is exactly one sr-only paragraph
+    // before the real body and exactly one after it, with none in
+    // between — assert that shape directly so the assertion documents
+    // *why* two is the right number, not just that it is.
+    expect(chapterFixtureParagraphs[0].classList.contains("sr-only")).toBe(true);
+    expect(chapterFixtureParagraphs.at(-1)?.classList.contains("sr-only")).toBe(true);
+    expect(
+      chapterFixtureParagraphs.slice(1, -1).every((p) => !p.classList.contains("sr-only")),
+    ).toBe(true);
     expect(chapterFixtureSrOnly.length).toBe(2);
 
     const source = createSource(chapterHost());
@@ -676,6 +685,19 @@ describe("getChapterContent", () => {
   });
 
   it("throws when the container is missing from an otherwise truly empty page", async () => {
+    // Tightened to the specific missing-container message
+    // ("no chapter body (article.reader-content)") rather than the looser
+    // /reader-content|chapter body/i used previously: that looser regex
+    // also matches the OTHER guard's message ("chapter body ... parsed
+    // to zero lines"), so this test stayed green even under a tamper that
+    // deleted the container check and fell back to querying paragraphs
+    // from some other root — a zero-paragraph body still trips the
+    // zero-lines guard, and its message satisfies the same loose regex.
+    // The adjacent "throws specifically for the missing container" test
+    // above already catches that tamper (its page has real text outside
+    // the container, so a fallback would return it instead of throwing),
+    // so this test is deliberately narrowed to assert the exact branch it
+    // names rather than dropped, for fidelity to the brief's literal case.
     const empty = createSource(
       createTestHost({ responses: { "/chapters/9": "<html><body></body></html>" } }),
     );
@@ -686,7 +708,7 @@ describe("getChapterContent", () => {
         url: "https://seanovel.org/novels/x/chapters/9",
         lines: [],
       }),
-    ).rejects.toThrow(/reader-content|chapter body/i);
+    ).rejects.toThrow(/no chapter body \(article\.reader-content\)/i);
   });
 
   it("throws rather than silently returning [] when the container exists but has no usable text", async () => {
