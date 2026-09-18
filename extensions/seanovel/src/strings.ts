@@ -4,10 +4,24 @@ import type { Locale } from "@riwaq/extension-api";
  *  unlabelled (a volume with no title, a section with no heading, ...).
  *  Extensions ship their own copy — they cannot reach the app's message
  *  catalogue. Replace "placeholder" with real keys as you need them; both
- *  locales are required so this satisfies Record<Locale, ...> below. */
+ *  locales are required so this satisfies Record<Locale, ...> below.
+ *
+ *  homeLatest/homePopular/homeCompleted label the three home-page rows
+ *  getHomeSections synthesises from the catalogue — the API returns no
+ *  section headings of its own to reuse. */
 const CATALOG = {
-  en: { placeholder: "Placeholder" },
-  ar: { placeholder: "Placeholder" },
+  en: {
+    placeholder: "Placeholder",
+    homeLatest: "Latest",
+    homePopular: "Popular",
+    homeCompleted: "Completed",
+  },
+  ar: {
+    placeholder: "Placeholder",
+    homeLatest: "الأحدث",
+    homePopular: "الأكثر شعبية",
+    homeCompleted: "مكتملة",
+  },
 } satisfies Record<Locale, Record<string, string>>;
 
 export function strings(locale: Locale) {
