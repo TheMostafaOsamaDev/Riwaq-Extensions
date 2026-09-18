@@ -5,9 +5,15 @@ import { join } from "node:path";
 import createSource, {
   BASE_URL,
   chapterPageUrl,
+  collectNovelCards,
+  libraryPageUrl,
+  parseCardAnchor,
   parseChapterLines,
   parseChapterRows,
   parseChaptersCount,
+  parseHomeSections,
+  parseLibraryCards,
+  parseLibraryPageCount,
   parseNovelPage,
   slugFromUrl,
 } from "../src/index";
@@ -26,6 +32,23 @@ const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 const chaptersPage0Html = readFileSync(join(FIXTURES_DIR, "chapters-page0.html"), "utf8");
 const chaptersPage1Html = readFileSync(join(FIXTURES_DIR, "chapters-page1.html"), "utf8");
 const chapterHtml = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
+// `home.html` — a live capture of `/`, NOT `/library` — backs
+// getHomeSections. `/library` (below) is a flat, paginated grid with no
+// section headings at all; the homepage is where the titled
+// `section.home-section` rows actually live. See the src/index.ts file
+// header and the README for why the brief's own "library.html" fixture
+// name doesn't back getHomeSections here.
+const homeHtml = readFileSync(join(FIXTURES_DIR, "home.html"), "utf8");
+// A real capture of `/library` (page 0 — bare `/library` and
+// `/library?page=0` are byte-identical live) — backs search()'s
+// in-memory fallback and parseLibraryCards/parseLibraryPageCount.
+const libraryHtml = readFileSync(join(FIXTURES_DIR, "library.html"), "utf8");
+// A real capture of the page immediately PAST the last real one (live:
+// page 58 is the last page with novels, page 59 is this — see
+// libraryHtml's own "Page 59" aria-label below). Proves the genuine
+// end-of-catalogue shape (grid present, zero rows) is structurally real,
+// not assumed, and is distinct from a blocked/missing-grid page.
+const libraryEmptyHtml = readFileSync(join(FIXTURES_DIR, "library-empty.html"), "utf8");
 // parseChapterRows takes the fetched page's own URL now (used only to name
 // the offending page when the chapter-list container is missing) — these
 // mirror exactly what getVolumeChapters itself would have fetched.
@@ -99,24 +122,52 @@ const EXPECTED_CHAPTERS_COUNT = (() => {
   return Number.parseInt(m[1], 10);
 })();
 
-// Every method on the scaffolded Source still throws "not implemented"
-// except `canHandle` (Task 1) and `getNovel` (this task). As each
-// remaining method is implemented, delete its assertion below and replace
-// it with a real test against fixture HTML saved under tests/fixtures/.
+// Independently derived, via a plain regex over the raw HTML rather than
+// the `section.home-section` DOM query parseHomeSections itself uses —
+// every hardcoded figure in this task's brief will drift as the site's
+// homepage changes, so this counts the fixture's ACTUAL sections at
+// load time rather than typing a literal "5".
+const EXPECTED_HOME_SECTION_COUNT = (
+  homeHtml.match(/<section dir="rtl" class="home-section">/g) ?? []
+).length;
+
+// Same principle, over library.html: an independent regex count of every
+// distinct bare `/novel/<slug>` href (no chapter segment), NOT the
+// `collectNovelCards` DOM walk this fixture's own tests exercise.
+const EXPECTED_LIBRARY_CARD_COUNT = new Set(
+  Array.from(libraryHtml.matchAll(/href="(\/novel\/[^"/?#]+)"/g)).map((m) => m[1]),
+).size;
+
+// The pagination widget's own maximum "Page <n>" aria-label, read by a
+// plain regex rather than parseLibraryPageCount's own querySelectorAll —
+// this is the site's REAL current page count (59 as of this task), which
+// will grow as the catalogue does. Used both to confirm
+// parseLibraryPageCount agrees and to know how the fixture's own claimed
+// page count relates to library-empty.html below.
+const EXPECTED_LIBRARY_PAGE_COUNT = Array.from(libraryHtml.matchAll(/aria-label="Page (\d+)/g))
+  .map((m) => Number.parseInt(m[1], 10))
+  .reduce((max, n) => Math.max(max, n), 1);
+
+// A real card's title, lifted directly out of library.html rather than
+// typed by hand — this task's rule against embedding the site's prose in
+// assertions exempts titles specifically ("titles are fine where a title
+// is the thing under test"), and this IS the thing search() is tested
+// against below. Using the fixture's own first card keeps the query in
+// sync with whatever library.html actually holds if it's ever recaptured,
+// rather than a query that could stop matching anything.
+const LIBRARY_FIRST_CARD_TITLE = (() => {
+  const m = libraryHtml.match(/<h4 dir="rtl">([^<]*)<\/h4>/);
+  if (!m || !m[1].trim()) {
+    throw new Error(
+      "fixture: couldn't find any card title in library.html — fixture may have changed shape.",
+    );
+  }
+  return m[1].trim();
+})();
 
 describe("sunovels: createSource", () => {
   it("constructs a Source from a host", () => {
     expect(() => createSource(createTestHost())).not.toThrow();
-  });
-
-  it("getHomeSections is not implemented yet", async () => {
-    const source = createSource(createTestHost());
-    await expect(source.getHomeSections()).rejects.toThrow("not implemented");
-  });
-
-  it("search is not implemented yet", async () => {
-    const source = createSource(createTestHost());
-    await expect(source.search("query")).rejects.toThrow("not implemented");
   });
 });
 
@@ -835,6 +886,477 @@ describe("getChapterContent", () => {
     await expect(
       empty.getChapterContent({ id: 9, title: "", url: "https://sunovels.com/novel/x/9", lines: [] }),
     ).rejects.toThrow("https://sunovels.com/novel/x/9");
+  });
+});
+
+describe("collectNovelCards / parseCardAnchor", () => {
+  it("excludes a chapter link (three path segments) even though it shares the novel's own href prefix", () => {
+    const doc = parseHtml(`<div><a href="/novel/foo/12"><h4>Chapter title, not a novel card</h4></a></div>`);
+    expect(collectNovelCards(doc)).toEqual([]);
+  });
+
+  // Mirrors the homepage's "أحدث الفصول" rail: a bare cover anchor with no
+  // heading at all, immediately followed by a SEPARATE anchor for the
+  // same novel that wraps only the heading. Neither anchor alone can
+  // supply both title + cover; parseCardAnchor must let the
+  // heading-bearing one through as a real card rather than emitting a
+  // title-less one from the cover anchor.
+  it("lets the heading-bearing anchor produce the card when a novel is split across two anchors", () => {
+    const doc = parseHtml(
+      `<div class="novelBox">` +
+        `<a class="cover" href="/novel/two-anchor-novel"><img src="/uploads/real-cover.jpg"/></a>` +
+        `<a href="/novel/two-anchor-novel"><h3>Two Anchor Novel</h3></a>` +
+        `</div>`,
+    );
+    const cards = collectNovelCards(doc);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toEqual({
+      url: "https://sunovels.com/novel/two-anchor-novel",
+      title: "Two Anchor Novel",
+      coverUrl: undefined,
+    });
+  });
+
+  it("returns null for an anchor with no heading at all, rather than a title-less card", () => {
+    const doc = parseHtml(`<a href="/novel/no-heading"><img src="/placeholder.gif"/></a>`);
+    expect(parseCardAnchor(doc.querySelector("a")!)).toBeNull();
+  });
+
+  it("treats the lazy-load placeholder gif as no cover, but absolutizes a real image src", () => {
+    const placeholder = parseHtml(`<a href="/novel/a"><h4>A</h4><img src="/placeholder.gif"/></a>`);
+    expect(parseCardAnchor(placeholder.querySelector("a")!)?.coverUrl).toBeUndefined();
+
+    const real = parseHtml(`<a href="/novel/b"><h4>B</h4><img src="/uploads/real.jpg"/></a>`);
+    expect(parseCardAnchor(real.querySelector("a")!)?.coverUrl).toBe(
+      "https://sunovels.com/uploads/real.jpg",
+    );
+  });
+
+  it("de-duplicates when the same href appears twice, each with its own heading", () => {
+    const doc = parseHtml(
+      `<div><a href="/novel/dup"><h4>Dup</h4></a><a href="/novel/dup"><h4>Dup again</h4></a></div>`,
+    );
+    const cards = collectNovelCards(doc);
+    expect(cards).toHaveLength(1);
+    expect(cards[0].title).toBe("Dup"); // first one wins, in document order
+  });
+});
+
+describe("parseHomeSections", () => {
+  const HOME_URL = `${BASE_URL}/`;
+
+  it("returns exactly the fixture's own section count, all with at least one card", () => {
+    expect(EXPECTED_HOME_SECTION_COUNT).toBeGreaterThan(1);
+    const sections = parseHomeSections(parseHtml(homeHtml), HOME_URL);
+    expect(sections).toHaveLength(EXPECTED_HOME_SECTION_COUNT);
+    for (const s of sections) {
+      expect(s.cards.length).toBeGreaterThan(0);
+      expect(s.title.trim()).not.toBe("");
+    }
+  });
+
+  it("gives every card an absolute novel URL and a non-empty title", () => {
+    const sections = parseHomeSections(parseHtml(homeHtml), HOME_URL);
+    for (const card of sections.flatMap((s) => s.cards)) {
+      expect(card.url).toMatch(/^https:\/\/sunovels\.com\/novel\//);
+      expect(card.title.trim()).not.toBe("");
+    }
+  });
+
+  // Pins the site's actual section titles and their document-order ids —
+  // titles are exempt from this task's "no site prose in assertions" rule
+  // (they're the thing under test here, same as parseNovelPage's own
+  // "عبد الظل" title assertions elsewhere in this file).
+  it("assigns ids in document order and reads each section's own title", () => {
+    const sections = parseHomeSections(parseHtml(homeHtml), HOME_URL);
+    expect(sections.map((s) => s.id)).toEqual(sections.map((_, i) => `home-${i}`));
+    expect(sections.map((s) => s.title)).toEqual([
+      "أشهر الروايات",
+      "روايات إثارة",
+      "روايات يابانية",
+      "روايات كورية",
+      "أحدث الفصول",
+    ]);
+  });
+
+  it("absolutizes a section's own view-more link when it has one, and leaves it undefined otherwise", () => {
+    const sections = parseHomeSections(parseHtml(homeHtml), HOME_URL);
+    expect(sections[0].viewMoreUrl).toBe("https://sunovels.com/library");
+    // "أحدث الفصول" (latest chapters) is the one section whose header has
+    // no "المزيد" link at all.
+    expect(sections.at(-1)!.viewMoreUrl).toBeUndefined();
+  });
+
+  it("throws, naming the URL, when no home sections are found at all", () => {
+    const doc = parseHtml(`<html><body><p>Access denied.</p></body></html>`);
+    expect(() => parseHomeSections(doc, HOME_URL)).toThrow(/home section/i);
+    expect(() => parseHomeSections(doc, HOME_URL)).toThrow(HOME_URL);
+  });
+
+  // "أحدث الفصول"'s own cards use <h3> for THEIR titles too (see
+  // collectNovelCards) — an unscoped sec.querySelector("h3") would happen
+  // to still find the section's own heading first by document order, but
+  // only by luck. This forges a section whose FIRST h3 in document order
+  // belongs to a card, not the header, to pin that `.section-header`
+  // scoping — not luck — is what supplies the title.
+  it("reads the title from .section-header, not the first h3 anywhere in the section", () => {
+    const doc = parseHtml(
+      `<section dir="rtl" class="home-section">` +
+        `<div class="section-body"><a href="/novel/x"><h3>Not the section title</h3></a></div>` +
+        `<div class="section-header"><h3>Real Section Title</h3></div>` +
+        `</section>`,
+    );
+    const sections = parseHomeSections(doc, HOME_URL);
+    expect(sections[0].title).toBe("Real Section Title");
+  });
+});
+
+describe("getHomeSections", () => {
+  const HOME_KEY = `${BASE_URL}/`;
+
+  it("returns at least one section, all non-empty", async () => {
+    const source = createSource(createTestHost({ responses: { [HOME_KEY]: homeHtml } }));
+    const sections = await source.getHomeSections();
+    expect(sections.length).toBeGreaterThan(0);
+    for (const s of sections) expect(s.cards.length).toBeGreaterThan(0);
+  });
+
+  it("gives every card an absolute novel URL and a title", async () => {
+    const source = createSource(createTestHost({ responses: { [HOME_KEY]: homeHtml } }));
+    for (const card of (await source.getHomeSections()).flatMap((s) => s.cards)) {
+      expect(card.url).toMatch(/^https:\/\/sunovels\.com\/novel\//);
+      expect(card.title.trim()).not.toBe("");
+    }
+  });
+
+  it("fetches the site root exactly", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(createTestHost({ responses: { [HOME_KEY]: homeHtml }, calls }));
+    await source.getHomeSections();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(HOME_KEY);
+  });
+
+  it("propagates a blocked/errored homepage as a rejection rather than an empty list", async () => {
+    const source = createSource(
+      createTestHost({
+        responses: { [HOME_KEY]: "<html><body><p>Access denied.</p></body></html>" },
+      }),
+    );
+    await expect(source.getHomeSections()).rejects.toThrow(/home section/i);
+  });
+});
+
+describe("libraryPageUrl", () => {
+  it("is 0-indexed and always includes the page param", () => {
+    expect(libraryPageUrl(0)).toBe("https://sunovels.com/library?page=0");
+    expect(libraryPageUrl(1)).toBe("https://sunovels.com/library?page=1");
+  });
+});
+
+describe("parseLibraryPageCount", () => {
+  it("matches an independent regex count of the fixture's own maximum Page-N aria-label", () => {
+    expect(EXPECTED_LIBRARY_PAGE_COUNT).toBeGreaterThan(1);
+    expect(parseLibraryPageCount(parseHtml(libraryHtml))).toBe(EXPECTED_LIBRARY_PAGE_COUNT);
+  });
+
+  it("falls back to 1 when there is no pagination widget at all", () => {
+    expect(parseLibraryPageCount(parseHtml("<html><body></body></html>"))).toBe(1);
+  });
+
+  it("takes the maximum aria-label seen, not the last one in document order", () => {
+    const doc = parseHtml(
+      `<a aria-label="Page 3">3</a><a aria-label="Page 1 is your current page">1</a><a aria-label="Page 2">2</a>`,
+    );
+    expect(parseLibraryPageCount(doc)).toBe(3);
+  });
+});
+
+describe("parseLibraryCards", () => {
+  it("returns exactly the fixture's own distinct novel links, each with an absolute URL and a title", () => {
+    expect(EXPECTED_LIBRARY_CARD_COUNT).toBeGreaterThan(1);
+    const cards = parseLibraryCards(parseHtml(libraryHtml), libraryPageUrl(0));
+    expect(cards).toHaveLength(EXPECTED_LIBRARY_CARD_COUNT);
+    expect(new Set(cards.map((c) => c.url)).size).toBe(cards.length);
+    for (const c of cards) {
+      expect(c.url).toMatch(/^https:\/\/sunovels\.com\/novel\//);
+      expect(c.title.trim()).not.toBe("");
+    }
+  });
+
+  // The genuine end-of-catalogue shape, captured live one page past the
+  // last real one (see the fixture's own doc comment above) — a grid
+  // that's present but empty must return [], not throw. This is the
+  // "real, correct empty result" half of this task's ruling on keeping
+  // silent-emptiness refusal apart from a genuine empty page.
+  it("returns [] — not an error — for a real page one past the end of the catalogue", () => {
+    expect(parseLibraryCards(parseHtml(libraryEmptyHtml), libraryPageUrl(59))).toEqual([]);
+  });
+
+  // The other half: a grid that's MISSING entirely (a blocked/errored
+  // page, synthesized here since a live block isn't reproducible on
+  // demand — the same reasoning parseNovelPage/parseChapterRows/
+  // parseChapterLines's own "Access denied" tests already rely on) must
+  // throw instead of being treated as the same genuine end of catalogue.
+  it("throws, naming the URL, when the grid is missing entirely", () => {
+    const doc = parseHtml("<html><body><p>Access denied.</p></body></html>");
+    const url = libraryPageUrl(0);
+    expect(() => parseLibraryCards(doc, url)).toThrow(/grid-list/i);
+    expect(() => parseLibraryCards(doc, url)).toThrow(url);
+  });
+});
+
+/** A synthetic /library page: `cards.length` list-item cards (never real
+ *  site prose — titles are plain "Synth Novel N" labels this test owns)
+ *  plus a pagination widget whose maximum "Page <n>" aria-label is
+ *  `totalPages` — lets a test control exactly how many pages search()'s
+ *  internal catalogue walk will attempt, independent of whatever
+ *  library.html's own (much larger, real) pagination claims. */
+function syntheticLibraryPage(
+  cards: Array<{ slug: string; title: string }>,
+  totalPages: number,
+): string {
+  const items = cards
+    .map(
+      (c) =>
+        `<li class="list-item"><a href="/novel/${c.slug}"><div class="image-x">` +
+        `<img src="/placeholder.gif"/></div><h4 dir="rtl">${c.title}</h4></a></li>`,
+    )
+    .join("");
+  return (
+    `<html><body><article><ul class="grid-list">${items}</ul></article>` +
+    `<nav><a aria-label="Page ${totalPages}">${totalPages}</a></nav></body></html>`
+  );
+}
+
+describe("search", () => {
+  it("returns a hollow result without fetching anything when the query is empty", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(createTestHost({ calls }));
+    const r = await source.search("   ", 1);
+    expect(r).toEqual({ cards: [], hasMore: false, query: "", page: 1 });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("finds a known novel from the real fixture and echoes the trimmed query", async () => {
+    const source = createSource(
+      createTestHost({
+        responses: {
+          [libraryPageUrl(0)]: libraryHtml,
+          [libraryPageUrl(1)]: libraryEmptyHtml,
+        },
+      }),
+    );
+    const r = await source.search(`  ${LIBRARY_FIRST_CARD_TITLE}  `, 1);
+    expect(r.cards.length).toBeGreaterThan(0);
+    expect(r.cards.some((c) => c.title === LIBRARY_FIRST_CARD_TITLE)).toBe(true);
+    expect(r.query).toBe(LIBRARY_FIRST_CARD_TITLE);
+    expect(r.page).toBe(1);
+  });
+
+  // Pins substring matching ANYWHERE in the title, not just a prefix —
+  // synthetic because none of the real fixture's titles are guaranteed
+  // to share a matchable word outside their own first token. A mutant
+  // that swapped `.includes(q)` for `.startsWith(q)` would still pass
+  // the "finds a known novel" test above (its query is a whole exact
+  // title, which trivially satisfies startsWith too) but fails here.
+  it("matches a substring anywhere in the title, not only as a prefix", async () => {
+    const source = createSource(
+      createTestHost({
+        responses: {
+          [libraryPageUrl(0)]: syntheticLibraryPage(
+            [{ slug: "middle-match", title: "Alpha Middle Omega" }],
+            1,
+          ),
+        },
+      }),
+    );
+    const r = await source.search("Middle", 1);
+    expect(r.cards.map((c) => c.title)).toEqual(["Alpha Middle Omega"]);
+  });
+
+  // The real, correct empty result — nothing on the site matches — must
+  // come back as [] rather than throw. This is deliberately the OTHER
+  // half of the same distinction parseLibraryCards's own tests pin: a
+  // query that legitimately matches nothing is not the same failure mode
+  // as a page that failed to parse.
+  it("returns an empty result rather than throwing when nothing matches", async () => {
+    const source = createSource(
+      createTestHost({
+        responses: {
+          [libraryPageUrl(0)]: libraryHtml,
+          [libraryPageUrl(1)]: libraryEmptyHtml,
+        },
+      }),
+    );
+    const r = await source.search("zzzzzznomatch", 1);
+    expect(r.cards).toEqual([]);
+    expect(r.hasMore).toBe(false);
+    expect(r.query).toBe("zzzzzznomatch");
+  });
+
+  it("walks the library sequentially and stops as soon as a page yields no rows", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(
+      createTestHost({
+        responses: {
+          [libraryPageUrl(0)]: libraryHtml,
+          [libraryPageUrl(1)]: libraryEmptyHtml,
+          // Deliberately no fixture for page=2: library.html's OWN
+          // pagination widget claims far more pages exist
+          // (EXPECTED_LIBRARY_PAGE_COUNT). If the walk kept going past
+          // page=1's empty result instead of stopping there, this would
+          // reject with "no text fixture for ..." instead of resolving.
+        },
+        calls,
+      }),
+    );
+    await source.search(LIBRARY_FIRST_CARD_TITLE, 1);
+    expect(calls).toHaveLength(2);
+    // Pins the EXACT recorded URLs, not just their count —
+    // createTestHost resolves a fixture by substring match (see its own
+    // doc comment), so a mangled page number that still happens to
+    // contain the right substring (e.g. a "page=10" request still
+    // contains "page=1") would pass a test that only checked
+    // `calls.length` or the parsed result.
+    expect(calls[0].url).toBe(libraryPageUrl(0));
+    expect(calls[1].url).toBe(libraryPageUrl(1));
+  });
+
+  // The real fixtures happen to be disjoint (library.html vs
+  // library-empty.html), so this forces genuine cross-page overlap —
+  // page 1 deliberately answers with page 0's own markup again — the
+  // same way getVolumeChapters's own de-dup test does.
+  it("de-duplicates a novel that appears on two different library pages", async () => {
+    const source = createSource(
+      createTestHost({
+        responses: {
+          [libraryPageUrl(0)]: libraryHtml,
+          [libraryPageUrl(1)]: libraryHtml,
+          [libraryPageUrl(2)]: libraryEmptyHtml,
+        },
+      }),
+    );
+    const r = await source.search(LIBRARY_FIRST_CARD_TITLE, 1);
+    expect(r.cards.filter((c) => c.title === LIBRARY_FIRST_CARD_TITLE)).toHaveLength(1);
+  });
+
+  // Mirrors getVolumeChapters's own "blocked mid-sequence page" guard: a
+  // page that fails to parse partway through the scan must reject the
+  // whole search, not silently return whatever was collected so far.
+  it("rejects rather than silently truncating when a mid-sequence library page is blocked/errored", async () => {
+    const source = createSource(
+      createTestHost({
+        responses: {
+          [libraryPageUrl(0)]: libraryHtml,
+          [libraryPageUrl(1)]: "<html><body><p>Access denied.</p></body></html>",
+        },
+      }),
+    );
+    await expect(source.search(LIBRARY_FIRST_CARD_TITLE, 1)).rejects.toThrow(/grid-list/i);
+  });
+
+  it("scans the library only once across two search calls on the same Source instance", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(
+      createTestHost({
+        responses: {
+          [libraryPageUrl(0)]: libraryHtml,
+          [libraryPageUrl(1)]: libraryEmptyHtml,
+        },
+        calls,
+      }),
+    );
+    await source.search(LIBRARY_FIRST_CARD_TITLE, 1);
+    await source.search("something else entirely", 1);
+    expect(calls).toHaveLength(2); // not 4 — the second call reused the memoised catalogue
+  });
+
+  // Mirrors getVolumeChapters's own "never more than one in flight" test:
+  // firing dozens of /library requests at once at a third-party site
+  // invites rate-limiting for no gain on a scan the caller is waiting on.
+  it("fetches library pages sequentially, never more than one in flight", async () => {
+    const base = createTestHost({
+      responses: {
+        [libraryPageUrl(0)]: libraryHtml,
+        [libraryPageUrl(1)]: libraryEmptyHtml,
+      },
+    });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const host: typeof base = {
+      ...base,
+      async fetch(url, opts) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // Yield the event loop before resolving: a caller that fired
+        // page 1's request without awaiting page 0's first would have
+        // both in flight at once when this runs for the second call.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const result = await base.fetch(url, opts);
+        inFlight--;
+        return result;
+      },
+    };
+    const source = createSource(host);
+    await source.search(LIBRARY_FIRST_CARD_TITLE, 1);
+    expect(maxInFlight).toBe(1);
+  });
+
+  // A dedicated synthetic catalogue: 30 cards that all match "Synth",
+  // spread across two /library pages, so the filtered match count (30)
+  // exceeds one search page (24) and slicing/hasMore has something real
+  // to prove — none of the real fixtures have 24+ titles sharing one
+  // matchable word, so this can't be derived from them.
+  it("pages its own filtered results: a full page reports hasMore, the remainder does not", async () => {
+    const page0Cards = Array.from({ length: 24 }, (_, i) => ({
+      slug: `synth-${i}`,
+      title: `Synth Novel ${i}`,
+    }));
+    const page1Cards = Array.from({ length: 6 }, (_, i) => ({
+      slug: `synth-${24 + i}`,
+      title: `Synth Novel ${24 + i}`,
+    }));
+    const source = createSource(
+      createTestHost({
+        responses: {
+          [libraryPageUrl(0)]: syntheticLibraryPage(page0Cards, 2),
+          [libraryPageUrl(1)]: syntheticLibraryPage(page1Cards, 2),
+        },
+      }),
+    );
+    const first = await source.search("Synth", 1);
+    expect(first.cards).toHaveLength(24);
+    expect(first.hasMore).toBe(true);
+
+    const second = await source.search("Synth", 2);
+    expect(second.cards).toHaveLength(6);
+    expect(second.hasMore).toBe(false);
+
+    // The two pages are disjoint slices of the same 30 matches.
+    expect(new Set([...first.cards, ...second.cards].map((c) => c.url)).size).toBe(30);
+  });
+
+  // The exact boundary the test above cannot pin: when the match count is
+  // precisely one page's worth, `hasMore` must be false, not true. A
+  // mutant that computed `matches.length >= start + SEARCH_PAGE_SIZE`
+  // (off by one from the correct `>`) would still pass every other test
+  // in this file — 30-match total's first page is `30 > 24`, true either
+  // way — but fails here, where it's `24 >= 24` (wrongly true) vs.
+  // `24 > 24` (correctly false).
+  it("reports hasMore: false when the match count exactly fills one page", async () => {
+    const exactPage = Array.from({ length: 24 }, (_, i) => ({
+      slug: `synth-exact-${i}`,
+      title: `Synth Novel ${i}`,
+    }));
+    const source = createSource(
+      createTestHost({
+        responses: { [libraryPageUrl(0)]: syntheticLibraryPage(exactPage, 1) },
+      }),
+    );
+    const r = await source.search("Synth", 1);
+    expect(r.cards).toHaveLength(24);
+    expect(r.hasMore).toBe(false);
   });
 });
 
