@@ -5,6 +5,7 @@ import { join } from "node:path";
 import createSource, {
   BASE_URL,
   chapterPageUrl,
+  parseChapterLines,
   parseChapterRows,
   parseChaptersCount,
   parseNovelPage,
@@ -24,11 +25,62 @@ const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 const chaptersPage0Html = readFileSync(join(FIXTURES_DIR, "chapters-page0.html"), "utf8");
 const chaptersPage1Html = readFileSync(join(FIXTURES_DIR, "chapters-page1.html"), "utf8");
+const chapterHtml = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
 // parseChapterRows takes the fetched page's own URL now (used only to name
 // the offending page when the chapter-list container is missing) — these
 // mirror exactly what getVolumeChapters itself would have fetched.
 const CHAPTERS_PAGE0_URL = chapterPageUrl("shadow-slave", 0);
 const CHAPTERS_PAGE1_URL = chapterPageUrl("shadow-slave", 1);
+// The captured fixture is chapter 1 of shadow-slave (confirmed against the
+// page's own embedded `"url":"https://sunovels.com/novel/shadow-slave/1"`).
+const CHAPTER_URL = "https://sunovels.com/novel/shadow-slave/1";
+
+// Every real (non-decoy) paragraph in the fixture is a bare `<p>...</p>`
+// with no attributes and no nested markup; every decoy is the exact
+// literal `<p class="d-none">...</p>`. Both facts are asserted on below,
+// not assumed — so these three counts are independent of parseChapterLines
+// itself (plain substring counts over the raw file, not a DOM query), and
+// give the "real non-empty line" total parseChapterLines must reproduce.
+const FIXTURE_DECOY_COUNT = (chapterHtml.match(/<p class="d-none">/g) ?? []).length;
+const FIXTURE_BARE_P_COUNT = (chapterHtml.match(/<p>/g) ?? []).length;
+const FIXTURE_EMPTY_BARE_P_COUNT = (chapterHtml.match(/<p><\/p>/g) ?? []).length;
+const EXPECTED_CHAPTER_LINE_COUNT = FIXTURE_BARE_P_COUNT - FIXTURE_EMPTY_BARE_P_COUNT;
+// The fixture's dialogue-heavy prose is riddled with literal `&quot;`/
+// `&#x27;` character references (78 and 2 occurrences respectively inside
+// the container) — decoded by any real HTML parser (including the one
+// parseChapterLines itself runs on) into a single `"`/`'` each, but NOT
+// decoded by the raw regex walk below. Without unescaping them here first,
+// every paragraph containing one would come out longer in this
+// independent count than in the parser's real output, for a reason that
+// has nothing to do with paragraph selection. This only reverses the small,
+// fixed set of entities this fixture actually uses — it does not parse
+// markup, so it stays independent of parseChapterLines.
+function decodeBasicEntities(s: string): string {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+// Ordered, independently of the DOM entirely: a plain regex walk over the
+// raw text from the container's own opening tag, collecting only bare
+// `<p>...</p>` matches (which — because decoys are written as `<p
+// class="d-none">`, a different literal opening tag — already skips every
+// decoy without needing to inspect content) and recording each survivor's
+// sanitized length rather than its text. Length, not content, is what's
+// compared against the real parser's output below, per this task's rule
+// against embedding chapter prose in assertions — but the sequence is
+// diverse enough (68 distinct lengths across 90 entries, not sorted) that
+// a reordering or a dropped/duplicated line would still change it.
+const EXPECTED_CHAPTER_LINE_LENGTHS = Array.from(
+  chapterHtml.slice(chapterHtml.indexOf("chapter-content")).matchAll(/<p>([^<]*)<\/p>/g),
+)
+  .map((m) => decodeBasicEntities(m[1]).replace(/\s+/g, " ").trim())
+  .filter((text) => text.length > 0)
+  .map((text) => text.length);
 
 // Independently derived from the fixture at run time, via a code path
 // `parseChaptersCount` does NOT use (the page's `application/ld+json` block,
@@ -65,13 +117,6 @@ describe("sunovels: createSource", () => {
   it("search is not implemented yet", async () => {
     const source = createSource(createTestHost());
     await expect(source.search("query")).rejects.toThrow("not implemented");
-  });
-
-  it("getChapterContent is not implemented yet", async () => {
-    const source = createSource(createTestHost());
-    await expect(
-      source.getChapterContent({ id: 1, title: "t", url: "https://example.com/c/1", lines: [] }),
-    ).rejects.toThrow("not implemented");
   });
 });
 
@@ -624,10 +669,18 @@ describe("getVolumeChapters", () => {
 
   it("builds the chapter-list URL from the volume's key, not by re-deriving the slug from novelUrl", async () => {
     const src = createSource(twoPageHost());
-    // novelUrl deliberately names a DIFFERENT slug than volume.key — no
-    // fixture exists for "not-the-real-slug", so an implementation that
-    // ignored volume.key and re-derived the slug from novelUrl instead
-    // would reject with "no text fixture for ..." rather than resolving.
+    // novelUrl deliberately names a DIFFERENT slug than volume.key. This
+    // does NOT reject with "no text fixture for ..." if the
+    // implementation ignores volume.key — twoPageHost's fixture keys are
+    // the bare "activeTab=chapters&page=N" query strings, which the test
+    // host matches by substring, so a fetch to
+    // ".../novel/not-the-real-slug?activeTab=chapters&page=0" still
+    // resolves to page0's HTML either way. What actually catches an
+    // implementation that re-derived the slug from novelUrl is
+    // parseChapterRows's row selector: fed "not-the-real-slug" instead of
+    // "shadow-slave", `a[href^="/novel/not-the-real-slug/"]` matches zero
+    // of the fixture's real anchors, so `chapters` comes back empty and
+    // the assertion below fails.
     const chapters = await src.getVolumeChapters!(
       "https://sunovels.com/novel/not-the-real-slug",
       { id: 1, title: "all", chapters: [], chapterCount: 100, key: "shadow-slave" },
@@ -662,6 +715,126 @@ describe("getVolumeChapters", () => {
       key: "shadow-slave",
     });
     expect(maxInFlight).toBe(1);
+  });
+});
+
+describe("parseChapterLines", () => {
+  const parse = () => parseChapterLines(parseHtml(chapterHtml), CHAPTER_URL);
+
+  // The site salts every real paragraph with a matching decoy sibling
+  // (`<p class="d-none">`, hidden by a display:none utility class but
+  // sitting right in the markup) — every decoy observed carries real,
+  // non-empty text, so an implementation that forgot to filter them would
+  // not just add a little noise, it would roughly double the fixture's
+  // line count. The three counts below (all plain substring counts over
+  // the raw fixture, not a DOM query) confirm the fixture actually
+  // exercises that: real decoys exist, and at least one real paragraph is
+  // itself empty, so "drop empty strings" alone could not accidentally
+  // produce the right count without also excluding decoys.
+  it("returns exactly the real, non-empty paragraphs — derived from the fixture, not a hardcoded count", () => {
+    expect(FIXTURE_DECOY_COUNT).toBeGreaterThan(0);
+    expect(FIXTURE_EMPTY_BARE_P_COUNT).toBeGreaterThan(0);
+    expect(EXPECTED_CHAPTER_LINE_COUNT).toBeGreaterThan(20);
+
+    const lines = parse();
+    expect(lines).toHaveLength(EXPECTED_CHAPTER_LINE_COUNT);
+    expect(lines.every((l) => l.type === "text")).toBe(true);
+    expect(lines.every((l) => l.content.trim() !== "")).toBe(true);
+  });
+
+  // Same fixture, a structural (not textual) fingerprint: each line's
+  // content LENGTH, in order. Comparing lengths rather than the sanitized
+  // text itself keeps this test off chapter prose while still catching
+  // reordering, drops, duplicates or leaked decoys — the length sequence
+  // has 68 distinct values across 90 entries and is not sorted, so any of
+  // those mutations would change it.
+  it("preserves paragraph order and per-paragraph content, checked by length rather than text", () => {
+    const lines = parse();
+    expect(lines.map((l) => l.content.length)).toEqual(EXPECTED_CHAPTER_LINE_LENGTHS);
+  });
+
+  // A synthetic, minimal document pins the exact behavior the fixture-scale
+  // tests above can only prove statistically: a decoy with real non-empty
+  // text is dropped (not just "empty things are dropped"), an empty real
+  // paragraph (a blank-line spacer) is dropped too, and the two survivors
+  // come back in document order with their content untouched.
+  it("drops a non-empty decoy and an empty spacer, on a synthetic minimal document", () => {
+    const doc = parseHtml(
+      `<div class="chapter-content">` +
+        `<p>First line.</p>` +
+        `<p class="d-none">decoy text that is not empty</p>` +
+        `<p></p>` +
+        `<p>Second line.</p>` +
+        `</div>`,
+    );
+    const lines = parseChapterLines(doc, CHAPTER_URL);
+    expect(lines).toEqual([
+      { type: "text", content: "First line." },
+      { type: "text", content: "Second line." },
+    ]);
+  });
+
+  // Mirrors parseNovelPage's and parseChapterRows's own guard on a missing
+  // container: a page that isn't really a chapter body (an anti-bot
+  // interstitial or error page served with HTTP 200, a layout change) must
+  // reject by name rather than resolve to an empty chapter indistinguishable
+  // from a real chapter with no text.
+  it("throws, naming the URL, when .chapter-content is missing entirely", () => {
+    const doc = parseHtml(`<html><body><p>Access denied.</p></body></html>`);
+    expect(() => parseChapterLines(doc, CHAPTER_URL)).toThrow(/chapter-content|chapter body/i);
+    expect(() => parseChapterLines(doc, CHAPTER_URL)).toThrow(CHAPTER_URL);
+  });
+
+  // The other half of the same guard: a present container that yields zero
+  // real lines (every paragraph a decoy, or the real ones all empty) is the
+  // same silent-emptiness failure as a missing container and must reject
+  // too, rather than resolving to `[]` and letting the reader render a
+  // blank page.
+  it("throws, naming the URL, when the body is present but parses to zero real lines", () => {
+    const doc = parseHtml(
+      `<div class="chapter-content"><p class="d-none">decoy only</p><p></p></div>`,
+    );
+    expect(() => parseChapterLines(doc, CHAPTER_URL)).toThrow(/chapter-content|chapter body/i);
+    expect(() => parseChapterLines(doc, CHAPTER_URL)).toThrow(CHAPTER_URL);
+  });
+});
+
+describe("getChapterContent", () => {
+  it("fetches the chapter's own URL, exactly, and returns its parsed body", async () => {
+    // createTestHost resolves a fixture by SUBSTRING match against the
+    // requested URL (see its own doc comment) — a call that merely
+    // *contains* "/novel/shadow-slave/1" (a mangled query string tacked
+    // on, say) would still resolve to this same fixture and pass a test
+    // that only checked the returned lines. Asserting the exact recorded
+    // call URL (the same `calls` pattern getVolumeChapters's own tests
+    // use) closes that gap.
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(
+      createTestHost({ responses: { "/novel/shadow-slave/1": chapterHtml }, calls }),
+    );
+    const lines = await source.getChapterContent({
+      id: 1,
+      title: "الفصل 1",
+      url: CHAPTER_URL,
+      lines: [],
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(CHAPTER_URL);
+    expect(lines).toHaveLength(EXPECTED_CHAPTER_LINE_COUNT);
+    expect(lines.every((l) => l.type === "text")).toBe(true);
+    expect(lines.every((l) => l.content.trim() !== "")).toBe(true);
+  });
+
+  it("throws a descriptive error naming the URL when the body is missing", async () => {
+    const empty = createSource(
+      createTestHost({ responses: { "/novel/x/9": "<html><body></body></html>" } }),
+    );
+    await expect(
+      empty.getChapterContent({ id: 9, title: "", url: "https://sunovels.com/novel/x/9", lines: [] }),
+    ).rejects.toThrow(/chapter-content|chapter body/i);
+    await expect(
+      empty.getChapterContent({ id: 9, title: "", url: "https://sunovels.com/novel/x/9", lines: [] }),
+    ).rejects.toThrow("https://sunovels.com/novel/x/9");
   });
 });
 

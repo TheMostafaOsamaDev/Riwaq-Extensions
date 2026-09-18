@@ -16,11 +16,11 @@
 // one, the inverse of extensions/seanovel. Do not carry that assumption
 // across.
 //
-// `canHandle`, `slugFromUrl`, `getNovel` and now `getVolumeChapters` are
-// implemented. `getHomeSections`, `search` and `getChapterContent` still
-// throw "not implemented"; implement them one at a time against this
-// manifest's `baseUrl`, replacing the matching stub assertion in the
-// sibling tests/sunovels.test.ts file as you go.
+// `canHandle`, `slugFromUrl`, `getNovel`, `getVolumeChapters` and now
+// `getChapterContent` are implemented. `getHomeSections` and `search`
+// still throw "not implemented"; implement them one at a time against
+// this manifest's `baseUrl`, replacing the matching stub assertion in
+// the sibling tests/sunovels.test.ts file as you go.
 import {
   absoluteUrl,
   parseHtml,
@@ -188,6 +188,61 @@ export function parseChapterRows(doc: Document, slug: string, pageUrl: string): 
   return out;
 }
 
+/** Scoped to `.chapter-content` — the chapter body container on a chapter
+ *  page.
+ *
+ *  The site salts every real paragraph in `.chapter-content` with a
+ *  matching decoy sibling, `<p class="d-none">` — a scraper trap, not
+ *  real content, invisible on the rendered page (`d-none` is a
+ *  `display: none` utility class) but sitting right in the markup a
+ *  naive `querySelectorAll("p")` would collect right along with the real
+ *  text. In the fixture captured for this task the split was close to
+ *  1:1 (94 real paragraphs to 95 decoys): an implementation that didn't
+ *  filter these out wouldn't just add a little noise, it would roughly
+ *  double the chapter's line count and interleave garbage into every
+ *  other line. Every real paragraph observed on this site so far is a
+ *  bare `<p>` with no attributes at all, so `classList.contains("d-none")`
+ *  cleanly tells the two apart without needing to inspect content.
+ *
+ *  A handful of real (non-decoy) paragraphs are themselves genuinely
+ *  empty (`<p></p>`, a blank-line spacer between scenes) — sanitizeText
+ *  plus the `if (content)` check below drops those the same way a
+ *  missing textContent would, so they never surface as blank lines the
+ *  reader would render as visible gaps.
+ *
+ *  `chapterUrl` names the offending page in both error messages below;
+ *  it plays no part in parsing. */
+export function parseChapterLines(doc: Document, chapterUrl: string): SourceLine[] {
+  const root = doc.querySelector(".chapter-content");
+  if (!root) {
+    throw new Error(
+      `Sun Novels: couldn't find the chapter body (.chapter-content) on ${chapterUrl} — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+    );
+  }
+
+  const lines: SourceLine[] = [];
+  for (const p of Array.from(root.querySelectorAll("p"))) {
+    if (p.classList.contains("d-none")) continue; // decoy paragraph — see above
+    const content = sanitizeText(p.textContent);
+    if (content) lines.push({ type: "text", content });
+  }
+
+  // A container that's present but yields no real text lines (every
+  // paragraph was a decoy, or the real ones were all empty) is the same
+  // failure mode as a missing container entirely: the reader would
+  // silently render a blank chapter, indistinguishable from the site
+  // legitimately having nothing here. Refuse loudly instead, the same
+  // way parseNovelPage and parseChapterRows already do for their own
+  // containers.
+  if (lines.length === 0) {
+    throw new Error(
+      `Sun Novels: chapter body (.chapter-content) at ${chapterUrl} parsed to zero lines of real text.`,
+    );
+  }
+
+  return lines;
+}
+
 export default function createSource(host: SourceHost): Source {
   return {
     // The novel page's chapter list lives behind a paginated tab (50 rows
@@ -301,8 +356,10 @@ export default function createSource(host: SourceHost): Source {
       return chapters;
     },
 
-    async getChapterContent(_chapter: SourceChapter): Promise<SourceLine[]> {
-      throw new Error("not implemented");
+    async getChapterContent(chapter: SourceChapter): Promise<SourceLine[]> {
+      host.log("info", `getChapterContent(${chapter.url})`);
+      const resp = await host.fetch(chapter.url);
+      return parseChapterLines(parseHtml(resp.text), chapter.url);
     },
   };
 }

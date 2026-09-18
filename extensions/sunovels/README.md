@@ -9,8 +9,8 @@ documentation. Everything here is scraped from server-rendered HTML.
 
 ## Status
 
-`canHandle`, `slugFromUrl`, `getNovel` and `getVolumeChapters` are
-implemented. `getHomeSections`, `search` and `getChapterContent` still
+`canHandle`, `slugFromUrl`, `getNovel`, `getVolumeChapters` and
+`getChapterContent` are implemented. `getHomeSections` and `search` still
 throw `"not implemented"` and will be filled in by later tasks against
 fixture HTML captured from the live site.
 
@@ -23,7 +23,7 @@ fixture HTML captured from the live site.
 | `search`              | —         | not implemented yet |
 | `getNovel`            | ✓         | scrapes `/novel/<slug>`; declares `hasLazyVolumes` — see below |
 | `getVolumeChapters`   | ✓         | walks the paginated `.chaptersList` tab — see below |
-| `getChapterContent`   | —         | not implemented yet |
+| `getChapterContent`   | ✓         | scrapes `.chapter-content`, filtering a decoy paragraph trap — see below |
 
 ## `canHandle`
 
@@ -146,6 +146,35 @@ The slug it builds URLs from comes from `volume.key` — set by `getNovel`
 for exactly this call — not by re-deriving it from `novelUrl`, since the
 two can diverge (a stale snapshot, a redirect). `slugFromUrl(novelUrl)`
 is kept only as a fallback for a volume whose `key` is somehow absent.
+
+## Chapter content: `getChapterContent`
+
+`getChapterContent` fetches the chapter's own URL and reads its body from
+`.chapter-content`, mapping each real paragraph to a `SourceLine`.
+
+**The trap:** the site salts every real paragraph in `.chapter-content`
+with a matching decoy sibling, `<p class="d-none">` — invisible on the
+rendered page (`d-none` is a `display: none` utility class) but sitting
+right in the markup, where a naive `querySelectorAll("p")` would collect
+it right along with the real text. In the fixture captured for this task
+the split was close to 1:1 (94 real paragraphs to 95 decoys), and every
+decoy carries real, non-empty text — so an implementation that didn't
+filter these out wouldn't add a little noise, it would roughly double the
+chapter's line count and interleave garbage into every other line. Every
+real paragraph observed so far is a bare `<p>` with no attributes at all,
+so `parseChapterLines` tells the two apart with
+`classList.contains("d-none")`, no content inspection needed. A handful of
+real paragraphs are themselves genuinely empty (`<p></p>`, a blank-line
+spacer between scenes); those are dropped the same way a missing
+`textContent` would be, so they never surface as visible blank lines.
+
+**Silent emptiness, again:** a missing `.chapter-content` and a present
+container that parses to zero real lines (every paragraph a decoy, or the
+real ones all empty) are both refused loudly, naming the offending
+chapter URL — the same principle `parseNovelPage` and `parseChapterRows`
+already apply to their own containers. Either failure mode, left
+unguarded, would let the reader render a blank chapter indistinguishable
+from the site legitimately having nothing there.
 
 ## Fetch-only, no ambient authority
 
