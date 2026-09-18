@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import createSource, { slugFromUrl } from "../src/index";
+import createSource, { BASE_URL, slugFromUrl } from "../src/index";
 import { createTestHost } from "@riwaq/extension-api/testing";
 import { SourceUrlError } from "@riwaq/extension-api";
 
@@ -69,6 +69,15 @@ describe("canHandle", () => {
     // The real host appears only as a subdomain label of another domain.
     expect(source.canHandle("https://sunovels.com.evil.com/novel/x")).toBe(false);
   });
+
+  // The two cases above also pass a `hostname === "sunovels.com" ||
+  // hostname.endsWith(".sunovels.com")` suffix check — it rejects both
+  // near-misses exactly like the real Set does. What a suffix check would
+  // NOT reject is an arbitrary subdomain, which the exact two-host `Set`
+  // deliberately excludes (no wildcard mirrors are known for this site).
+  it("rejects an arbitrary subdomain not in the exact hostname set", () => {
+    expect(source.canHandle("https://cdn.sunovels.com/novel/x")).toBe(false);
+  });
 });
 
 describe("slugFromUrl", () => {
@@ -87,5 +96,27 @@ describe("slugFromUrl", () => {
   it("throws SourceUrlError for a URL that is not a novel page", () => {
     expect(() => slugFromUrl("https://sunovels.com/")).toThrow(SourceUrlError);
     expect(() => slugFromUrl("https://sunovels.com/search?q=x")).toThrow(SourceUrlError);
+  });
+
+  // Pins the "novel" path segment itself, not merely "the path has at
+  // least two segments". A mutant like /^\/([^/]+)\/([^/]+)/ — any
+  // two-segment path, capture the second — passes every case above: both
+  // novel-URL cases still extract correctly, and "/" and "/search?q=x"
+  // still throw because they have fewer than two segments. Without this
+  // case, nothing distinguishes that mutant from the real implementation.
+  // "/chapter/5" has a real second segment ("5") but the wrong first one
+  // ("chapter"), so it only throws when "novel" is actually enforced.
+  it("throws SourceUrlError for a non-novel path with a real second segment", () => {
+    expect(() => slugFromUrl("https://sunovels.com/chapter/5")).toThrow(SourceUrlError);
+  });
+});
+
+describe("BASE_URL", () => {
+  // Exported for three later tasks to build fetch URLs from (see the
+  // brief's Interfaces block). A typo here — a trailing slash, a wrong
+  // TLD — would only surface once one of those tasks calls host.fetch
+  // with it, far from where the typo was introduced.
+  it("is exactly the site's https origin, no trailing slash", () => {
+    expect(BASE_URL).toBe("https://sunovels.com");
   });
 });
