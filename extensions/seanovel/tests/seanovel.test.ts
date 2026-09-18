@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import createSource, { cardFor, PAGE_SIZE, type CatalogueRow } from "../src/index";
+import createSource, {
+  cardFor,
+  PAGE_SIZE,
+  slugFromUrl,
+  type CatalogueRow,
+  type NovelDetailRow,
+} from "../src/index";
+import { strings } from "../src/strings";
+import { SourceUrlError } from "@riwaq/extension-api";
 import { createTestHost } from "@riwaq/extension-api/testing";
 
 // Deliberately not `readFileSync(new URL("./fixtures/novels.json", import.meta.url), ...)`:
@@ -14,6 +22,7 @@ import { createTestHost } from "@riwaq/extension-api/testing";
 // — see extensions/cenele/tests/cenele.test.ts for the same pattern.
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 const novelsFixture = readFileSync(join(FIXTURES_DIR, "novels.json"), "utf8");
+const novelFixture = readFileSync(join(FIXTURES_DIR, "novel.json"), "utf8");
 
 // The committed fixture is a live capture of https://seanovel.org/api/novels
 // (2026-09-18). Every expectation below is derived from parsing it at test
@@ -23,19 +32,31 @@ const novelsFixture = readFileSync(join(FIXTURES_DIR, "novels.json"), "utf8");
 // actually contained on the day it was captured.
 const novelRows = JSON.parse(novelsFixture) as CatalogueRow[];
 
+// Same discipline for the novel-detail fixture: a live capture of
+// https://seanovel.org/api/novel/shadow-slave (2026-09-18). It carries
+// chapters_count: 3180 today; the site adds chapters daily, so every
+// getNovel expectation below is computed from this parsed object, not
+// hardcoded to 3180 or to any other number the brief observed on its own
+// recon day. See task-3-report.md for what this fixture actually held.
+const novelDetail = JSON.parse(novelFixture) as Required<
+  Pick<NovelDetailRow, "slug" | "title_ar" | "chapters">
+> &
+  NovelDetailRow;
+
 const host = (locale: "en" | "ar" = "ar") =>
   createTestHost({ responses: { "/api/novels": novelsFixture }, locale });
+
+const novelHost = (locale: "en" | "ar" = "ar") =>
+  createTestHost({
+    responses: { [`/api/novel/${novelDetail.slug}`]: novelFixture },
+    locale,
+  });
+
+const NOVEL_URL = `https://seanovel.org/novels/${novelDetail.slug}`;
 
 describe("seanovel: createSource", () => {
   it("constructs a Source from a host", () => {
     expect(() => createSource(createTestHost())).not.toThrow();
-  });
-
-  it("getNovel is not implemented yet", async () => {
-    const source = createSource(createTestHost());
-    await expect(source.getNovel("https://example.com/novel/1")).rejects.toThrow(
-      "not implemented",
-    );
   });
 
   it("getChapterContent is not implemented yet", async () => {
@@ -275,5 +296,183 @@ describe("the catalogue memo is per-instance, not shared across createSource cal
     await source.search("ا", 1);
     const catalogueCalls = calls.filter((c) => c.url.includes("/api/novels"));
     expect(catalogueCalls).toHaveLength(1);
+  });
+});
+
+describe("slugFromUrl", () => {
+  it("extracts the slug from a novel page URL", () => {
+    expect(slugFromUrl(NOVEL_URL)).toBe(novelDetail.slug);
+  });
+
+  it("extracts the same slug from one of its chapter page URLs", () => {
+    expect(slugFromUrl(`${NOVEL_URL}/chapters/${novelDetail.chapters[0].id}`)).toBe(
+      novelDetail.slug,
+    );
+  });
+
+  it("decodes a percent-encoded slug", () => {
+    expect(slugFromUrl("https://seanovel.org/novels/my%20slug")).toBe("my slug");
+  });
+
+  it("rejects a URL whose path isn't under /novels/, with SourceUrlError specifically", () => {
+    expect(() => slugFromUrl("https://seanovel.org/about")).toThrow(SourceUrlError);
+  });
+
+  it("rejects a /novels/ URL with no slug segment at all", () => {
+    expect(() => slugFromUrl("https://seanovel.org/novels/")).toThrow(SourceUrlError);
+  });
+});
+
+describe("getNovel", () => {
+  it("maps the API's fields onto SourceNovel", async () => {
+    const novel = await createSource(novelHost()).getNovel(NOVEL_URL);
+    expect(novel.title).toBe(novelDetail.title_ar);
+    expect(novel.originalTitle).toBe(novelDetail.title_original);
+    expect(novel.author).toBe(novelDetail.author);
+    expect(novel.language).toBe("ar");
+    expect(novel.direction).toBe("rtl");
+    expect(novel.coverUrl).toContain(`/api/novel/${novelDetail.slug}/cover`);
+    expect(novel.tags).toEqual(novelDetail.genres ?? []);
+    expect(novel.tags.length).toBeGreaterThan(0);
+    expect(novel.description).toBe(novelDetail.description);
+    expect(novel.description).toBeTruthy();
+    expect(novel.status).toBe(novelDetail.status);
+  });
+
+  it("returns one fully-populated volume, not a lazy one", async () => {
+    // The fixture's chapters array is a complete list, not a page of one:
+    // its length matches chapters_count exactly. That's what "not lazy"
+    // means here — nothing is left for a getVolumeChapters call to fetch.
+    expect(novelDetail.chapters.length).toBe(novelDetail.chapters_count);
+
+    const source = createSource(novelHost());
+    expect(source.hasLazyVolumes).toBeFalsy();
+    const novel = await source.getNovel(NOVEL_URL);
+    expect(novel.volumes).toHaveLength(1);
+    expect(novel.volumes[0].chapters).toHaveLength(novelDetail.chapters.length);
+  });
+
+  it("maps every chapter's id/title onto its own chapter-page URL, in source order", async () => {
+    const novel = await createSource(novelHost()).getNovel(NOVEL_URL);
+    const expected = novelDetail.chapters.map((c) => ({
+      id: c.id,
+      title: c.title,
+      url: `${NOVEL_URL}/chapters/${c.id}`,
+      lines: [],
+    }));
+    expect(novel.volumes[0].chapters).toEqual(expected);
+    expect(novel.volumes[0].chapters[0].title).not.toBe("");
+  });
+
+  it("titles the pseudo-volume via strings(locale), not a raw literal shared by both locales", async () => {
+    const novelAr = await createSource(novelHost("ar")).getNovel(NOVEL_URL);
+    const novelEn = await createSource(novelHost("en")).getNovel(NOVEL_URL);
+    expect(novelAr.volumes[0].id).toBe(1);
+    expect(novelAr.volumes[0].title).toBe(strings("ar")("volumeFallback", { n: 1 }));
+    expect(novelEn.volumes[0].title).toBe(strings("en")("volumeFallback", { n: 1 }));
+    expect(novelAr.volumes[0].title).not.toBe(novelEn.volumes[0].title);
+  });
+
+  it("adds distinctly-labelled origin and chapter-count rows to meta", async () => {
+    // Fixture sanity check: shadow-slave does carry an origin, so this
+    // exercises the "origin present" branch, not just the fallback.
+    expect(novelDetail.origin).toBeTruthy();
+
+    const novel = await createSource(novelHost()).getNovel(NOVEL_URL);
+    const originRow = novel.meta.find((m) => m.value === novelDetail.origin);
+    const countRow = novel.meta.find((m) => m.value === String(novelDetail.chapters_count));
+    expect(originRow).toBeDefined();
+    expect(countRow).toBeDefined();
+    expect(originRow!.label).not.toBe(countRow!.label);
+  });
+
+  it("leaves author empty rather than inventing 'Unknown'", async () => {
+    const bare = createSource(
+      createTestHost({
+        responses: {
+          "/api/novel/x": JSON.stringify({
+            slug: "x",
+            title_ar: "بلا",
+            genres: [],
+            chapters: [],
+            chapters_count: 0,
+          }),
+        },
+      }),
+    );
+    expect((await bare.getNovel("https://seanovel.org/novels/x")).author).toBe("");
+  });
+
+  it("omits the origin meta row (keeping only the chapter-count row) when the API doesn't carry one", async () => {
+    const bare = createSource(
+      createTestHost({
+        responses: {
+          "/api/novel/x": JSON.stringify({
+            slug: "x",
+            title_ar: "بلا",
+            genres: [],
+            chapters: [],
+            chapters_count: 0,
+          }),
+        },
+      }),
+    );
+    const novel = await bare.getNovel("https://seanovel.org/novels/x");
+    expect(novel.meta).toHaveLength(1);
+    expect(novel.meta[0].value).toBe("0");
+  });
+
+  it("rejects a URL that is not a novel page", async () => {
+    const source = createSource(novelHost());
+    await expect(source.getNovel("https://seanovel.org/about")).rejects.toThrow(SourceUrlError);
+  });
+});
+
+describe("malformed API responses", () => {
+  it("reports a branded error, not a bare SyntaxError, when /api/novels is not valid JSON", async () => {
+    const source = createSource(
+      createTestHost({ responses: { "/api/novels": "<html>please enable JavaScript</html>" } }),
+    );
+    await expect(source.getHomeSections()).rejects.toThrow(
+      "Sea Novel: /api/novels did not return JSON (status 200).",
+    );
+  });
+
+  it("reports a branded error, not a bare SyntaxError, when /api/novel/<slug> is not valid JSON", async () => {
+    const source = createSource(
+      createTestHost({ responses: { "/api/novel/x": "Service Unavailable" } }),
+    );
+    await expect(source.getNovel("https://seanovel.org/novels/x")).rejects.toThrow(
+      "Sea Novel: /api/novel/x did not return JSON (status 200).",
+    );
+  });
+
+  it("interpolates the response's real HTTP status, not a hardcoded literal", async () => {
+    // createTestHost's stub always answers 200 (see packages/extension-api/src/testing.ts),
+    // so the two tests above can't tell "${resp.status}" apart from a
+    // hardcoded "200" baked into the message string. This hand-built host
+    // answers 503 instead, so only a genuine interpolation passes.
+    const host = {
+      ...createTestHost(),
+      fetch: async () => ({ status: 503, text: "<html>bad gateway</html>", headers: {} }),
+    };
+    const source = createSource(host);
+    await expect(source.getHomeSections()).rejects.toThrow(
+      "Sea Novel: /api/novels did not return JSON (status 503).",
+    );
+  });
+
+  it("reports a branded error when /api/novels returns JSON that is not a list of novels", async () => {
+    // Regression test for a previously-uncovered guard: before this task,
+    // nothing exercised the `!Array.isArray(rows)` branch at all — an
+    // error-shaped or object-shaped body (a WAF/maintenance JSON payload,
+    // for instance) would have silently changed behaviour with no test
+    // noticing either way.
+    const source = createSource(
+      createTestHost({ responses: { "/api/novels": JSON.stringify({ error: "blocked" }) } }),
+    );
+    await expect(source.getHomeSections()).rejects.toThrow(
+      "Sea Novel: /api/novels did not return a list of novels.",
+    );
   });
 });

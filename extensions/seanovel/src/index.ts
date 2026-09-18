@@ -5,18 +5,22 @@
 //
 // getHomeSections and search are both built on GET /api/novels, which
 // returns the entire catalogue (every novel, no query params, no
-// pagination) in one call — see cardFor/fetchCatalogue below. getNovel and
-// getChapterContent still throw "not implemented" and are filled in by
-// later tasks in this plan, against this manifest's `baseUrl`.
-import type {
-  NovelCard,
-  Source,
-  SourceChapter,
-  SourceHost,
-  SourceLine,
-  SourceNovel,
-  SourceSearchResult,
-  SourceSection,
+// pagination) in one call — see cardFor/fetchCatalogue below. getNovel
+// fetches GET /api/novel/<slug>, which carries the full chapter list in one
+// response (see getNovel below). getChapterContent still throws "not
+// implemented" and is filled in by a later task in this plan.
+import {
+  SourceUrlError,
+  type FetchResponse,
+  type NovelCard,
+  type Source,
+  type SourceChapter,
+  type SourceHost,
+  type SourceLine,
+  type SourceNovel,
+  type SourceNovelMeta,
+  type SourceSearchResult,
+  type SourceSection,
 } from "@riwaq/extension-api";
 import { strings } from "./strings";
 
@@ -42,6 +46,20 @@ export interface CatalogueRow {
   last_updated?: string;
 }
 
+/** Shape of `GET /api/novel/<slug>` — the one-novel detail endpoint
+ *  `getNovel` fetches. Extends `CatalogueRow` for the fields both
+ *  endpoints share; adds the two only the detail endpoint carries: the
+ *  full description and the complete chapter list. Other fields the
+ *  endpoint returns (rating, similar_novels, initial_chapters,
+ *  cover_version, first_published_at, source_id, has_volumes) are
+ *  ignored — in particular `has_volumes` is never consulted, because this
+ *  extension always returns exactly one fully-populated pseudo-volume and
+ *  never declares lazy volumes (see `getNovel` below). */
+export interface NovelDetailRow extends CatalogueRow {
+  description?: string;
+  chapters?: Array<{ id: number; title: string }>;
+}
+
 /** Cap on cards per home-section row and per search page. The site's
  *  catalogue endpoint has no pagination of its own (it returns every
  *  novel in one call) — this is purely our own page size for slicing it. */
@@ -49,6 +67,29 @@ export const PAGE_SIZE = 24;
 
 const novelUrl = (slug: string) => `${BASE_URL}/novels/${slug}`;
 const coverUrl = (slug: string) => `${BASE_URL}/api/novel/${slug}/cover?type=webp`;
+const chapterUrl = (slug: string, id: number) => `${BASE_URL}/novels/${slug}/chapters/${id}`;
+
+/** `/novels/<slug>` and `/novels/<slug>/chapters/<n>` both yield <slug>. */
+export function slugFromUrl(url: string): string {
+  const m = new URL(url).pathname.match(/^\/novels\/([^/]+)/);
+  if (!m) {
+    throw new SourceUrlError(`Sea Novel: ${url} is not a novel page URL.`);
+  }
+  return decodeURIComponent(m[1]);
+}
+
+/** Parse a JSON API response body, reporting the endpoint path and the
+ *  response's HTTP status in the thrown error instead of letting a
+ *  non-JSON response (a CDN interstitial, a WAF block page, an outage
+ *  page, ...) surface as a bare, context-free `SyntaxError`. Mirrors the
+ *  pattern in extensions/kolnovel/src/index.ts's `requestPdfUrl`. */
+function parseJsonResponse(resp: FetchResponse, endpoint: string): unknown {
+  try {
+    return JSON.parse(resp.text);
+  } catch {
+    throw new Error(`Sea Novel: ${endpoint} did not return JSON (status ${resp.status}).`);
+  }
+}
 
 export function cardFor(row: CatalogueRow): NovelCard {
   return {
@@ -78,7 +119,7 @@ export default function createSource(host: SourceHost): Source {
   function fetchCatalogue(): Promise<CatalogueRow[]> {
     cataloguePromise ??= (async () => {
       const resp = await host.fetch(`${BASE_URL}/api/novels`);
-      const rows = JSON.parse(resp.text) as unknown;
+      const rows = parseJsonResponse(resp, "/api/novels");
       if (!Array.isArray(rows)) {
         throw new Error("Sea Novel: /api/novels did not return a list of novels.");
       }
@@ -143,8 +184,48 @@ export default function createSource(host: SourceHost): Source {
       };
     },
 
-    async getNovel(_url: string): Promise<SourceNovel> {
-      throw new Error("not implemented");
+    async getNovel(url: string): Promise<SourceNovel> {
+      const slug = slugFromUrl(url);
+      host.log("info", `getNovel(${slug})`);
+      const resp = await host.fetch(`${BASE_URL}/api/novel/${slug}`);
+      const data = parseJsonResponse(resp, `/api/novel/${slug}`) as NovelDetailRow;
+
+      const meta: SourceNovelMeta[] = [];
+      if (data.origin) meta.push({ label: t("metaOrigin"), value: data.origin });
+      meta.push({ label: t("metaChapterCount"), value: String(data.chapters_count ?? 0) });
+
+      const chapters: SourceChapter[] = (data.chapters ?? []).map((c) => ({
+        id: c.id,
+        title: c.title,
+        url: chapterUrl(slug, c.id),
+        lines: [],
+      }));
+
+      return {
+        title: data.title_ar,
+        originalTitle: data.title_original || undefined,
+        // Never a literal "Unknown" — many catalogue rows have no author at
+        // all, and the empty case is localized by the host at display time.
+        author: data.author ?? "",
+        language: "ar",
+        direction: "rtl",
+        coverUrl: coverUrl(slug),
+        description: data.description,
+        tags: data.genres ?? [],
+        status: data.status,
+        meta,
+        // The detail endpoint carries every chapter in one response (see
+        // NovelDetailRow above) — there is nothing left to lazily fetch, so
+        // this is always exactly one fully-populated pseudo-volume and
+        // `hasLazyVolumes` is never declared on this Source.
+        volumes: [
+          {
+            id: 1,
+            title: t("volumeFallback", { n: 1 }),
+            chapters,
+          },
+        ],
+      };
     },
 
     async getChapterContent(_chapter: SourceChapter): Promise<SourceLine[]> {

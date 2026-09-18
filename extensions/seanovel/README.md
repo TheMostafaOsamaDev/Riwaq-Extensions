@@ -5,9 +5,10 @@ Site: <https://seanovel.org> (بحر الروايات)
 Korean, Chinese and Japanese web novels translated into Arabic. Novel pages
 live at `/novels/<slug>`, chapters at `/novels/<slug>/chapters/<id>`. The
 site serves its data through a JSON API rather than server-rendered HTML:
-`GET /api/novels` returns the entire catalogue (every novel, no
-pagination) in one call. Novel detail and chapter content are implemented
-against that same API in later tasks.
+`GET /api/novels` returns the entire catalogue in one call, and
+`GET /api/novel/<slug>` returns one novel's full detail, including every
+chapter. Chapter content is implemented against that same API in a later
+task.
 
 ## Capabilities
 
@@ -16,12 +17,12 @@ against that same API in later tasks.
 | `canHandle`           | ✓         | matches `seanovel.org` and `www.seanovel.org` |
 | `getHomeSections`     | ✓         | three rows built from the catalogue: latest, popular, completed |
 | `search`              | ✓         | filters the catalogue locally and paginates the result itself |
-| `getNovel`            | not yet   | |
+| `getNovel`            | ✓         | one fully-populated pseudo-volume — see below |
 | `getChapterContent`   | not yet   | |
 
-This extension is scaffolded via `pnpm new-extension seanovel`; `getNovel`
-and `getChapterContent` still throw `"not implemented"` and are filled in
-by the tasks that follow in this plan.
+This extension is scaffolded via `pnpm new-extension seanovel`; `getChapterContent`
+still throws `"not implemented"` and is filled in by the task that follows
+in this plan.
 
 ## `canHandle`
 
@@ -54,9 +55,47 @@ another's catalogue. The cost is one extra `/api/novels` fetch per
 instance — cheap, and worth it to avoid an instance silently serving
 another instance's data.
 
+## `getNovel`
+
+`GET /api/novel/<slug>` returns one novel's full detail, including its
+*entire* chapter list in the same response (`chapters`, matched exactly by
+`chapters_count`) — there is no separate paginated chapter-listing
+endpoint. `slugFromUrl(url)` extracts `<slug>` from either a novel URL
+(`/novels/<slug>`) or one of its chapter URLs
+(`/novels/<slug>/chapters/<id>`), throwing `SourceUrlError` for anything
+else (e.g. `/about`).
+
+Because the detail call already carries every chapter, `getNovel` always
+returns exactly one fully-populated pseudo-volume (`id: 1`, titled via
+`strings(locale)("volumeFallback", { n: 1 })`) — this extension never
+declares lazy volumes (`hasLazyVolumes` is not set on the returned
+`Source`), and there is no `getVolumeChapters`. Each chapter maps straight
+through: `{ id, title } → { id, title, url: <BASE_URL>/novels/<slug>/chapters/<id>, lines: [] }`.
+
+Field mapping: `title ← title_ar`, `originalTitle ← title_original`,
+`author ← author ?? ""` (never the literal `"Unknown"` — many catalogue
+rows have no author at all; the host localizes the empty case at display
+time), `language: "ar"`, `direction: "rtl"`, `coverUrl` reuses the same
+`/api/novel/<slug>/cover` helper `cardFor` uses, `tags ← genres ?? []`,
+`status ← status`, `description ← description`. `meta` gets an `origin`
+row (only when the API supplies one) and a `chapters_count` row (always),
+both labelled via `strings(locale)`.
+
+## Malformed API responses
+
+Both JSON-fetching endpoints (`/api/novels` and `/api/novel/<slug>`) parse
+their response body through a small guarded helper that reports the
+endpoint path and the response's HTTP status in the thrown error, instead
+of letting a non-JSON response (a CDN interstitial, a WAF block page, an
+outage page, ...) surface as a bare, context-free `SyntaxError`. The
+catalogue endpoint additionally checks that the parsed body is actually an
+array, in case the API ever answers with an error-shaped JSON object
+instead of the expected list.
+
 ## i18n
 
 `src/strings.ts` ships this extension's own fallback strings, keyed off
-`host.locale` (`"en" | "ar"`). It cannot reach the app's message
-catalogue. No fallback keys are needed yet — they'll be added as the
-site's discovery/search/novel/chapter parsing needs them.
+`host.locale` (`"en" | "ar"`): `homeLatest`/`homePopular`/`homeCompleted`
+label the three home-page rows, `volumeFallback` labels `getNovel`'s
+pseudo-volume, and `metaOrigin`/`metaChapterCount` label its two synthesised
+`meta` rows. It cannot reach the app's message catalogue.
