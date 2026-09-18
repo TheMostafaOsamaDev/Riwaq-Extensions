@@ -59,7 +59,15 @@ export function slugFromUrl(url: string): string {
  *  the novel has: chapter numbering is sparse (this extension's example
  *  novel reports 1582 chapters whose newest is numbered 1611), so nothing
  *  downstream may assume `chaptersCount` chapters means chapters `1..count`
- *  exist, or that this count equals the last chapter's number. */
+ *  exist, or that this count equals the last chapter's number.
+ *
+ *  Residual assumption: this takes the FIRST `chaptersCount` match
+ *  anywhere in the raw HTML, unscoped to this novel's own RSC payload
+ *  chunk. Every fixture captured so far has exactly one occurrence, so
+ *  this hasn't been shown wrong — but if a future page ever streams a
+ *  second novel's data alongside this one (a "related novels" rail with
+ *  its own count, say), this would need to scope to the chunk that also
+ *  contains this novel's own slug/title instead of matching blindly. */
 export function parseChaptersCount(html: string): number {
   const m = html.match(/chaptersCount\\?":\s*(\d+)/);
   return m ? Number.parseInt(m[1], 10) : 0;
@@ -83,8 +91,11 @@ interface ParsedNovelPage {
  *  Arabic one — the inverse of extensions/seanovel, where `h1` is Arabic.
  *  Getting this backwards produces a plausible-looking card that is
  *  simply wrong: both fields are real title strings, so nothing type-checks
- *  or throws to catch the swap. */
-export function parseNovelPage(doc: Document): ParsedNovelPage {
+ *  or throws to catch the swap.
+ *
+ *  `pageUrl` is used only to name the offending page in the error below —
+ *  it plays no part in parsing. */
+export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage {
   const originalTitle = sanitizeText(doc.querySelector(".main-head h1")?.textContent) || undefined;
   const arabicTitle = sanitizeText(doc.querySelector(".main-head h3")?.textContent);
   // The Arabic title is the primary `title` field; fall back to the
@@ -92,6 +103,21 @@ export function parseNovelPage(doc: Document): ParsedNovelPage {
   // novel with nothing to translate FROM, going by this site's own
   // pairing convention above).
   const title = arabicTitle || originalTitle || "";
+
+  // A missing `.main-head` — a layout change, an anti-bot interstitial or
+  // an error page served with HTTP 200, a redirect that lands somewhere
+  // else entirely — must not silently produce a structurally valid but
+  // empty SourceNovel: that's indistinguishable from a real novel that
+  // legitimately has no title, which never happens on this site. Refuse
+  // loudly instead, the same way slugFromUrl refuses a non-novel URL.
+  // Checking the derived `title` (rather than re-querying `.main-head`
+  // separately) also catches the rarer case where the container exists
+  // but both `h1` and `h3` are themselves empty.
+  if (!title) {
+    throw new Error(
+      `Sun Novels: couldn't find a novel title on ${pageUrl} (.main-head is missing or empty) — the layout may have changed, or this wasn't a real novel page.`,
+    );
+  }
 
   const coverSrc = doc.querySelector("figure.cover img")?.getAttribute("src") || undefined;
   const coverUrl = coverSrc ? absoluteUrl(coverSrc, BASE_URL) : undefined;
@@ -136,7 +162,7 @@ export default function createSource(host: SourceHost): Source {
       const slug = slugFromUrl(url);
       host.log("info", `getNovel(${url})`);
       const resp = await host.fetch(url);
-      const parsed = parseNovelPage(parseHtml(resp.text));
+      const parsed = parseNovelPage(parseHtml(resp.text), url);
 
       return {
         title: parsed.title,

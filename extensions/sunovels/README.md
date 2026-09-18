@@ -68,6 +68,12 @@ an absolutised `coverUrl`, and every `a.tag` to `tags`. The page never
 surfaces an author anywhere in its rendered markup, so `author` is always
 `""` — never a literal `"Unknown"`; the host localises the empty case.
 
+If `.main-head` is missing entirely, or is present but yields no title
+text at all, `parseNovelPage` throws rather than returning a hollow
+`SourceNovel` — a layout change, an anti-bot interstitial, or an error
+page served with HTTP 200 must surface as a visible error, not a blank
+"this novel has no title" card indistinguishable from a real one.
+
 The site has no volume concept of its own — just one long, paginated
 chapter list — so `getNovel` declares `hasLazyVolumes: true` and returns a
 single pseudo-volume (`{ id: 1, chapters: [], chapterCount, key: slug }`).

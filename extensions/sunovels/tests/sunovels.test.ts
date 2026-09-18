@@ -174,9 +174,12 @@ describe("parseChaptersCount", () => {
 });
 
 describe("parseNovelPage", () => {
+  const FIXTURE_URL = "https://sunovels.com/novel/shadow-slave";
+
   // Exercises the fixture's actual markup shape, independent of the
   // async getNovel plumbing (host.fetch, strings(), volume assembly).
-  const parse = () => parseNovelPage(new DOMParser().parseFromString(novelHtml, "text/html"));
+  const parse = () =>
+    parseNovelPage(new DOMParser().parseFromString(novelHtml, "text/html"), FIXTURE_URL);
 
   it("takes the Arabic title from h3 and the original from h1, scoped to .main-head", () => {
     // Inverted relative to seanovel: here h1 is the ORIGINAL title. The
@@ -198,9 +201,32 @@ describe("parseNovelPage", () => {
       `<div class="main-head"><h1>Only Original</h1></div>`,
       "text/html",
     );
-    const parsed = parseNovelPage(doc);
+    const parsed = parseNovelPage(doc, FIXTURE_URL);
     expect(parsed.title).toBe("Only Original");
     expect(parsed.originalTitle).toBe("Only Original");
+  });
+
+  // Fix round 1, F1: a missing `.main-head` (layout change, an anti-bot
+  // interstitial or error page served with HTTP 200, a redirect elsewhere)
+  // must not silently produce a structurally valid but empty SourceNovel —
+  // that reads identically to a real novel with no title, which never
+  // happens on this site. The message assertion (not just `.toThrow()`)
+  // guards against a mutant that throws for some unrelated, incidental
+  // reason and would otherwise satisfy a bare "it throws" check too.
+  it("throws instead of returning a hollow novel when .main-head is missing entirely", () => {
+    const doc = new DOMParser().parseFromString(
+      `<html><body><p>Service temporarily unavailable.</p></body></html>`,
+      "text/html",
+    );
+    expect(() => parseNovelPage(doc, FIXTURE_URL)).toThrow(/main-head|title/i);
+  });
+
+  // Same guard, the case the reviewer allowed as equivalent: the
+  // container is present but both h1 and h3 inside it are empty/absent,
+  // so the derived title is still "".
+  it("throws when .main-head is present but yields no title at all", () => {
+    const doc = new DOMParser().parseFromString(`<div class="main-head"></div>`, "text/html");
+    expect(() => parseNovelPage(doc, FIXTURE_URL)).toThrow(/main-head|title/i);
   });
 
   it("absolutises the site-relative cover path", () => {
@@ -307,6 +333,23 @@ describe("getNovel", () => {
     const novel = await source.getNovel("https://sunovels.com/novel/shadow-slave");
     expect(novel.language).toBe("ar");
     expect(novel.direction).toBe("rtl");
+  });
+
+  // Fix round 1, F1, at the getNovel level: a fetch that returns something
+  // other than a real novel page (an anti-bot interstitial or an error
+  // page served with HTTP 200, say) must reject rather than resolve to a
+  // hollow SourceNovel with an empty title, empty tags and no cover — a
+  // blank card that looks like the site has nothing, indistinguishable
+  // from legitimate absence.
+  it("rejects rather than resolving to a hollow novel when the page has no .main-head", async () => {
+    const blockedSource = createSource(
+      createTestHost({
+        responses: { "/novel/blocked": `<html><body><p>Access denied.</p></body></html>` },
+      }),
+    );
+    await expect(blockedSource.getNovel("https://sunovels.com/novel/blocked")).rejects.toThrow(
+      /main-head|title/i,
+    );
   });
 });
 
