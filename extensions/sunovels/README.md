@@ -114,15 +114,33 @@ row-count bound) that would fail if that scoping were ever dropped.
 
 `getVolumeChapters(novelUrl, volume)` derives the page count from
 `volume.chapterCount` (`Math.ceil(count / 50)`, at least 1) rather than a
-hardcoded number, fetches each page **sequentially** — never
-concurrently; firing dozens of requests at once at a third-party site
-invites rate-limiting for no gain on a list the user is waiting to
-scroll — and stops as soon as a page yields no rows. It also
-de-duplicates by chapter URL across pages; that de-dup is real, not
-theoretical, and is pinned by a test that forces two page fetches to
-return genuinely overlapping rows (the two real captured fixtures happen
-to be disjoint, so a test built only from them would not have caught its
-removal).
+hardcoded number — this bounds the *over*-counting case only (the real
+list may run out before the computed page count is reached; that's fine,
+see below). It does not cover *under*-counting: if the site has grown
+past what `chapterCount` reported, the loop never attempts the later
+pages at all, and nothing signals that either. Pages are fetched
+**sequentially** — never concurrently; firing dozens of requests at once
+at a third-party site invites rate-limiting for no gain on a list the
+user is waiting to scroll — and the loop stops as soon as a page yields
+no rows. It also de-duplicates by chapter URL across pages; that de-dup
+is real, not theoretical, and is pinned by a test that forces two page
+fetches to return genuinely overlapping rows (the two real captured
+fixtures happen to be disjoint, so a test built only from them would not
+have caught its removal).
+
+**A missing chapter-list container is not the same as an empty one.**
+`parseChapterRows` tells the two apart deliberately: `.chaptersList`
+*present* but with no matching rows means this page genuinely has no more
+chapters (the real end of the list) — return `[]`, and the loop above
+stops there, correctly. `.chaptersList` *absent* entirely means the
+response isn't a chapter-listing page at all — the same 200-status
+"blocked" shape `getNovel`'s own tests exercise for a missing
+`.main-head` — and `parseChapterRows` throws, naming the offending page's
+URL, instead of returning `[]`. Without this distinction a transient
+anti-bot block or CDN hiccup on, say, page 12 of 32 would look
+identical to reaching the real end of the list, silently truncating a
+1,500+-chapter novel to roughly a third of that with nothing anywhere
+saying so.
 
 The slug it builds URLs from comes from `volume.key` — set by `getNovel`
 for exactly this call — not by re-deriving it from `novelUrl`, since the

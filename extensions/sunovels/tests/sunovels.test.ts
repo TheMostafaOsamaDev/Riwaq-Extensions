@@ -24,6 +24,11 @@ const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
 const chaptersPage0Html = readFileSync(join(FIXTURES_DIR, "chapters-page0.html"), "utf8");
 const chaptersPage1Html = readFileSync(join(FIXTURES_DIR, "chapters-page1.html"), "utf8");
+// parseChapterRows takes the fetched page's own URL now (used only to name
+// the offending page when the chapter-list container is missing) — these
+// mirror exactly what getVolumeChapters itself would have fetched.
+const CHAPTERS_PAGE0_URL = chapterPageUrl("shadow-slave", 0);
+const CHAPTERS_PAGE1_URL = chapterPageUrl("shadow-slave", 1);
 
 // Independently derived from the fixture at run time, via a code path
 // `parseChaptersCount` does NOT use (the page's `application/ld+json` block,
@@ -374,7 +379,7 @@ describe("parseChapterRows", () => {
   it("parses only chapter-list rows, not the header's first/latest shortcuts", () => {
     // The page header links the first and newest chapters on EVERY page.
     // Counting those would duplicate chapter 1 into all 32 pages.
-    const rows = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave");
+    const rows = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave", CHAPTERS_PAGE0_URL);
     expect(rows.length).toBeLessThanOrEqual(50);
     expect(rows.filter((c) => c.url.endsWith("/1"))).toHaveLength(1);
   });
@@ -404,7 +409,7 @@ describe("parseChapterRows", () => {
     const headerOnlyNums = new Set(allNums.filter((n) => !listNums.has(n)));
     expect(headerOnlyNums.size).toBeGreaterThan(0);
 
-    const rows = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave");
+    const rows = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave", CHAPTERS_PAGE0_URL);
     for (const n of headerOnlyNums) {
       expect(rows.some((c) => c.id === n)).toBe(false);
     }
@@ -415,14 +420,14 @@ describe("parseChapterRows", () => {
   });
 
   it("returns the second page's chapters, not the first's", () => {
-    const p0 = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave");
-    const p1 = parseChapterRows(parseHtml(chaptersPage1Html), "shadow-slave");
+    const p0 = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave", CHAPTERS_PAGE0_URL);
+    const p1 = parseChapterRows(parseHtml(chaptersPage1Html), "shadow-slave", CHAPTERS_PAGE1_URL);
     expect(p1[0].url).not.toBe(p0[0].url);
     expect(new Set([...p0, ...p1].map((c) => c.url)).size).toBe(p0.length + p1.length);
   });
 
   it("gives every chapter a non-empty title and an absolute URL", () => {
-    for (const c of parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave")) {
+    for (const c of parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave", CHAPTERS_PAGE0_URL)) {
       expect(c.title.trim()).not.toBe("");
       expect(c.url).toMatch(/^https:\/\/sunovels\.com\/novel\/shadow-slave\/\d+$/);
     }
@@ -435,10 +440,36 @@ describe("parseChapterRows", () => {
   it("extracts the exact chapter-title text, cross-checked against the raw fixture", () => {
     const m = chaptersPage0Html.match(/<strong class="chapter-title">([^<]*)<\/strong>/);
     if (!m) throw new Error("fixture: couldn't independently find a chapter-title span.");
-    const rows = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave");
+    const rows = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave", CHAPTERS_PAGE0_URL);
     const first = rows.find((c) => c.id === 1);
     expect(first).toBeDefined();
     expect(first!.title).toBe(m[1]);
+  });
+
+  // A genuinely EMPTY container (the real end of the list — no more
+  // chapters exist past this page) must still return [] quietly, not
+  // throw. This is the case the guard below must NOT trip on.
+  it("returns an empty array for a present but empty chapter-list container", () => {
+    const doc = parseHtml(`<html><body><ul class="chaptersList"></ul></body></html>`);
+    expect(parseChapterRows(doc, "shadow-slave", CHAPTERS_PAGE0_URL)).toEqual([]);
+  });
+
+  // Fix round 1, F1: a MISSING container — the same 200-status "blocked"
+  // shape getNovel's own tests exercise for a missing .main-head — must
+  // throw rather than return [], which getVolumeChapters would otherwise
+  // treat identically to a genuine end of list and silently truncate the
+  // novel at whichever page happened to be blocked. The message assertion
+  // (not just `.toThrow()`) also pins that the offending page's URL is
+  // named in the error, and guards against a mutant that throws for some
+  // unrelated, incidental reason.
+  it("throws instead of returning an empty array when .chaptersList is missing entirely", () => {
+    const doc = parseHtml(`<html><body><p>Access denied.</p></body></html>`);
+    expect(() => parseChapterRows(doc, "shadow-slave", CHAPTERS_PAGE0_URL)).toThrow(
+      /chaptersList/i,
+    );
+    expect(() => parseChapterRows(doc, "shadow-slave", CHAPTERS_PAGE0_URL)).toThrow(
+      new RegExp(CHAPTERS_PAGE0_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
   });
 });
 
@@ -560,6 +591,35 @@ describe("getVolumeChapters", () => {
     });
     expect(chapters).toHaveLength(100);
     expect(calls).toHaveLength(3);
+  });
+
+  // Fix round 1, F1: a blocked/errored page and the genuine end of the
+  // list are NOT the same thing, and getVolumeChapters must not conflate
+  // them. Page 1 here answers with the same 200-status "blocked" shape
+  // getNovel's own tests use for a missing .main-head (no .chaptersList
+  // at all) — chapterCount implies more pages exist beyond it, so this
+  // is a mid-sequence failure, not a real end of list. Before this fix,
+  // parseChapterRows returned [] for both "missing" and "empty", so the
+  // loop's `if (rows.length === 0) break` would silently truncate the
+  // novel to just page 0's 50 chapters, with nothing anywhere signalling
+  // that anything went wrong. Now it must reject instead.
+  it("rejects rather than silently truncating when a mid-sequence page is blocked/errored", async () => {
+    const host = createTestHost({
+      responses: {
+        "activeTab=chapters&page=0": chaptersPage0Html,
+        "activeTab=chapters&page=1": `<html><body><p>Access denied.</p></body></html>`,
+      },
+    });
+    const src = createSource(host);
+    await expect(
+      src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
+        id: 1,
+        title: "all",
+        chapters: [],
+        chapterCount: 100, // Math.ceil(100 / 50) = 2 pages — page 1 is real, not past the end
+        key: "shadow-slave",
+      }),
+    ).rejects.toThrow(/chaptersList/i);
   });
 
   it("builds the chapter-list URL from the volume's key, not by re-deriving the slug from novelUrl", async () => {

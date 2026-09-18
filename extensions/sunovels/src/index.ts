@@ -149,10 +149,30 @@ export function chapterPageUrl(slug: string, page: number): string {
  *  from the whole document instead of this container would duplicate
  *  those into all ~32 pages of a long novel. `seen` also de-duplicates
  *  within this one page's rows, defensively, though the site has not
- *  been observed to repeat a row inside `.chaptersList` itself. */
-export function parseChapterRows(doc: Document, slug: string): SourceChapter[] {
+ *  been observed to repeat a row inside `.chaptersList` itself.
+ *
+ *  A MISSING container and an EMPTY one are deliberately told apart:
+ *
+ *  - `.chaptersList` present but with no matching rows means this page
+ *    genuinely has no more chapters (the real end of the list) — return
+ *    `[]`, and `getVolumeChapters`'s loop stops there, as intended.
+ *  - `.chaptersList` absent entirely means this response is not a
+ *    chapter-listing page at all — the same 200-status "blocked" shape
+ *    `getNovel`'s own tests exercise for `.main-head`. Returning `[]`
+ *    here would be indistinguishable from a real end-of-list to
+ *    `getVolumeChapters`, silently truncating the chapter list at
+ *    whichever page happened to be blocked (a transient anti-bot
+ *    response or CDN hiccup on page 12 of 32 would quietly cut a
+ *    1500+-chapter novel down to ~550, with nothing anywhere saying so).
+ *    Throw instead, naming the offending page URL — the same principle
+ *    as `parseNovelPage`'s guard on a missing `.main-head`. */
+export function parseChapterRows(doc: Document, slug: string, pageUrl: string): SourceChapter[] {
   const list = doc.querySelector(".chaptersList");
-  if (!list) return [];
+  if (!list) {
+    throw new Error(
+      `Sun Novels: couldn't find the chapter list on ${pageUrl} (.chaptersList is missing) — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+    );
+  }
   const out: SourceChapter[] = [];
   const seen = new Set<string>();
   for (const a of Array.from(list.querySelectorAll(`a[href^="/novel/${slug}/"]`))) {
@@ -241,9 +261,14 @@ export default function createSource(host: SourceHost): Source {
      *  hardcoded number — that count drifts daily as the site adds
      *  chapters, and chapter numbering itself is sparse (this
      *  extension's example novel has 1582 chapters whose newest is
-     *  numbered 1611), so nothing here may assume the pages run out
-     *  exactly where the count predicts; the empty-page stop is the
-     *  real termination condition, `chapterCount` only sizes the loop.
+     *  numbered 1611). This bounds the OVER-counting case: nothing here
+     *  may assume the real list runs out exactly where `chapterCount`
+     *  predicts, so the empty-page stop (see `parseChapterRows`) is what
+     *  actually terminates the loop, not reaching the computed page
+     *  count. It does NOT cover the opposite, UNDER-counting case — if
+     *  the site has grown past what `chapterCount` reported (stale by
+     *  the time this runs), the loop never attempts the later pages at
+     *  all, and nothing here signals that under-fetch either.
      *
      *  The slug comes from `volume.key` (set by getNovel) rather than
      *  re-deriving it from `novelUrl`, since `key` is the value this
@@ -260,7 +285,11 @@ export default function createSource(host: SourceHost): Source {
         const url = chapterPageUrl(slug, page);
         host.log("info", `getVolumeChapters(${novelUrl}) page ${page}/${totalPages - 1}`);
         const resp = await host.fetch(url);
-        const rows = parseChapterRows(parseHtml(resp.text), slug);
+        // parseChapterRows throws (rather than returning []) when the
+        // container is missing entirely — a blocked/errored page, not a
+        // genuine end of list — so that failure propagates out of this
+        // call instead of being silently treated as "no more chapters".
+        const rows = parseChapterRows(parseHtml(resp.text), slug, url);
         if (rows.length === 0) break;
         for (const c of rows) {
           if (seen.has(c.url)) continue;
