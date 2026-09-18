@@ -3,11 +3,15 @@ import type { Locale } from "@riwaq/extension-api";
 /** Strings this extension synthesises itself, for cases the site leaves
  *  unlabelled (a volume with no title, a section with no heading, ...).
  *  Extensions ship their own copy — they cannot reach the app's message
- *  catalogue. Replace "placeholder" with real keys as you need them; both
- *  locales are required so this satisfies Record<Locale, ...> below. */
+ *  catalogue. Both locales are required so this satisfies
+ *  Record<Locale, ...> below.
+ *
+ *  `allChapters` titles the single lazy volume `getNovel` returns: this
+ *  site has no volume concept of its own, just one flat, paginated
+ *  chapter list, so there is nothing on the page to read a label from. */
 const CATALOG = {
-  en: { placeholder: "Placeholder" },
-  ar: { placeholder: "Placeholder" },
+  en: { allChapters: "All Chapters" },
+  ar: { allChapters: "جميع الفصول" },
 } satisfies Record<Locale, Record<string, string>>;
 
 export function strings(locale: Locale) {
