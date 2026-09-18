@@ -16,11 +16,11 @@
 // one, the inverse of extensions/seanovel. Do not carry that assumption
 // across.
 //
-// `canHandle`, `slugFromUrl` and now `getNovel` are implemented.
-// `getHomeSections`, `search` and `getChapterContent` still throw "not
-// implemented"; implement them one at a time against this manifest's
-// `baseUrl`, replacing the matching stub assertion in the sibling
-// tests/sunovels.test.ts file as you go.
+// `canHandle`, `slugFromUrl`, `getNovel` and now `getVolumeChapters` are
+// implemented. `getHomeSections`, `search` and `getChapterContent` still
+// throw "not implemented"; implement them one at a time against this
+// manifest's `baseUrl`, replacing the matching stub assertion in the
+// sibling tests/sunovels.test.ts file as you go.
 import {
   absoluteUrl,
   parseHtml,
@@ -33,8 +33,13 @@ import {
   type SourceNovel,
   type SourceSearchResult,
   type SourceSection,
+  type SourceVolume,
 } from "@riwaq/extension-api";
 import { strings } from "./strings";
+
+/** The chapter-list tab serves exactly 50 rows per page — measured
+ *  directly against the live site, scoped to `.chaptersList`. */
+const PER_PAGE = 50;
 
 // Exported so the later tasks that build getHomeSections/search/getNovel/
 // getChapterContent against this manifest's baseUrl (all landing in this
@@ -129,6 +134,40 @@ export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage 
   return { title, originalTitle, coverUrl, tags };
 }
 
+/** `page` is 0-indexed — the site's own pagination starts at 0, and a
+ *  1-indexed guess would silently skip the first fifty chapters of every
+ *  novel. Measured directly against the live site, scoped to
+ *  `.chaptersList`: `page=0` returns chapters 1-50, `page=1` returns
+ *  51-100. */
+export function chapterPageUrl(slug: string, page: number): string {
+  return `${BASE_URL}/novel/${slug}?activeTab=chapters&page=${page}`;
+}
+
+/** Rows are read from `.chaptersList` ONLY. The page header links the
+ *  first and newest chapters on EVERY page (a `nav.header-links` pair
+ *  plus a `.intro` "last chapter you read" link) — collecting anchors
+ *  from the whole document instead of this container would duplicate
+ *  those into all ~32 pages of a long novel. `seen` also de-duplicates
+ *  within this one page's rows, defensively, though the site has not
+ *  been observed to repeat a row inside `.chaptersList` itself. */
+export function parseChapterRows(doc: Document, slug: string): SourceChapter[] {
+  const list = doc.querySelector(".chaptersList");
+  if (!list) return [];
+  const out: SourceChapter[] = [];
+  const seen = new Set<string>();
+  for (const a of Array.from(list.querySelectorAll(`a[href^="/novel/${slug}/"]`))) {
+    const href = a.getAttribute("href");
+    if (!href || seen.has(href)) continue;
+    const num = Number.parseInt(href.split("/").pop() ?? "", 10);
+    if (!Number.isFinite(num)) continue;
+    const title = sanitizeText(a.querySelector(".chapter-title")?.textContent ?? a.textContent);
+    if (!title) continue;
+    seen.add(href);
+    out.push({ id: num, title, url: absoluteUrl(href, BASE_URL), lines: [] });
+  }
+  return out;
+}
+
 export default function createSource(host: SourceHost): Source {
   return {
     // The novel page's chapter list lives behind a paginated tab (50 rows
@@ -190,6 +229,47 @@ export default function createSource(host: SourceHost): Source {
           },
         ],
       };
+    },
+
+    /** Walks the paginated `.chaptersList` tab from page 0, sequentially
+     *  (never concurrently — 32 requests fired at once at a third-party
+     *  site invites rate-limiting for no gain on a list the user is
+     *  waiting to scroll), and stops as soon as a page yields no rows.
+     *
+     *  Page count is derived from `volume.chapterCount`
+     *  (`Math.ceil(count / PER_PAGE)`, at least 1) rather than a
+     *  hardcoded number — that count drifts daily as the site adds
+     *  chapters, and chapter numbering itself is sparse (this
+     *  extension's example novel has 1582 chapters whose newest is
+     *  numbered 1611), so nothing here may assume the pages run out
+     *  exactly where the count predicts; the empty-page stop is the
+     *  real termination condition, `chapterCount` only sizes the loop.
+     *
+     *  The slug comes from `volume.key` (set by getNovel) rather than
+     *  re-deriving it from `novelUrl`, since `key` is the value this
+     *  source's own getNovel stashed there for exactly this call — see
+     *  the comment on that assignment. `slugFromUrl(novelUrl)` is kept
+     *  only as a fallback for a volume whose `key` is somehow absent. */
+    async getVolumeChapters(novelUrl: string, volume: SourceVolume): Promise<SourceChapter[]> {
+      const slug = volume.key || slugFromUrl(novelUrl);
+      const totalPages = Math.max(1, Math.ceil((volume.chapterCount ?? 0) / PER_PAGE));
+      const seen = new Set<string>();
+      const chapters: SourceChapter[] = [];
+
+      for (let page = 0; page < totalPages; page++) {
+        const url = chapterPageUrl(slug, page);
+        host.log("info", `getVolumeChapters(${novelUrl}) page ${page}/${totalPages - 1}`);
+        const resp = await host.fetch(url);
+        const rows = parseChapterRows(parseHtml(resp.text), slug);
+        if (rows.length === 0) break;
+        for (const c of rows) {
+          if (seen.has(c.url)) continue;
+          seen.add(c.url);
+          chapters.push(c);
+        }
+      }
+
+      return chapters;
     },
 
     async getChapterContent(_chapter: SourceChapter): Promise<SourceLine[]> {

@@ -9,10 +9,10 @@ documentation. Everything here is scraped from server-rendered HTML.
 
 ## Status
 
-`canHandle`, `slugFromUrl` and `getNovel` are implemented. `getHomeSections`,
-`search` and `getChapterContent` still throw `"not implemented"` and will
-be filled in by later tasks against fixture HTML captured from the live
-site.
+`canHandle`, `slugFromUrl`, `getNovel` and `getVolumeChapters` are
+implemented. `getHomeSections`, `search` and `getChapterContent` still
+throw `"not implemented"` and will be filled in by later tasks against
+fixture HTML captured from the live site.
 
 ## Capabilities
 
@@ -22,6 +22,7 @@ site.
 | `getHomeSections`     | —         | not implemented yet |
 | `search`              | —         | not implemented yet |
 | `getNovel`            | ✓         | scrapes `/novel/<slug>`; declares `hasLazyVolumes` — see below |
+| `getVolumeChapters`   | ✓         | walks the paginated `.chaptersList` tab — see below |
 | `getChapterContent`   | —         | not implemented yet |
 
 ## `canHandle`
@@ -81,10 +82,52 @@ single pseudo-volume (`{ id: 1, chapters: [], chapterCount, key: slug }`).
 inline Next.js RSC payload (`self.__next_f.push(...)`) for
 `chaptersCount":<n>` — that field is **not** in the rendered markup, and
 it is **not** the novel's highest chapter number: chapter numbering on
-this site is sparse (the fixture novel reports `chaptersCount: 1582`
-while its newest chapter is numbered `1611`). Task 3's `getVolumeChapters`
-is what actually walks the paginated chapter list; nothing here may
-assume `chaptersCount` chapters means chapters `1..count` exist.
+this site is sparse (the fixture novels report `chaptersCount: 1582`
+while their newest chapter is numbered `1611`). `getVolumeChapters` (see
+below) is what actually walks the paginated chapter list; nothing here
+may assume `chaptersCount` chapters means chapters `1..count` exist.
+
+## Chapter list: `getVolumeChapters`
+
+The chapter list lives behind a paginated tab —
+`/novel/<slug>?activeTab=chapters&page=<n>` — rather than being inlined
+in the novel page. Two facts, measured directly against the live site
+and scoped to `.chaptersList`, drive the whole implementation:
+
+- **`page` is 0-indexed and serves exactly 50 rows.** `page=0` returns
+  chapters 1-50, `page=1` returns 51-100. A 1-indexed guess would
+  silently drop the first fifty chapters of every novel.
+- **Chapter numbering is sparse** (see the `chaptersCount`-vs-highest-
+  number gap above), so the paginated list is the only correct source of
+  which chapters exist — nothing may synthesise a list by counting `1`
+  through `chaptersCount`.
+
+**The trap:** the page header links the first and newest chapters on
+**every single page** — a `nav.header-links` pair plus a `.intro` "last
+chapter you read" link, both outside `.chaptersList` entirely. Collecting
+chapter anchors from the whole document instead of scoping to
+`.chaptersList` would duplicate the first and newest chapters into all
+~32 pages of a long novel. `parseChapterRows(doc, slug)` scopes its query
+to `.chaptersList` for exactly this reason, and
+`tests/sunovels.test.ts` pins it with a fixture-derived check (not just a
+row-count bound) that would fail if that scoping were ever dropped.
+
+`getVolumeChapters(novelUrl, volume)` derives the page count from
+`volume.chapterCount` (`Math.ceil(count / 50)`, at least 1) rather than a
+hardcoded number, fetches each page **sequentially** — never
+concurrently; firing dozens of requests at once at a third-party site
+invites rate-limiting for no gain on a list the user is waiting to
+scroll — and stops as soon as a page yields no rows. It also
+de-duplicates by chapter URL across pages; that de-dup is real, not
+theoretical, and is pinned by a test that forces two page fetches to
+return genuinely overlapping rows (the two real captured fixtures happen
+to be disjoint, so a test built only from them would not have caught its
+removal).
+
+The slug it builds URLs from comes from `volume.key` — set by `getNovel`
+for exactly this call — not by re-deriving it from `novelUrl`, since the
+two can diverge (a stale snapshot, a redirect). `slugFromUrl(novelUrl)`
+is kept only as a fallback for a volume whose `key` is somehow absent.
 
 ## Fetch-only, no ambient authority
 

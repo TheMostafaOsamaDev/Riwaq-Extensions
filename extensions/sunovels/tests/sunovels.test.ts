@@ -4,12 +4,14 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import createSource, {
   BASE_URL,
+  chapterPageUrl,
+  parseChapterRows,
   parseChaptersCount,
   parseNovelPage,
   slugFromUrl,
 } from "../src/index";
 import { createTestHost } from "@riwaq/extension-api/testing";
-import { SourceUrlError } from "@riwaq/extension-api";
+import { parseHtml, SourceUrlError } from "@riwaq/extension-api";
 
 // Deliberately not `readFileSync(new URL("./fixtures/novel.html", import.meta.url), ...)`:
 // this suite runs under `environment: "happy-dom"` (see vitest.config.ts), and
@@ -20,6 +22,8 @@ import { SourceUrlError } from "@riwaq/extension-api";
 // (see extensions/cenele/tests/cenele.test.ts for the same pattern).
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 const novelHtml = readFileSync(join(FIXTURES_DIR, "novel.html"), "utf8");
+const chaptersPage0Html = readFileSync(join(FIXTURES_DIR, "chapters-page0.html"), "utf8");
+const chaptersPage1Html = readFileSync(join(FIXTURES_DIR, "chapters-page1.html"), "utf8");
 
 // Independently derived from the fixture at run time, via a code path
 // `parseChaptersCount` does NOT use (the page's `application/ld+json` block,
@@ -350,6 +354,254 @@ describe("getNovel", () => {
     await expect(blockedSource.getNovel("https://sunovels.com/novel/blocked")).rejects.toThrow(
       /main-head|title/i,
     );
+  });
+});
+
+describe("chapterPageUrl", () => {
+  it("uses a 0-indexed page parameter", () => {
+    // The site's own pagination starts at 0 — a 1-indexed guess would
+    // silently drop the first fifty chapters of every novel.
+    expect(chapterPageUrl("shadow-slave", 0)).toBe(
+      "https://sunovels.com/novel/shadow-slave?activeTab=chapters&page=0",
+    );
+    expect(chapterPageUrl("shadow-slave", 1)).toBe(
+      "https://sunovels.com/novel/shadow-slave?activeTab=chapters&page=1",
+    );
+  });
+});
+
+describe("parseChapterRows", () => {
+  it("parses only chapter-list rows, not the header's first/latest shortcuts", () => {
+    // The page header links the first and newest chapters on EVERY page.
+    // Counting those would duplicate chapter 1 into all 32 pages.
+    const rows = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave");
+    expect(rows.length).toBeLessThanOrEqual(50);
+    expect(rows.filter((c) => c.url.endsWith("/1"))).toHaveLength(1);
+  });
+
+  // Stronger than the length check above: derives, independently of
+  // parseChapterRows itself, the exact chapter number that appears ONLY
+  // in the header/"last read" shortcuts on this page (not inside
+  // `.chaptersList` at all) — for the committed fixture that's the
+  // newest chapter, which does not belong on page 0's 1..50 range. If
+  // scoping to `.chaptersList` were ever dropped, that number would leak
+  // into this page's rows; a test that only bounds the row COUNT can be
+  // satisfied by coincidence (e.g. if de-duplication happened to also
+  // absorb the leak), so this pins the specific chapter id instead.
+  it("excludes a header-only chapter number that isn't part of this page's real range", () => {
+    const listMatch = chaptersPage0Html.match(/<ul class="chaptersList">([\s\S]*?)<\/ul>/);
+    if (!listMatch) {
+      throw new Error("fixture: couldn't independently find the .chaptersList markup.");
+    }
+    const listNums = new Set(
+      Array.from(listMatch[1].matchAll(/href="\/novel\/shadow-slave\/(\d+)"/g)).map((m) =>
+        Number.parseInt(m[1], 10),
+      ),
+    );
+    const allNums = Array.from(
+      chaptersPage0Html.matchAll(/href="\/novel\/shadow-slave\/(\d+)"/g),
+    ).map((m) => Number.parseInt(m[1], 10));
+    const headerOnlyNums = new Set(allNums.filter((n) => !listNums.has(n)));
+    expect(headerOnlyNums.size).toBeGreaterThan(0);
+
+    const rows = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave");
+    for (const n of headerOnlyNums) {
+      expect(rows.some((c) => c.id === n)).toBe(false);
+    }
+    // And every real row IS accounted for — this side isn't vacuous.
+    expect(rows.map((c) => c.id).sort((a, b) => a - b)).toEqual(
+      Array.from(listNums).sort((a, b) => a - b),
+    );
+  });
+
+  it("returns the second page's chapters, not the first's", () => {
+    const p0 = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave");
+    const p1 = parseChapterRows(parseHtml(chaptersPage1Html), "shadow-slave");
+    expect(p1[0].url).not.toBe(p0[0].url);
+    expect(new Set([...p0, ...p1].map((c) => c.url)).size).toBe(p0.length + p1.length);
+  });
+
+  it("gives every chapter a non-empty title and an absolute URL", () => {
+    for (const c of parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave")) {
+      expect(c.title.trim()).not.toBe("");
+      expect(c.url).toMatch(/^https:\/\/sunovels\.com\/novel\/shadow-slave\/\d+$/);
+    }
+  });
+
+  // Cross-checked against an independent regex over the raw fixture
+  // rather than just "non-empty" — catches a selector that grabbed the
+  // wrong text (e.g. the whole `<li>`, which also carries the date and
+  // view count) even though that text would still be non-empty.
+  it("extracts the exact chapter-title text, cross-checked against the raw fixture", () => {
+    const m = chaptersPage0Html.match(/<strong class="chapter-title">([^<]*)<\/strong>/);
+    if (!m) throw new Error("fixture: couldn't independently find a chapter-title span.");
+    const rows = parseChapterRows(parseHtml(chaptersPage0Html), "shadow-slave");
+    const first = rows.find((c) => c.id === 1);
+    expect(first).toBeDefined();
+    expect(first!.title).toBe(m[1]);
+  });
+});
+
+describe("getVolumeChapters", () => {
+  const twoPageHost = () =>
+    createTestHost({
+      responses: {
+        "activeTab=chapters&page=0": chaptersPage0Html,
+        "activeTab=chapters&page=1": chaptersPage1Html,
+      },
+      locale: "ar",
+    });
+
+  it("walks every page implied by chapterCount and de-duplicates across them", async () => {
+    const src = createSource(twoPageHost());
+    const chapters = await src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
+      id: 1,
+      title: "all",
+      chapters: [],
+      chapterCount: 100,
+      key: "shadow-slave",
+    });
+    expect(new Set(chapters.map((c) => c.url)).size).toBe(chapters.length);
+    expect(chapters).toHaveLength(100);
+  });
+
+  // The test above cannot fail from a missing de-dup step alone: the two
+  // real fixture pages happen to carry disjoint chapter ranges (1-50,
+  // 51-100), so even with zero cross-page de-duplication the concatenated
+  // result would already be unique. This test forces genuine overlap —
+  // page 1 is deliberately made to answer with page 0's own markup — so
+  // removing the de-dup `Set` in getVolumeChapters is the only way this
+  // one goes red.
+  it("de-duplicates when two fetched pages genuinely return overlapping chapter urls", async () => {
+    const host = createTestHost({
+      responses: {
+        "activeTab=chapters&page=0": chaptersPage0Html,
+        "activeTab=chapters&page=1": chaptersPage0Html,
+      },
+    });
+    const src = createSource(host);
+    const chapters = await src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
+      id: 1,
+      title: "all",
+      chapters: [],
+      chapterCount: 100,
+      key: "shadow-slave",
+    });
+    expect(chapters).toHaveLength(50);
+    expect(new Set(chapters.map((c) => c.url)).size).toBe(50);
+  });
+
+  it("derives the page count from chapterCount rather than a hardcoded number of pages", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const host = createTestHost({
+      responses: {
+        "activeTab=chapters&page=0": chaptersPage0Html,
+        "activeTab=chapters&page=1": chaptersPage1Html,
+      },
+      calls,
+    });
+    const src = createSource(host);
+    // chapterCount worth exactly one page (50) must fetch ONLY page 0 —
+    // an implementation that ignores chapterCount and always walks every
+    // fixture it can find would over-fetch here and this would catch it,
+    // even though page 1's fixture is readily available and would
+    // "succeed" if fetched.
+    const chapters = await src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
+      id: 1,
+      title: "all",
+      chapters: [],
+      chapterCount: 50,
+      key: "shadow-slave",
+    });
+    expect(chapters).toHaveLength(50);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("still fetches at least one page when chapterCount is 0", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const host = createTestHost({
+      responses: { "activeTab=chapters&page=0": chaptersPage0Html },
+      calls,
+    });
+    const src = createSource(host);
+    const chapters = await src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
+      id: 1,
+      title: "all",
+      chapters: [],
+      chapterCount: 0,
+      key: "shadow-slave",
+    });
+    expect(calls).toHaveLength(1);
+    expect(chapters).toHaveLength(50);
+  });
+
+  it("stops fetching once a page yields no rows, without erroring on later pages", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const host = createTestHost({
+      responses: {
+        "activeTab=chapters&page=0": chaptersPage0Html,
+        "activeTab=chapters&page=1": chaptersPage1Html,
+        "activeTab=chapters&page=2": `<html><body><ul class="chaptersList"></ul></body></html>`,
+        // Deliberately no fixture for page=3 or page=4: chapterCount
+        // below implies 5 pages total. If the implementation kept
+        // walking past page 2's empty result instead of stopping, the
+        // next fetch would reject with "no text fixture for ..." and
+        // this whole call would reject instead of resolving.
+      },
+      calls,
+    });
+    const src = createSource(host);
+    const chapters = await src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
+      id: 1,
+      title: "all",
+      chapters: [],
+      chapterCount: 250, // Math.ceil(250 / 50) = 5 pages
+      key: "shadow-slave",
+    });
+    expect(chapters).toHaveLength(100);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("builds the chapter-list URL from the volume's key, not by re-deriving the slug from novelUrl", async () => {
+    const src = createSource(twoPageHost());
+    // novelUrl deliberately names a DIFFERENT slug than volume.key — no
+    // fixture exists for "not-the-real-slug", so an implementation that
+    // ignored volume.key and re-derived the slug from novelUrl instead
+    // would reject with "no text fixture for ..." rather than resolving.
+    const chapters = await src.getVolumeChapters!(
+      "https://sunovels.com/novel/not-the-real-slug",
+      { id: 1, title: "all", chapters: [], chapterCount: 100, key: "shadow-slave" },
+    );
+    expect(chapters.length).toBeGreaterThan(0);
+  });
+
+  it("fetches chapter pages sequentially, never more than one in flight", async () => {
+    const base = twoPageHost();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const host: typeof base = {
+      ...base,
+      async fetch(url, opts) {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // Yield the event loop before resolving: a caller that fired
+        // page 1's request without awaiting page 0's first would have
+        // both in flight at once when this runs for the second call.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const result = await base.fetch(url, opts);
+        inFlight--;
+        return result;
+      },
+    };
+    const src = createSource(host);
+    await src.getVolumeChapters!("https://sunovels.com/novel/shadow-slave", {
+      id: 1,
+      title: "all",
+      chapters: [],
+      chapterCount: 100,
+      key: "shadow-slave",
+    });
+    expect(maxInFlight).toBe(1);
   });
 });
 
