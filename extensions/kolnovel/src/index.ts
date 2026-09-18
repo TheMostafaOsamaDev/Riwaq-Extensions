@@ -21,6 +21,13 @@
 //             → { error:0, url: "https://kolnovel.com/<chapter>/pdf/?tspdftoken=<token>" }
 //   bytes:  GET <token url>  → application/pdf
 //
+// Neither path is allowed to come back empty-handed: if the HTML body parses
+// to nothing AND the PDF extracts to nothing, `getChapterContent` throws with
+// the chapter URL in the message rather than returning `[]`, which the reader
+// would render as a blank page indistinguishable from a genuinely empty
+// chapter. The three ways the token request itself can fail are three
+// separately-named errors — see `requestPdfUrl`.
+//
 // The downloaded bytes are handed to `host.pdf.extractChapter` — PDF parsing
 // itself is NOT done here. pdf.js is far too heavy to bundle into an
 // extension (the build enforces a size ceiling specifically to catch that
@@ -33,6 +40,7 @@
 // `page` argument and always reports `hasMore: false`.
 
 import {
+  absoluteUrl,
   parseHtml,
   type ExtractedImage,
   type Source,
@@ -126,12 +134,12 @@ export default function createSource(host: SourceHost): Source {
       if (!postId) {
         throw new Error(`KolNovel: couldn't find a post id in chapter URL: ${chapter.url}`);
       }
-      const pdfUrl = await requestPdfUrl(host, postId);
+      const pdfUrl = await requestPdfUrl(host, postId, chapter.url);
       const bytes = await host.fetchBytes(pdfUrl);
-      assertPdf(bytes);
+      assertPdf(bytes, chapter.url);
 
       let counter = 0;
-      return host.pdf.extractChapter(bytes, {
+      const pdfLines = await host.pdf.extractChapter(bytes, {
         chapterUrl: chapter.url,
         novelTitle: lastNovelTitle,
         mintImageRef: (img) => {
@@ -140,6 +148,20 @@ export default function createSource(host: SourceHost): Source {
           return ref;
         },
       });
+      // Refuse loudly rather than hand back a hollow chapter. Both paths have
+      // now come up empty: the HTML body parsed to nothing (which is what sent
+      // us here) and the PDF extracted to nothing either. Returning `[]` would
+      // import a chapter the reader renders as a blank page — indistinguishable
+      // from a chapter that is genuinely empty, and silent at every layer above
+      // this one. The URL is in the message because that is the only handle a
+      // user has when reporting it.
+      if (pdfLines.length === 0) {
+        throw new Error(
+          `KolNovel: extracted no content for ${chapter.url} — the chapter page had no ` +
+            "readable HTML body and its downloaded PDF produced no lines.",
+        );
+      }
+      return pdfLines;
     },
 
     async resolveImage(ref) {
@@ -158,29 +180,86 @@ function extractPostId(url: string): string | null {
   return m ? m[1] : null;
 }
 
-/** POST the ts_ln_dl_url action and return the tokenized PDF URL. */
-async function requestPdfUrl(host: SourceHost, postId: string): Promise<string> {
+/** POST the ts_ln_dl_url action and return the tokenized PDF URL.
+ *
+ *  The three ways this can fail are reported as three different errors on
+ *  purpose. They have different causes and different fixes, and the single
+ *  "members-only or removed" message this used to raise for all of them was a
+ *  guess presented as a diagnosis — it named a cause the code had not
+ *  established, which is worse than saying less. Verified against the live
+ *  endpoint (2026-09-18):
+ *
+ *    post_id=293246     → {"error":0,"url":"https://kolnovel.com/…/pdf/?tspdftoken=…"}
+ *    post_id= (empty)   → {"error":403,"url":""}
+ *    post_id=999999999  → {"error":0,"url":"/pdf/?tspdftoken=…"}   ← relative!
+ *
+ *  That last one is why the returned url is resolved against BASE_URL rather
+ *  than passed through: for a post id the site does not recognise it reports
+ *  success and hands back a ROOT-RELATIVE url with the novel segment missing.
+ *  Forwarding that string straight to `host.fetchBytes` asks the host to fetch
+ *  a relative URL; resolving it produces a real absolute URL that then fails
+ *  the `%PDF` check below with a message that says what actually happened.
+ *  For a normal response the url is already absolute and resolving is a no-op. */
+async function requestPdfUrl(
+  host: SourceHost,
+  postId: string,
+  chapterUrl: string,
+): Promise<string> {
   const body = `action=ts_ln_dl_url&post_id=${encodeURIComponent(postId)}`;
   const resp = await host.fetch(AJAX_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
     body,
   });
-  let json: { error?: number; url?: string };
+
+  let json: { error?: number; url?: string } | null;
   try {
-    json = JSON.parse(resp.text);
+    json = JSON.parse(resp.text) as { error?: number; url?: string } | null;
   } catch {
-    throw new Error(`KolNovel: PDF token endpoint returned non-JSON (status ${resp.status})`);
+    throw new Error(
+      `KolNovel: the PDF token endpoint returned non-JSON for ${chapterUrl} ` +
+        `(HTTP ${resp.status}).`,
+    );
   }
-  if (!json || json.error !== 0 || !json.url) {
-    throw new Error(`KolNovel: PDF not available for post ${postId} (members-only or removed)`);
+  if (json === null || typeof json !== "object") {
+    throw new Error(
+      `KolNovel: the PDF token endpoint returned JSON that is not an object for ${chapterUrl} ` +
+        `(HTTP ${resp.status}).`,
+    );
   }
-  return json.url;
+  if (json.error !== 0) {
+    const code = json.error === undefined ? "absent" : String(json.error);
+    throw new Error(
+      `KolNovel: the PDF token endpoint refused post ${postId} for ${chapterUrl} ` +
+        `(error code ${code}). The site answers 403 here for a post id it does not accept.`,
+    );
+  }
+  if (!json.url) {
+    throw new Error(
+      `KolNovel: the PDF token endpoint reported success for post ${postId} ` +
+        `(${chapterUrl}) but returned no download url.`,
+    );
+  }
+  return absoluteUrl(json.url, BASE_URL);
 }
 
-/** Guard: the tokenized endpoint returns the JS loader HTML (not a PDF) when
- *  the token is missing/invalid or the chapter is members-only. */
-function assertPdf(bytes: Uint8Array): void {
+/** Guard: the download endpoint answers with an HTML page rather than a file
+ *  in several situations — the un-tokenized `/pdf/` path serves a small JS
+ *  loader whose own script POSTs `ts_ln_dl_url` and redirects (captured in
+ *  tests/fixtures/pdf-loader.html), and an expired token or a members-only
+ *  chapter produce an error/login page the same way.
+ *
+ *  This is a magic-byte check rather than a Content-Type check because the
+ *  extension cannot see the content type at all: `SourceHost.fetchBytes`
+ *  returns `Promise<Uint8Array>`, with no headers alongside it (only the text
+ *  `fetch` returns a `FetchResponse` carrying `headers`). The first four bytes
+ *  are the only evidence available on this path.
+ *
+ *  The message reports the chapter URL and what actually arrived, because
+ *  "was not a PDF" alone cannot be acted on: a user forwarding the error, and
+ *  a maintainer reading it later, need to be able to tell an HTML loader page
+ *  from an empty body from a CDN challenge without re-running the download. */
+function assertPdf(bytes: Uint8Array, chapterUrl: string): void {
   const ok =
     bytes.length > 4 &&
     bytes[0] === 0x25 && // %
@@ -188,11 +267,22 @@ function assertPdf(bytes: Uint8Array): void {
     bytes[2] === 0x44 && // D
     bytes[3] === 0x46; // F
   if (!ok) {
-    // requestPdfUrl already handled the members-only case; reaching here with
-    // non-PDF bytes means the token expired or the endpoint returned an
-    // error/login/CDN page instead of the file.
     throw new Error(
-      "KolNovel: downloaded chapter was not a PDF (token may have expired, or the endpoint returned an error/login page).",
+      `KolNovel: the tokenized download for ${chapterUrl} was not a PDF — expected a ` +
+        `%PDF header, got ${describeBytes(bytes)}. The site serves an HTML loader or ` +
+        "login page here when the token has expired or the chapter is members-only.",
     );
   }
+}
+
+/** A short, safe description of what came back instead of a PDF: the length
+ *  plus the first few bytes as printable ASCII (anything else as `.`), so an
+ *  HTML page reads as `<html>` in the message without risking a dump of an
+ *  arbitrary binary body into a log. */
+function describeBytes(bytes: Uint8Array): string {
+  let prefix = "";
+  for (const byte of bytes.slice(0, 8)) {
+    prefix += byte >= 0x20 && byte <= 0x7e ? String.fromCharCode(byte) : ".";
+  }
+  return `${bytes.length} bytes starting "${prefix}"`;
 }

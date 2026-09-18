@@ -28,7 +28,7 @@ chapters.
 | `search`              | ✓ (unpaginated) | `GET /?s=<q>` only — see **Search** below |
 | `getNovel`            | ✓         | `/series/<slug>/` — `.sertobig` + `.ts-chl-collapsible` |
 | `searchChapters`      | —         | no in-novel search on the site |
-| `getChapterContent`   | ✓ (HTML + PDF fallback) | see **Chapter content** below |
+| `getChapterContent`   | ✓ (HTML + PDF fallback) | see **Chapter content** below; throws rather than return an empty chapter |
 
 ## Search
 
@@ -69,10 +69,17 @@ falls back to the site's token-gated download flow:
 
 1. `POST /wp-admin/admin-ajax.php` with `action=ts_ln_dl_url&post_id=<id>`
    (the numeric id trailing the chapter's permalink) → `{ error: 0, url:
-   "https://kolnovel.com/<chapter>/pdf/?tspdftoken=<token>" }`.
+   "https://kolnovel.com/<chapter>/pdf/?tspdftoken=<token>" }`. The returned
+   url is resolved against the site origin before use — see **Token-flow
+   failures** below for why that is not paranoia.
 2. `GET` that tokenized URL → the PDF bytes. `assertPdf` checks the `%PDF`
    magic bytes before proceeding, since an expired/invalid token makes the
-   endpoint return an HTML error/login page instead of a file.
+   endpoint return an HTML error/login page instead of a file. This is a
+   magic-byte check and not a `Content-Type` check because the extension
+   cannot see the content type at all: `SourceHost.fetchBytes` returns a bare
+   `Promise<Uint8Array>` with no headers beside it (only the text `fetch`
+   returns a `FetchResponse` carrying `headers`). The first four bytes are the
+   only evidence this path has.
 3. The bytes go to **`host.pdf.extractChapter(bytes, { chapterUrl,
    novelTitle, mintImageRef })`** — this extension never parses PDF bytes
    itself. `pdf.js` is too heavy to bundle per-extension (the build enforces
@@ -89,6 +96,44 @@ There is no length heuristic gating the HTML-vs-PDF choice: a real chapter's
 HTML body can legitimately be short or image-heavy, and guessing from length
 would wrongly route those to the PDF endpoint (which fails for HTML-only
 chapters). "Zero lines extracted" is the only trigger for the PDF fallback.
+
+### Never a hollow chapter
+
+If the HTML body parses to nothing *and* the PDF extracts to nothing,
+`getChapterContent` **throws**, naming the chapter URL. It does not return an
+empty `lines` array. An empty chapter is imported silently and drawn by the
+reader as a blank page, indistinguishable from a chapter that is genuinely
+empty — there is no layer above this one that can tell the difference, so the
+refusal has to happen here. A genuinely empty *search* result is a different
+thing and returns empty without throwing.
+
+### Token-flow failures
+
+The three ways the token request can fail are three separate errors, because
+they have three different causes and three different fixes. They were one
+message until v1.0.1 — `"members-only or removed"` — which named a cause the
+code had not established. Verified against the live endpoint on 2026-09-18,
+and each response committed as a fixture under `tests/fixtures/`:
+
+| Request | Response | Extension's behaviour |
+|---|---|---|
+| `post_id=293246` (a real chapter) | `{"error":0,"url":"https://kolnovel.com/…/pdf/?tspdftoken=…"}` | downloads it |
+| `post_id=` (empty) or a non-numeric id | `{"error":403,"url":""}` | throws naming **error code 403** |
+| `post_id=999999999` (unknown id) | `{"error":0,"url":"/pdf/?tspdftoken=…"}` | resolves the **root-relative** url against the origin, then fails the `%PDF` check |
+| — (synthetic) | `{"error":0}` | throws: reported success, **no download url** |
+| — (synthetic) | a non-JSON body | throws, reporting the **HTTP status** |
+
+The third row is the surprising one and the reason the url is resolved rather
+than forwarded: for a post id the site does not recognise it answers *success*
+and hands back a root-relative url with the novel segment missing. Passing
+that string to `host.fetchBytes` would ask the host to fetch a relative URL;
+resolving it yields a real absolute URL whose failure is then reported
+accurately by `assertPdf`.
+
+`assertPdf`'s message reports the chapter URL and a short description of what
+actually arrived (`1153 bytes starting "<html>"`), so a user forwarding the
+error and a maintainer reading it later can tell an HTML loader page from an
+empty body from a CDN challenge without re-running the download.
 
 ## Why static fetch is enough
 
