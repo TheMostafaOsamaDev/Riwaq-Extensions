@@ -5,6 +5,49 @@ export default defineConfig({
     // Extension parsers need DOMParser; the whole suite is parser tests.
     environment: "happy-dom",
     include: ["packages/**/*.test.ts", "extensions/**/*.test.ts", "scripts/**/*.test.ts"],
+    // A fixture captured straight off a live page (an extension's own
+    // <script> chunk loaders, ad iframes, and — for a Next.js site — inline
+    // Suspense-boundary replacement scripts) is not inert under happy-dom
+    // the way it is in a real browser's DOMParser: happy-dom EXECUTES an
+    // inline <script> the moment it's parsed into a Document, even a
+    // detached one from `new DOMParser().parseFromString(...)`, and that
+    // execution throws (`Cannot read properties of null`) because the
+    // parsed document has no defaultView for the script to find its own
+    // elements against. Extensions in this repo only ever READ the parsed
+    // tree (e.g. cenele reads nhvNovelV2 out of a script's textContent, it
+    // never runs it; sunovels regexes chaptersCount out of one the same
+    // way) — so turning evaluation off changes nothing any extension can
+    // observe, and lets a fixture be captured and committed as a genuine,
+    // unedited live page instead of hand-stripped to dodge this.
+    environmentOptions: {
+      happyDOM: {
+        settings: {
+          disableJavaScriptEvaluation: true,
+          disableJavaScriptFileLoading: true,
+          disableCSSFileLoading: true,
+          disableComputedStyleRendering: true,
+          // A live page's ad/analytics <iframe>s (sunovels' homepage
+          // carries two) try to actually load their `src` the same way
+          // an external <script> would, and dispatching THAT failure
+          // hits the identical no-defaultView wall as both cases above.
+          disableIframePageLoading: true,
+          // A live page's <script src="..."> tags (ads/analytics bundles)
+          // would otherwise each dispatch an error event once loading is
+          // disabled above — and dispatching that error throws for the
+          // same reason (no defaultView) as the inline-script case above,
+          // turning into an unhandled rejection that fails the whole run
+          // even though every Source method under test already passed.
+          // This makes the disabled load a synthetic "load" event instead,
+          // which is inert either way since nothing here ever runs it.
+          //
+          // @ts-expect-error — vitest@2.1.9 vendors an older happy-dom
+          // settings type that doesn't know this field yet; the installed
+          // happy-dom (15.11.7) honors it at runtime regardless. Drop this
+          // once vitest's vendored type catches up.
+          handleDisabledFileLoadingAsSuccess: true,
+        },
+      },
+    },
   },
   resolve: {
     alias: {

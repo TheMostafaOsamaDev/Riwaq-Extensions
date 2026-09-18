@@ -25,14 +25,25 @@
 // itself is one flat, paginated grid with no section concept at all. See
 // parseHomeSections below and the README.
 //
-// `search` cannot hit the site's own `/search` page: every query-param
-// shape tried (`?q=`, `?query=`, `?s=`, `?term=`) renders the exact same
-// empty `<ul class="grid-list"></ul>` shell — results are fetched
-// client-side after hydration, invisible to a static `host.fetch`. It
-// instead walks `/library` (itself paginated, 0-indexed like the chapter
-// list — see libraryPageUrl) once per Source instance and filters/pages
-// the merged result in memory, the same fallback extensions/seanovel uses
-// over its own single-call catalogue. See the README for what was tried.
+// `search` hits the site's own `/search` page with `?title=<query>` — the
+// one param shape (of five tried, driving the live search FORM rather than
+// guessing at names) that actually renders results server-side. It's a
+// single request: the results page has no pagination of its own (no
+// numeric pager, `&page=` has no effect), so `hasMore` is always `false`,
+// the same convention extensions/kolnovel uses for the identical shape.
+// See searchUrl/parseSearchResults below and the README for the other four
+// params tried and what each one returned.
+//
+// Every card grid this site renders — home sections, /library, search
+// results alike — serves its cover images lazy-loaded: the STATIC markup
+// `host.fetch` sees always carries `src="/placeholder.gif"` for a card's
+// `<img>`. The real `/uploads/...` path IS present, per card, in the
+// page's inline Next.js RSC payload (confirmed live: 111/111 homepage
+// hrefs paired with a payload entry, 54 of them carrying a real cover
+// path; 4/4 on a search result) — but extracting it would mean parsing
+// that payload's React Flight wire format, not just querying the DOM,
+// and is not implemented here. See the README's "cover gap" section for
+// the exact evidence and what a follow-up would need to do.
 import {
   absoluteUrl,
   parseHtml,
@@ -53,12 +64,6 @@ import { strings } from "./strings";
 /** The chapter-list tab serves exactly 50 rows per page — measured
  *  directly against the live site, scoped to `.chaptersList`. */
 const PER_PAGE = 50;
-
-/** Our own page size for the search() results synthesized locally over
- *  /library (see the file header) — unrelated to PER_PAGE above, which is
- *  the SITE's own per-page count for a novel's chapter list. There is no
- *  site-side search-results pagination to match here at all. */
-const SEARCH_PAGE_SIZE = 24;
 
 // Exported so the later tasks that build getHomeSections/search/getNovel/
 // getChapterContent against this manifest's baseUrl (all landing in this
@@ -356,16 +361,36 @@ export function collectNovelCards(root: ParentNode): NovelCard[] {
  *  section legitimately having no cards, which the live site has never
  *  been observed to do. Refuse loudly instead, naming the offending
  *  page, the same principle `parseNovelPage`/`parseChapterRows`/
- *  `parseChapterLines` already apply to their own containers. */
-export function parseHomeSections(doc: Document, pageUrl: string): SourceSection[] {
+ *  `parseChapterLines` already apply to their own containers.
+ *
+ *  A single BAD section — present, but with no title or that parsed to
+ *  zero cards — is a different, more survivable failure: dropping it
+ *  keeps the rest of the homepage usable instead of taking down every
+ *  other row over one markup change to a single rail. It is NOT silent,
+ *  though — `host.log("warn", ...)` names which section was skipped and
+ *  why, so a layout drift shows up in logs instead of just quietly
+ *  shrinking the homepage with nothing anywhere saying so. `host` is
+ *  threaded in for exactly this (this function is otherwise a pure DOM
+ *  reader) — the same shape `extensions/kolnovel`'s own
+ *  `parseHomeSections(doc, baseUrl, host)` already takes. */
+export function parseHomeSections(doc: Document, pageUrl: string, host: SourceHost): SourceSection[] {
   const sections: SourceSection[] = [];
   let idx = 0;
   for (const sec of Array.from(doc.querySelectorAll("section.home-section"))) {
     const title = sanitizeText(sec.querySelector(".section-header h3")?.textContent);
-    if (!title) continue;
+    if (!title) {
+      host.log(
+        "warn",
+        `Sun Novels: skipped a home section on ${pageUrl} with no title (.section-header h3 missing or empty).`,
+      );
+      continue;
+    }
     const body = sec.querySelector(".section-body");
     const cards = body ? collectNovelCards(body) : [];
-    if (cards.length === 0) continue;
+    if (cards.length === 0) {
+      host.log("warn", `Sun Novels: skipped home section "${title}" on ${pageUrl} — parsed to zero cards.`);
+      continue;
+    }
     const viewMoreHref = sec
       .querySelector('.section-header a[href^="/library"]')
       ?.getAttribute("href");
@@ -386,117 +411,45 @@ export function parseHomeSections(doc: Document, pageUrl: string): SourceSection
   return sections;
 }
 
-// ── /library: the search() fallback's data source ──────────────────────
+// ── search ───────────────────────────────────────────────────────────────
 
-/** `page` is 0-indexed, exactly like the chapter-list tab's own `page`
- *  param (see `chapterPageUrl`) — measured directly against the live
- *  site: bare `/library` and `/library?page=0` return byte-identical
- *  listings, and the pagination widget's own "current page" label reads
- *  "Page 1" for `page=0`. A 1-indexed guess would silently skip the
- *  catalogue's first 24 novels on every search. */
-export function libraryPageUrl(page: number): string {
-  return `${BASE_URL}/library?page=${page}`;
+/** The site's own search form posts here as `?title=<query>` — found by
+ *  driving the live search input directly (`fill` + `Enter`) and reading
+ *  the URL it produced, not by guessing at a param name. `q`/`query`/`s`/
+ *  `term` (the brief's own candidate list) were all tried first and each
+ *  rendered the identical empty `<ul class="grid-list"></ul>` shell
+ *  server-side regardless of value — see the README for that evidence.
+ *  `title` is the one that actually returns matching novel cards from a
+ *  plain `host.fetch`, no client JS required. */
+export function searchUrl(query: string): string {
+  return `${BASE_URL}/search?${new URLSearchParams({ title: query })}`;
 }
 
-/** The pagination widget renders `aria-label="Page <n>"` (or, for
- *  whichever page is current, `"Page <n> is your current page"`) on a
- *  handful of page buttons — never every page, just the first few, the
- *  last one, and whichever is current — so the total page count is the
- *  MAXIMUM `<n>` seen across all of them, not the count of matches or
- *  the last one in document order. Falls back to `1` when the widget
- *  isn't present at all (a small catalogue with everything on one page,
- *  which has not been observed live but is the safe assumption).
- *  Unrelated to `parseChaptersCount` — that field is a novel's own
- *  chapter total, read out of a different page's RSC payload entirely. */
-export function parseLibraryPageCount(doc: Document): number {
-  let max = 1;
-  for (const a of Array.from(doc.querySelectorAll('a[aria-label^="Page "]'))) {
-    const m = a.getAttribute("aria-label")?.match(/^Page (\d+)/);
-    if (!m) continue;
-    const n = Number.parseInt(m[1], 10);
-    if (n > max) max = n;
-  }
-  return max;
-}
-
-/** Rows are read from `ul.grid-list` ONLY, mirroring `parseChapterRows`'s
- *  own reasoning for scoping to `.chaptersList`: a MISSING grid means
- *  this response isn't really a library page (blocked/errored despite an
- *  HTTP 200) and must throw, naming the page, rather than being treated
- *  as a genuine end of the catalogue — the same distinction that guards
- *  every other paginated walk in this file. A grid that's PRESENT but
- *  empty (confirmed live: requesting one page past the last real one
- *  returns exactly this) is the real end of the catalogue and correctly
- *  returns `[]`. */
-export function parseLibraryCards(doc: Document, pageUrl: string): NovelCard[] {
-  const list = doc.querySelector("ul.grid-list");
+/** Rows are read from `.searchSection ul.grid-list` — scoped past the bare
+ *  `ul.grid-list` selector `/library` also uses, since a page that failed
+ *  to render the search section at all should still be told apart from
+ *  one that rendered it empty, the same distinction every other
+ *  container in this file draws (see `parseChapterRows`, whose own
+ *  comment describes this exact failure mode almost word for word): a
+ *  MISSING grid means this response isn't really a search-results page
+ *  (blocked/errored despite an HTTP 200) and must throw, naming the URL.
+ *  A grid that's PRESENT but empty is the real, correct "nothing on the
+ *  site matched this query" result (confirmed live: a query with no
+ *  matches renders exactly this) and must return `[]`, never throw —
+ *  that distinction is the whole reason `search()` below can return
+ *  `cards: []` instead of rejecting when a query genuinely matches
+ *  nothing. */
+export function parseSearchResults(doc: Document, pageUrl: string): NovelCard[] {
+  const list = doc.querySelector(".searchSection ul.grid-list");
   if (!list) {
     throw new Error(
-      `Sun Novels: couldn't find the library grid (ul.grid-list) on ${pageUrl} — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
+      `Sun Novels: couldn't find the search results grid (.searchSection ul.grid-list) on ${pageUrl} — the layout may have changed, or this page was blocked/errored despite an HTTP 200.`,
     );
   }
   return collectNovelCards(list);
 }
 
 export default function createSource(host: SourceHost): Source {
-  // The whole /library catalogue, walked page by page and cached for the
-  // lifetime of THIS Source instance — see fetchLibraryCatalog below.
-  // Deliberately a closure-local variable, not module scope: a
-  // module-scope memo would be shared by every Source this factory ever
-  // creates, so the first host passed to createSource would win
-  // permanently and a second createSource(otherHost) would silently
-  // replay the first host's catalogue instead of fetching its own. Same
-  // reasoning as extensions/seanovel's identical `cataloguePromise`.
-  let libraryCatalogPromise: Promise<NovelCard[]> | null = null;
-
-  /** Walks `/library` from page 0, sequentially (never concurrently —
-   *  see getVolumeChapters's identical reasoning: dozens of requests
-   *  fired at once at a third-party site invites rate-limiting for no
-   *  gain on a scan the caller is waiting on), stopping as soon as a
-   *  page yields no rows. `totalPages` starts at the safe default of 1
-   *  and is corrected from page 0's OWN response the moment it arrives
-   *  (unlike getVolumeChapters, nothing hands this function a count up
-   *  front — the page count lives only on the library page itself, via
-   *  parseLibraryPageCount) — the `for` loop re-reads `totalPages` on
-   *  every iteration, so that correction immediately extends how far
-   *  the walk continues.
-   *
-   *  This is the ONLY way search() below can find a match anywhere in
-   *  the catalogue, since /search never renders results server-side
-   *  (see the file header) — so a real search legitimately costs one
-   *  full, ~60-request scan the first time it runs per Source instance,
-   *  amortized to zero on every call after via `libraryCatalogPromise`. */
-  function fetchLibraryCatalog(): Promise<NovelCard[]> {
-    libraryCatalogPromise ??= (async () => {
-      const cards: NovelCard[] = [];
-      const seen = new Set<string>();
-      let totalPages = 1;
-      for (let page = 0; page < totalPages; page++) {
-        const url = libraryPageUrl(page);
-        host.log(
-          "info",
-          `search: scanning library page ${page + 1}${totalPages > 1 ? `/${totalPages}` : ""}`,
-        );
-        const resp = await host.fetch(url);
-        const doc = parseHtml(resp.text);
-        if (page === 0) totalPages = parseLibraryPageCount(doc);
-        // parseLibraryCards throws (rather than returning []) when the
-        // grid is missing entirely — a blocked/errored page, not a
-        // genuine end of catalogue — so that failure propagates out of
-        // this call instead of silently truncating the scan.
-        const rows = parseLibraryCards(doc, url);
-        if (rows.length === 0) break;
-        for (const c of rows) {
-          if (seen.has(c.url)) continue;
-          seen.add(c.url);
-          cards.push(c);
-        }
-      }
-      return cards;
-    })();
-    return libraryCatalogPromise;
-  }
-
   return {
     // The novel page's chapter list lives behind a paginated tab (50 rows
     // per page, dozens of pages for a long-running novel) rather than
@@ -518,47 +471,34 @@ export default function createSource(host: SourceHost): Source {
       const url = `${BASE_URL}/`;
       host.log("info", "getHomeSections");
       const resp = await host.fetch(url);
-      return parseHomeSections(parseHtml(resp.text), url);
+      return parseHomeSections(parseHtml(resp.text), url, host);
     },
 
-    /** See the file header and README for why this cannot hit `/search`
-     *  directly: every query-param shape tried renders the same empty
-     *  results shell server-side. `page` is 1-based, per the
-     *  `SourceSearchResult` contract — `fetchLibraryCatalog`'s own
-     *  internal walk of `/library` is 0-indexed (see `libraryPageUrl`)
-     *  but that is an implementation detail of how the catalogue is
-     *  built, not of how THIS method pages its own filtered results. */
-    async search(query: string, page = 1): Promise<SourceSearchResult> {
+    /** A single request to `/search?title=<query>` — see the file header
+     *  for why `title` and not one of the other four params tried. The
+     *  results page has no pagination of its own at all (no numeric
+     *  pager anywhere in the markup, and live requests with `&page=<n>`
+     *  tacked on return byte-identical results) — the same shape
+     *  extensions/kolnovel's own search hits (every match on one page,
+     *  no working "load more"), so `page` is ignored entirely and
+     *  `hasMore` is hardcoded `false` rather than trusted from anything
+     *  on the page. There is nothing here to memoise: each query is one
+     *  cheap, independent request, not a multi-page scan. */
+    async search(query: string): Promise<SourceSearchResult> {
       const trimmed = query.trim();
-      const pageNum = Math.max(1, page ?? 1);
       // An empty query is not "no results" in the refuse-loudly sense
       // this extension otherwise applies to a failed parse — it is a
       // real, correct empty result (nothing to search for), so it
       // returns a hollow SourceSearchResult on purpose rather than
-      // scanning the whole catalogue for nothing.
+      // hitting the site for nothing.
       if (!trimmed) {
-        return { cards: [], hasMore: false, query: trimmed, page: pageNum };
+        return { cards: [], hasMore: false, query: trimmed, page: 1 };
       }
-      host.log("info", `search(${trimmed}) page ${pageNum}`);
-      const catalog = await fetchLibraryCatalog();
-      const q = trimmed.toLowerCase();
-      const matches = catalog.filter((c) => c.title.toLowerCase().includes(q));
-      const start = (pageNum - 1) * SEARCH_PAGE_SIZE;
-      const cards = matches.slice(start, start + SEARCH_PAGE_SIZE);
-      return {
-        cards,
-        // Derived from whether more FILTERED matches exist past this
-        // page — not from whether `cards` is non-empty, and not from
-        // any pagination the /library scan itself reported (that
-        // pagination belongs to the raw catalogue walk, already fully
-        // consumed by the time this runs; it says nothing about how
-        // many of THOSE novels matched the query). A page that exhausts
-        // `matches` exactly is correctly `false`, including when
-        // `matches.length` is itself 0.
-        hasMore: matches.length > start + SEARCH_PAGE_SIZE,
-        query: trimmed,
-        page: pageNum,
-      };
+      const url = searchUrl(trimmed);
+      host.log("info", `search(${trimmed}) -> ${url}`);
+      const resp = await host.fetch(url);
+      const cards = parseSearchResults(parseHtml(resp.text), url);
+      return { cards, hasMore: false, query: trimmed, page: 1 };
     },
 
     async getNovel(url: string): Promise<SourceNovel> {

@@ -19,7 +19,7 @@ All seven `Source` methods are implemented: `canHandle`, `slugFromUrl`,
 |-----------------------|-----------|-------|
 | `canHandle`           | ✓         | exact hostname-set membership — `sunovels.com`, `www.sunovels.com` |
 | `getHomeSections`     | ✓         | scrapes `/` (NOT `/library`) — see below |
-| `search`              | ✓         | `/search` never renders server-side; falls back to scanning `/library` in memory — see below |
+| `search`              | ✓         | one request to `/search?title=<query>` — see below |
 | `getNovel`            | ✓         | scrapes `/novel/<slug>`; declares `hasLazyVolumes` — see below |
 | `getVolumeChapters`   | ✓         | walks the paginated `.chaptersList` tab — see below |
 | `getChapterContent`   | ✓         | scrapes `.chapter-content`, filtering a decoy paragraph trap — see below |
@@ -212,75 +212,84 @@ link is `/novel/<slug>/<n>` (three) and shares the same `/novel/` prefix
 novel anchors. `parseCardAnchor` requires exactly two segments so those
 chapter links are never mistaken for cards.
 
-**Cover images are lazy-loaded on every card grid.** The static HTML
-`host.fetch` sees always carries `src="/placeholder.gif"` for a card's
-`<img>` — confirmed against both the live homepage and `/library` — the
-real `/uploads/...` path only appears once client JS runs. A novel's own
-detail page (`getNovel`, `figure.cover img`) is NOT lazy this way; only
-the card grids are. `parseCardAnchor` treats the literal placeholder the
-same as "no `<img>` at all" (`coverUrl: undefined`) rather than shipping
-every home/search card with the same generic gif.
+**Cover images are lazy-loaded in the rendered DOM of every card grid.**
+The static HTML `host.fetch` sees always carries `src="/placeholder.gif"`
+for a card's `<img>` — confirmed against the live homepage, `/library`,
+and search results alike. A novel's own detail page (`getNovel`,
+`figure.cover img`) is NOT lazy this way; only the card grids are.
+`parseCardAnchor` treats the literal placeholder the same as "no `<img>`
+at all" (`coverUrl: undefined`) rather than shipping every card with the
+same generic gif — see "The cover gap, restated honestly" below for what
+IS actually available (a real image path per card, just not from the
+rendered DOM) and why it isn't extracted here.
 
 **A page with no recognizable sections at all is refused loudly**, naming
 the URL — the same "silent emptiness is indistinguishable from the site
 having nothing" principle `parseNovelPage`/`parseChapterRows`/
 `parseChapterLines` already apply to their own containers.
 
-## Search: `/search` never renders results server-side
+**A single bad section is logged, not silently dropped.** A section that's
+present but has no title, or that parsed to zero cards, is skipped so one
+markup change to a single rail doesn't take the rest of the homepage down
+— but `parseHomeSections` calls `host.log("warn", ...)` naming which
+section was skipped and why (no title vs. zero cards are two different
+messages) before moving on. `host` is threaded into `parseHomeSections`
+for exactly this — the same shape `extensions/kolnovel`'s own
+`parseHomeSections(doc, baseUrl, host)` already takes — since it is
+otherwise a pure DOM reader with nothing else to log through.
 
-Every query-parameter shape the brief lists was tried directly against
-the live site — `?q=`, `?query=`, `?s=`, `?term=` — and **all four**
-came back byte-for-byte the same: the page shell renders with an empty
-`<ul class="grid-list"></ul>` inside `<section class="searchSection">`,
-regardless of the query. The RSC payload does carry the query string
-(`"q":"عبد"`), so the page acknowledges it, but the actual results are
-fetched client-side after hydration — invisible to a static `host.fetch`,
-which never runs that JS.
+**View-more links carry a query string on three of the five rails.**
+`viewMoreUrl` absolutizes the section header's own "المزيد" link
+verbatim, including any `?category=<value>` it carries (`روايات إثارة`
+→ `/library?category=إثارة`, etc.) — only "أشهر الروايات" (bare
+`/library`) and "أحدث الفصول" (no link at all) are the exceptions.
 
-`search` therefore falls back to scanning `/library` — the site's one
-flat, paginated grid of every novel — and filtering/paging the merged
-result in memory, the same fallback `extensions/seanovel` uses over its
-own single-call catalogue. Three differences from seanovel's version,
-all because this site has no single "get everything" endpoint:
+## Search: `/search?title=<query>`
 
-- **`/library?page=<n>` is itself paginated, 0-indexed, ~24 rows/page** —
-  the same 0-indexed trap `getVolumeChapters`'s own chapter-list pagination
-  has. Bare `/library` and `/library?page=0` are byte-identical live.
-- **The total page count is read off the page's own pagination widget**
-  (the maximum `aria-label="Page <n>"` seen — `parseLibraryPageCount`),
-  not hardcoded — the catalogue was 59 pages / ~1,416 novels as of this
-  task and grows daily.
-- **The whole catalogue is walked once, sequentially, and memoised per
-  `Source` instance** (a closure-local `libraryCatalogPromise`, exactly
-  like seanovel's `cataloguePromise` — see that extension's own comment
-  for why it must NOT be module-scope). The first `search()` or
-  `getHomeSections()`-adjacent call after construction pays the cost of
-  the full scan (~60 sequential requests); every call after that on the
-  same instance is free. Pages are fetched sequentially, never
-  concurrently, for the same reason `getVolumeChapters` already gives.
+The brief's own candidate param list — `?q=`, `?query=`, `?s=`, `?term=`
+— was tried first, directly against the live site, and **all four**
+rendered the identical empty `<ul class="grid-list"></ul>` results shell
+regardless of query value. Rather than guess at a fifth name, the live
+search FORM was driven directly (typed a query into the input, submitted
+it) and the resulting URL read back: `?title=<query>`. That parameter
+**does** render real matching novel cards from a plain `host.fetch`, no
+client JS required — confirmed against multiple queries, including one
+with zero matches (a real, empty `<ul class="grid-list"></ul>`, not an
+error).
 
-**`hasMore` is computed from the FILTERED match count, not from the raw
-`/library` pagination.** The raw catalogue walk is fully consumed before
-`search` ever runs its own filter — its own pagination says nothing about
-how many of those novels matched the query. `search` synthesizes its own
-pagination (24 cards/page, unrelated to `/library`'s own page size) purely
-over the filtered `matches` array.
+`search` is therefore a single request: `searchUrl(query)` builds
+`/search?title=<query>`, `parseSearchResults` reads
+`.searchSection ul.grid-list` the same way every other card grid in this
+file is read (`collectNovelCards`, shared with `getHomeSections`). The
+results page has **no pagination of its own at all** — no numeric pager
+anywhere in the markup, and a live request with `&page=<n>` tacked on
+returns byte-identical results — the same shape `extensions/kolnovel`'s
+own search hits (every match on one page, no working "load more"), so
+`search` ignores any notion of a page argument entirely and hardcodes
+`hasMore: false` rather than trusting anything on the page for it. There
+is nothing to memoise or walk: each query is one cheap, independent
+request, not a multi-page scan — a materially different shape from the
+fetch-the-whole-catalogue-once-and-filter-locally fallback this
+extension's own earlier fix round had reached for before this endpoint
+was found (walking a large paginated listing and caching the merged
+result per `Source` instance), which no longer applies once the site's
+own search endpoint does the matching server-side.
 
 **An empty query is not the same "refuse loudly" case as a parse
 failure.** This extension has settled, across every task so far, on
 refusing loudly rather than returning hollow results when a page fails to
 parse — but a query that legitimately matches nothing is a real, correct
 empty result, and an empty query string is treated the same way:
-`{ cards: [], hasMore: false, query: "", page }`, no `/library` scan at
-all. What DOES still throw is a `/library` page whose grid (`ul.grid-list`)
-is missing entirely, mid-scan or on the first page — the same "blocked/
-errored despite HTTP 200" distinction `parseChapterRows` already draws for
-`.chaptersList`. The genuine end-of-catalogue shape (`ul.grid-list`
-present, zero rows — confirmed live one page past the last real one) and
-the blocked/malformed shape (`ul.grid-list` missing) are structurally
-different and both are pinned by fixtures: `tests/fixtures/library-empty.html`
-is a REAL capture of the former; the latter is synthesized inline HTML in
-the test file, the same way `parseNovelPage`/`parseChapterRows`/
+`{ cards: [], hasMore: false, query: "", page: 1 }`, no request at all.
+What DOES still throw is a search-results page whose grid
+(`.searchSection ul.grid-list`) is missing entirely — the same "blocked/
+errored despite HTTP 200" distinction `parseChapterRows` already draws
+for `.chaptersList`. The genuine "nothing matched" shape (grid present,
+zero rows — a real, captured query with no results) and the
+blocked/malformed shape (grid missing) are structurally different and
+both are pinned by fixtures: `tests/fixtures/search-empty.html` is a REAL
+capture of the former; the latter is synthesized inline HTML in the test
+file, the same way `parseNovelPage`/`parseChapterRows`/
 `parseChapterLines`'s own "Access denied" tests already are (an actual
 live block isn't reproducible on demand).
 
@@ -288,21 +297,104 @@ live block isn't reproducible on demand).
 
 - `tests/fixtures/home.html` — `/`, backs `getHomeSections`. Deliberately
   NOT named `library.html` per the brief's own suggested file list — see
-  above for why `/library` doesn't back this method.
-- `tests/fixtures/library.html` — `/library` (page 0), backs `search`'s
-  fallback and the direct `parseLibraryCards`/`parseLibraryPageCount`
-  tests.
-- `tests/fixtures/library-empty.html` — `/library?page=59`, one page past
-  the real last one; the genuine end-of-catalogue shape.
+  above for why `/library` doesn't back this method. Committed UNSTRIPPED
+  (full `<head>`, every `<script>` tag intact) except for its two ad
+  `<iframe>`s — see "happy-dom and fixture fidelity" below for why those
+  two, specifically, still had to go.
+- `tests/fixtures/search.html` — `/search?title=<query>`, a real query
+  with real matches. Backs `search`/`parseSearchResults`. Fully
+  unstripped, no exceptions needed (no ad iframes on this page).
+- `tests/fixtures/search-empty.html` — `/search?title=<query>` for a query
+  that matches nothing; the genuine "no results" shape. Also unstripped.
 
-All three had their `<head>` emptied and every `<script>` tag removed
-before being committed (matching this extension's other fixtures, whose
-`<head>` is likewise empty) — the live pages stream Next.js
-Suspense-boundary replacement scripts (`$RC(...)` calls) that happy-dom's
-`DOMParser` executes on parse, and which throw against a static snapshot
-that lacks the live element they expect to find. None of this extension's
-parsers read anything out of a `<script>` tag, so stripping them loses
-nothing they need.
+An earlier fix round on this task fetched, walked, and cached `/library`
+(a flat, paginated catalogue) as a fallback data source for `search`; that
+whole codepath — `libraryPageUrl`, `parseLibraryPageCount`,
+`parseLibraryCards`, the per-instance catalogue memo, and the
+`library.html`/`library-empty.html` fixtures backing them — is gone now
+that `/search?title=` answers the same need in one request. Nothing in
+the current implementation fetches `/library` at all; the site's own
+"المزيد" links to it are just URLs this extension builds and hands to the
+UI, never followed itself.
+
+### happy-dom and fixture fidelity
+
+A fixture captured straight off a live page is not inert under happy-dom
+the way it is in a real browser's `DOMParser`: happy-dom EXECUTES an
+inline `<script>` — including this Next.js site's own Suspense-boundary
+replacement calls (`$RC(...)`) — the moment it's parsed into a Document,
+even a detached one, and that throws because the parsed document has no
+`defaultView` for the script to find its own elements against. An earlier
+round of this task worked around this by stripping every `<script>` tag
+(and emptying `<head>`) out of the committed fixtures — which was the
+WRONG fix: it also destroyed the evidence needed to answer the cover-image
+question below, and the claim "no parser reads anything out of a
+`<script>` tag" it left behind in this README was false — `parseChaptersCount`
+(`src/index.ts`) regexes `chaptersCount":` straight out of `novel.html`'s
+own inline RSC payload script.
+
+The correct, surgical fix lives in the repo ROOT `vitest.config.ts`:
+`environmentOptions.happyDOM.settings.disableJavaScriptEvaluation` (plus
+`disableJavaScriptFileLoading`/`disableCSSFileLoading`/
+`disableComputedStyleRendering`, and `disableIframePageLoading` for this
+extension's two ad iframes specifically — each of those, when disabled,
+would otherwise try to dispatch a load-error against the same missing
+`defaultView` and throw exactly the way the inline scripts did).
+Extensions in this repo only ever READ the parsed tree — nothing here
+executes a `<script>`'s contents — so turning evaluation off changes
+nothing any extension can observe, and fixtures can now be captured and
+committed as genuine, unedited live pages. This is repo-wide (it also
+covers `extensions/cenele`'s and `extensions/kolnovel`'s own fixtures);
+the full monorepo suite was re-run after this change and nothing moved.
+
+The two ad `<iframe>`s on `home.html` are the one remaining exception:
+`disableIframePageLoading` unconditionally calls the same error-dispatch
+path regardless of setting value (there is no "handle as success" escape
+for iframes the way there is for script/CSS file loading), so it throws
+synchronously during parse either way. Those two iframes carry zero
+information any parser reads; removing just them (not the scripts around
+them) was the narrowest fix available.
+
+### The cover gap, restated honestly
+
+Every card grid this site renders — home sections, `/library`, search
+results alike — serves its cover images lazy-loaded: the static markup
+`host.fetch` sees always carries `src="/placeholder.gif"` for a card's
+`<img>`. An earlier round of this task treated this as settling the
+question ("covers only appear once client JS runs") — but that
+conclusion rested on fixtures whose RSC payload had just been stripped
+out, which is exactly the evidence that would have falsified it.
+
+With unstripped fixtures, the real answer is: **covers ARE present, per
+card, in the page's inline RSC payload** — confirmed live on both `/` and
+`/search?title=`. A library card's payload entry reads (escaped exactly
+as captured):
+
+```
+{\"href\":\"/novel/reverend-insanity\",\"children\":[[\"$\",\"$L17\",null,
+{\"src\":\"/uploads/thumbnail_Gu_Daoist_Master_328fe7f8b7.jpg\",...}
+```
+
+— the real `/uploads/...` path, sitting right next to the same card's
+`href` and title, in a fixed, escaped-JSON-ish shape (`\"key\":\"value\"`,
+matching Next.js's Flight/RSC wire format). Counts checked directly
+against the unstripped fixtures: the homepage's RSC payload carries
+exactly as many `href`/`src` pairs as the rendered DOM (111 unique novel
+hrefs, 54 real `/uploads/...` paths for the ~52 cards that have one) — no
+HIDDEN extra rows beyond what's rendered, so this is not a "cheaper
+catalogue" either, just the same data with a real image path instead of
+the placeholder.
+
+`collectNovelCards`/`parseCardAnchor` still only read the rendered DOM,
+so every card this extension returns — from all five home rails and
+every search result — has `coverUrl: undefined` today. That is a real,
+sized gap: extracting the cover would mean parsing the RSC payload's own
+wire format (matching an anchor's `href` to the nearest `src` in the same
+JSON-ish object, not a DOM query) and threading that data into
+`collectNovelCards` alongside the parsed document. Not implemented in
+this round — flagged here as a scoped follow-up, with the exact shape
+above, rather than left as a vague "todo" or, worse, a false claim that
+it can't be done.
 
 ## Fetch-only, no ambient authority
 
