@@ -239,7 +239,13 @@ export default function createSource(host: SourceHost): Source {
       }
 
       return {
-        title: data.title_ar,
+        // Same fallback chain as `cardFor`, and for the same reason: the
+        // payload is unvalidated JSON and the object guard above accepts
+        // `{}`, so `title_ar` can be undefined at runtime while the type
+        // says otherwise. A `SourceNovel` with `title: undefined` imports
+        // as a nameless book. Never a literal "Untitled" — the slug is
+        // always present (it came from the URL) and is a real handle.
+        title: data.title_ar || data.title_original || slug,
         originalTitle: data.title_original || undefined,
         // Never a literal "Unknown" — many catalogue rows have no author at
         // all, and the empty case is localized by the host at display time.

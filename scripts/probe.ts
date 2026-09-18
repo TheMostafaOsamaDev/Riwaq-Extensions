@@ -3,8 +3,12 @@
 // rather than by saved fixtures. Fixtures catch a parser regression; only
 // this catches the site changing underneath us.
 //
-//   pnpm probe cenele
-//   pnpm probe cenele "سيد"
+//   PROBE_ID=cenele pnpm probe
+//   PROBE_ID=cenele PROBE_QUERY="سيد" pnpm probe
+//
+// The id goes in the environment, not on the command line: `pnpm probe`
+// forwards its arguments to vitest, which reads them as test-file
+// filters, so `pnpm probe cenele` silently runs nothing at all.
 //
 // Transport is curl rather than global fetch: under happy-dom (which the
 // extensions need for DOMParser) `fetch` is happy-dom's own CORS-enforcing

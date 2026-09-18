@@ -479,6 +479,29 @@ describe("getNovel", () => {
     expect((await bare.getNovel("https://seanovel.org/novels/x")).author).toBe("");
   });
 
+  it("falls back to the original title, then the slug, when the payload carries no title_ar", async () => {
+    // `NovelDetailRow.title_ar` is typed as required, but the payload is
+    // unvalidated JSON and the object guard accepts anything object-shaped
+    // — `{}` included. Passing `data.title_ar` straight through therefore
+    // put `undefined` on a SourceNovel at runtime, importing as a nameless
+    // book. Same fallback chain as `cardFor`.
+    const withOriginal = createSource(
+      createTestHost({
+        responses: {
+          "/api/novel/x": JSON.stringify({ slug: "x", title_original: "Shadow Slave" }),
+        },
+      }),
+    );
+    expect((await withOriginal.getNovel("https://seanovel.org/novels/x")).title).toBe(
+      "Shadow Slave",
+    );
+
+    const bare = createSource(
+      createTestHost({ responses: { "/api/novel/x": "{}" } }),
+    );
+    expect((await bare.getNovel("https://seanovel.org/novels/x")).title).toBe("x");
+  });
+
   it("omits the origin meta row (keeping only the chapter-count row) when the API doesn't carry one", async () => {
     const bare = createSource(
       createTestHost({
