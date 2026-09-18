@@ -154,7 +154,7 @@ export default function createSource(host: SourceHost): Source {
       let nextId = 1;
       const volumes: SourceVolume[] = sorted.map((shell, i) => {
         const ourId = i + 1;
-        const count = shell.count ?? 0;
+        const count = shell.count;
         const startId = nextId;
         volumeIndex.set(ourId, {
           sourceNum: shell.num,
@@ -224,7 +224,7 @@ export default function createSource(host: SourceHost): Source {
         >();
         let nextId = 1;
         sorted.forEach((shell, i) => {
-          const c = shell.count ?? 0;
+          const c = shell.count;
           volumeIndex.set(i + 1, {
             sourceNum: shell.num,
             startId: nextId,
@@ -300,10 +300,27 @@ export default function createSource(host: SourceHost): Source {
       // in the volume listing share the same numeric id (lets the
       // detail-view click hand off to the chapter reader). Chapters
       // present in the search but missing from the cached map are
-      // assigned synthetic ids beyond the highest existing one — they
-      // still render but won't deep-link until the user fetches the
-      // owning volume.
+      // assigned synthetic ids beyond the highest id any volume will
+      // ever assign — they still render but won't deep-link until the
+      // user fetches the owning volume.
+      //
+      // The ceiling is computed from `volumeIndex`, NOT from
+      // `chapterIdByUrl`. chapterIdByUrl is empty until a volume is
+      // actually expanded, so walking it alone starts the counter at 0
+      // and hands out 1, 2, 3 … — precisely volume 1's real chapter ids.
+      // A search run before any expand (the common case: the chapter
+      // search input sits above a collapsed accordion) therefore minted
+      // ids that collided with real chapters, and the collision only
+      // surfaced later, when the user expanded volume 1 and two
+      // different chapters claimed the same id. volumeIndex is populated
+      // by getNovel from the meta_only response and covers every chapter
+      // the novel has, expanded or not, so `startId + count - 1` across
+      // it is the real ceiling and is always known here.
       let nextSynthetic = 0;
+      for (const entry of cached.volumeIndex.values()) {
+        const lastId = entry.startId + entry.count - 1;
+        if (lastId > nextSynthetic) nextSynthetic = lastId;
+      }
       for (const id of cached.chapterIdByUrl.values()) {
         if (id > nextSynthetic) nextSynthetic = id;
       }
@@ -439,13 +456,13 @@ export function parseSearchPage(
 
 // ── chapter-list AJAX ──────────────────────────────────────────────────────
 
+/** One volume as the `meta_only` AJAX describes it. This is the only
+ *  place volumes come from — the redesigned novel page ships no volume
+ *  markup at all — so `count` is always known. */
 interface VolumeShell {
   num: number;
   label: string;
-  /** Chapter count when known (always present on responses from the
-   *  meta_only AJAX; absent for shells parsed straight out of the
-   *  page HTML, which doesn't include counts). */
-  count?: number;
+  count: number;
 }
 
 interface VolumeMetaResponse {
@@ -655,9 +672,6 @@ interface ParsedNovelPage {
   meta: SourceNovelMeta[];
   mangaId: string;
   chaptersNonce: string;
-  /** Pre-rendered volume shells from the page HTML. May be empty when
-   *  the theme decides to defer rendering until the chapters tab opens. */
-  volumeShells: VolumeShell[];
 }
 
 export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage {
@@ -727,7 +741,6 @@ export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage 
   }
 
   const description = extractDescription(doc);
-  const volumeShells = extractVolumeShells(doc);
 
   return {
     title,
@@ -740,7 +753,6 @@ export function parseNovelPage(doc: Document, pageUrl: string): ParsedNovelPage 
     meta,
     mangaId: config.postId,
     chaptersNonce: config.chaptersNonce,
-    volumeShells,
   };
 }
 
@@ -760,14 +772,6 @@ function extractDescription(doc: Document): string | undefined {
   if (!text) return undefined;
   const cleaned = text.replace(/Read more$/i, "").trim();
   return cleaned.length > 1500 ? cleaned.slice(0, 1500).trim() + "…" : cleaned;
-}
-
-/** The redesigned novel page ships no volume markup — the chapters tab
- *  loads volumes over AJAX. getNovel gets the canonical list from
- *  fetchVolumeMeta's `meta_only=1` call, so there is nothing to scrape
- *  here. Kept (returning empty) so ParsedNovelPage's shape is stable. */
-function extractVolumeShells(_doc: Document): VolumeShell[] {
-  return [];
 }
 
 // ── homepage parsing ───────────────────────────────────────────────────────

@@ -117,6 +117,20 @@ limit=80
 
 We use `items` (the structured array) rather than `html`.
 
+**Chapter ids for search hits.** A hit whose URL is already in the
+per-novel `chapterIdByUrl` map (because its volume has been expanded)
+reuses that id, so clicking it hands off to the chapter reader. A hit
+whose volume has NOT been expanded gets a synthetic id allocated **above
+the highest id any volume will ever assign** — computed from
+`volumeIndex` (`startId + count - 1` across every volume), which
+`getNovel` populates from the `meta_only` response and which is therefore
+known before any expand. It must not be computed from `chapterIdByUrl`:
+that map is empty until a volume is expanded, and the chapter-search
+input sits above a *collapsed* accordion, so a counter seeded from it
+would start at 0 and hand out 1, 2, 3 … — exactly volume 1's real
+chapter ids, with the collision only surfacing later when the user
+expanded volume 1.
+
 ## Nonces
 
 WordPress generates per-session, per-action nonces. They are embedded

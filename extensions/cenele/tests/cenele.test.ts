@@ -1162,6 +1162,47 @@ describe("searchChapters (in-novel chapter search AJAX)", () => {
     });
   });
 
+  it("never mints a synthetic id that a volume will later claim, even before any expand", async () => {
+    // The chapter-search input sits above a COLLAPSED accordion, so a
+    // search before any volume is expanded is the common case, not an
+    // edge one. chapterIdByUrl is empty until an expand, so a counter
+    // seeded only from it starts at 0 and hands out 1, 2, 3 … — exactly
+    // volume 1's real chapter ids. The collision only surfaced later,
+    // when the user expanded volume 1 and two different chapters claimed
+    // the same id.
+    const source = createSource(
+      ajaxHost({ pages: { [NOVEL_URL]: novelHtml }, ajax: defaultAjax }),
+    );
+    const novel = await source.getNovel(NOVEL_URL);
+
+    // No getVolumeChapters call anywhere before this.
+    const hits = await source.searchChapters!(NOVEL_URL, "فصل");
+    expect(hits).toHaveLength(2);
+
+    // META_VOLUMES declares 3 + 2 + 1 = 6 chapters, so ids 1..6 are all
+    // spoken for. Every synthetic id must sit above that.
+    const declared = novel.volumes.reduce((n, v) => n + (v.chapterCount ?? 0), 0);
+    expect(declared).toBe(6);
+    for (const hit of hits) {
+      expect(hit.id).toBeGreaterThan(declared);
+    }
+    // And they must be distinct from each other.
+    expect(new Set(hits.map((h) => h.id)).size).toBe(hits.length);
+
+    // Now expand the volumes that really own those ids and confirm
+    // nothing overlaps.
+    const real = [
+      ...(await source.getVolumeChapters!(NOVEL_URL, novel.volumes[0])),
+      ...(await source.getVolumeChapters!(NOVEL_URL, novel.volumes[1])),
+      ...(await source.getVolumeChapters!(NOVEL_URL, novel.volumes[2])),
+    ];
+    const realIds = new Set(real.map((c) => c.id));
+    expect(realIds.size).toBe(6);
+    for (const hit of hits) {
+      expect(realIds.has(hit.id)).toBe(false);
+    }
+  });
+
   it("returns an empty list for a blank query without calling the site", async () => {
     const calls: Call[] = [];
     const source = createSource(
