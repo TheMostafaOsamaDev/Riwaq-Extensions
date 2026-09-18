@@ -186,6 +186,17 @@ is expected to navigate a card click to a novel detail view, not a chapter.
 
 ## Home section shapes
 
+**Section ids are derived from the section, never from its position.**
+`SourceSection.id` is contracted to be stable and useful for caching.
+`.trendarea` is `trending` and `.homehot` is `hot` (one of each per page);
+a `.bixbox` takes `bixbox-` plus the `order`/`status`/`type` query of its
+own "see more" link (`/series/?status=&order=update` → `bixbox-update`),
+falling back to a slug of its heading. A document-order `home-<idx>` —
+which this used to emit, and which was incremented only for sections that
+survived the zero-cards filter — reindexed every rail below any rail that
+happened to render nothing that run. `extensions/cenele` abandoned the
+same scheme for the same reason and keys off each section's CSS class.
+
 | Class        | Cards under         | Notes |
 |--------------|----------------------|-------|
 | `.trendarea` | `.trendlist`         | "Trending" hero list; falls back to the extension's own `trendingFallback` string when the theme omits a heading |

@@ -39,16 +39,75 @@ export function parseHomeSections(doc: Document, baseUrl: string, host: SourceHo
   // Each shape has its own card extractor; the union of their outputs
   // becomes the SourceSection.cards array.
   const sections: SourceSection[] = [];
-  let idx = 0;
+  const usedIds = new Set<string>();
   const candidates = doc.querySelectorAll(".trendarea, .homehot, .bixbox");
   for (const el of Array.from(candidates)) {
-    const section = parseSectionElement(el, `home-${idx}`, baseUrl, host);
+    const section = parseSectionElement(el, sectionIdFor(el), baseUrl, host);
     if (section && section.cards.length > 0) {
-      sections.push(section);
-      idx++;
+      sections.push({ ...section, id: uniqueSectionId(section.id, usedIds) });
     }
   }
   return sections;
+}
+
+/** Collapse a heading into a stable, printable id fragment: keep letters
+ *  and digits of ANY script (these headings are Arabic) and turn every run
+ *  of anything else into one dash. */
+function slugify(text: string): string {
+  return text
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+}
+
+/** A section's `id`, derived from WHAT THE SECTION IS rather than from
+ *  where it happened to land in the list.
+ *
+ *  `SourceSection.id` is contracted to be a stable identifier useful for
+ *  caching (see @riwaq/extension-api). A document-order `home-${idx}` —
+ *  which this used to emit, incremented only for sections that survived
+ *  the zero-cards filter — is not: it reindexes every section below any
+ *  row that happened to render no cards on a given run, so yesterday's
+ *  `home-2` is today's `home-1` and every cache keyed on it is silently
+ *  wrong. extensions/cenele abandoned exactly this scheme for exactly
+ *  this reason, and keys off each section's own CSS class instead.
+ *
+ *  The two singleton shapes get their shape name. Everything else is a
+ *  `.bixbox`, of which the homepage renders several, so those take a
+ *  further discriminator: the `order`/`status` query of the section's own
+ *  "see more" link (the site's own name for what the row lists), falling
+ *  back to a slug of the heading. */
+function sectionIdFor(el: Element): string {
+  if (el.classList.contains("trendarea")) return "trending";
+  if (el.classList.contains("homehot")) return "hot";
+  const viewMoreHref =
+    (el.querySelector(".releases .vl") as HTMLAnchorElement | null)?.getAttribute("href") ?? "";
+  if (viewMoreHref) {
+    // Not resolved against baseUrl: only the query matters here, and a
+    // dummy origin keeps this independent of which mirror host we were
+    // handed.
+    try {
+      const params = new URL(viewMoreHref, "https://kolnovel.invalid/").searchParams;
+      const key = params.get("order") || params.get("status") || params.get("type");
+      if (key) return `bixbox-${slugify(key)}`;
+    } catch {
+      // Fall through to the heading slug.
+    }
+  }
+  const heading = el.querySelector(".releases h1, .releases h2, .releases h3");
+  return `bixbox-${slugify(sanitizeText(heading?.textContent)) || "section"}`;
+}
+
+/** Two sections could in principle derive the same key (two rails with the
+ *  same heading or the same `order=`). Ids must stay distinct within one
+ *  response, so a collision gets a numeric suffix — deterministic, and
+ *  only ever affecting the duplicate. */
+function uniqueSectionId(base: string, used: Set<string>): string {
+  let id = base;
+  let n = 2;
+  while (used.has(id)) id = `${base}-${n++}`;
+  used.add(id);
+  return id;
 }
 
 function parseSectionElement(

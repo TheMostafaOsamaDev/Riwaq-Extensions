@@ -485,6 +485,58 @@ function coverMapOrWarn(html: string, pageUrl: string, host: SourceHost): Map<st
   }
 }
 
+/** Collapse a heading into a stable, printable id fragment: keep letters
+ *  and digits of ANY script (these headings are Arabic) and turn every run
+ *  of anything else into one dash. */
+function slugify(text: string): string {
+  return text
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+}
+
+/** A section's `id`, derived from WHAT THE SECTION IS rather than from
+ *  where it happened to land in the list.
+ *
+ *  `SourceSection.id` is contracted to be a stable identifier useful for
+ *  caching (see @riwaq/extension-api). A document-order `home-${idx}` —
+ *  which this used to emit, computed AFTER empty sections were filtered
+ *  out — is not: it reindexes every section below any row that happened to
+ *  render zero cards on a given run, so yesterday's `home-2` is today's
+ *  `home-1` and every cache keyed on it is silently wrong. extensions/
+ *  cenele abandoned exactly this scheme for exactly this reason.
+ *
+ *  Preferred key is the `category` param of the section's own "المزيد"
+ *  link (`/library?category=كوري`), which is the site's own name for what
+ *  the row contains. Sections with no category link (the "most popular"
+ *  rail links a bare `/library`; the "latest chapters" rail links nothing
+ *  at all) fall back to a slug of their heading — still tied to the
+ *  section's identity rather than to its position. */
+export function sectionIdFor(title: string, viewMoreHref: string | null | undefined): string {
+  if (viewMoreHref) {
+    try {
+      const category = new URL(viewMoreHref, BASE_URL).searchParams.get("category");
+      if (category) return `category-${slugify(category)}`;
+    } catch {
+      // A malformed href is not worth failing a homepage over — fall
+      // through to the title slug below.
+    }
+  }
+  return slugify(title) || "section";
+}
+
+/** Two sections could in principle derive the same key (two rails with the
+ *  same heading, or the same category linked twice). Ids must stay
+ *  distinct within one response, so a collision gets a numeric suffix —
+ *  deterministic, and only ever affecting the duplicate. */
+function uniqueSectionId(base: string, used: Set<string>): string {
+  let id = base;
+  let n = 2;
+  while (used.has(id)) id = `${base}-${n++}`;
+  used.add(id);
+  return id;
+}
+
 /** Scoped to `section.home-section` — the homepage renders each themed
  *  row ("أشهر الروايات", "روايات إثارة", "روايات يابانية", "روايات كورية",
  *  "أحدث الفصول" as of this task) as one of these, in document order.
@@ -521,7 +573,7 @@ function coverMapOrWarn(html: string, pageUrl: string, host: SourceHost): Map<st
  *  `parseHomeSections(doc, baseUrl, host)` already takes. */
 export function parseHomeSections(doc: Document, pageUrl: string, host: SourceHost): SourceSection[] {
   const sections: SourceSection[] = [];
-  let idx = 0;
+  const usedIds = new Set<string>();
   for (const sec of Array.from(doc.querySelectorAll("section.home-section"))) {
     const title = sanitizeText(sec.querySelector(".section-header h3")?.textContent);
     if (!title) {
@@ -541,12 +593,11 @@ export function parseHomeSections(doc: Document, pageUrl: string, host: SourceHo
       .querySelector('.section-header a[href^="/library"]')
       ?.getAttribute("href");
     sections.push({
-      id: `home-${idx}`,
+      id: uniqueSectionId(sectionIdFor(title, viewMoreHref), usedIds),
       title,
       cards,
       viewMoreUrl: viewMoreHref ? absoluteUrl(viewMoreHref, BASE_URL) : undefined,
     });
-    idx++;
   }
 
   if (sections.length === 0) {

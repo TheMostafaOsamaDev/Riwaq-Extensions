@@ -194,6 +194,17 @@ document order today, but only by luck. `viewMoreUrl` reads the section
 header's own "المزيد" (more) link when it has one; "أحدث الفصول" doesn't,
 so its `viewMoreUrl` is `undefined`.
 
+**Section ids are derived from the section, never from its position.**
+`SourceSection.id` is contracted to be stable and useful for caching. The
+id is the `category` param of the section's own "المزيد" link when it has
+one (`/library?category=كوري` → `category-كوري`), and a slug of the
+heading otherwise (`أشهر الروايات` → `أشهر-الروايات`). A document-order
+`home-<idx>` — which this used to emit, and which was incremented only
+for sections that survived the zero-cards filter — reindexed every rail
+below any rail that happened to render nothing that run, so yesterday's
+`home-2` became today's `home-1` and every cache keyed on it was quietly
+wrong. `extensions/cenele` abandoned the same scheme for the same reason.
+
 **A card can be split across two anchors.** The "أحدث الفصول" rail wraps
 each novel's cover in one bare `<a class="cover" href="/novel/<slug>">`
 with no heading inside it at all, immediately followed by a SEPARATE

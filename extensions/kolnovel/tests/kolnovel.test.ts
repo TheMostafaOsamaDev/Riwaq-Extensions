@@ -94,6 +94,78 @@ describe("parseHomeSections", () => {
     expect(sections).toHaveLength(1);
     expect(sections[0].viewMoreUrl).toBe("https://kolnovel.com/series/?status=&order=update");
   });
+
+  it("keys a section's id off the section's shape and its own 'see more' query, not its position", () => {
+    // SourceSection.id is contracted to be a stable identifier useful for
+    // caching. `home-${idx}` — which this used to emit, incremented only
+    // for sections that SURVIVED the zero-cards filter — reindexed every
+    // section below any rail that happened to render nothing that run.
+    const doc = new DOMParser().parseFromString(homeHtml, "text/html");
+    expect(parseHomeSections(doc, BASE, createTestHost()).map((s) => s.id)).toEqual([
+      "bixbox-update",
+    ]);
+  });
+
+  it("names the two singleton section shapes after the shape itself", () => {
+    const card = (slug: string) =>
+      `<a href="https://kolnovel.com/series/${slug}/"><img src="/c.jpg"></a>`;
+    const doc = new DOMParser().parseFromString(
+      `<div class="trendarea"><div class="topareatitle">رائج</div>` +
+        `<div class="trendlist"><div class="thumbtr">${card("a")}</div>` +
+        `<div class="trenti"><a>A</a></div></div></div>` +
+        `<div class="homehot"><div class="topareatitle">ساخن</div>` +
+        `<div class="hotoday"><div class="inhotoday">` +
+        `<a href="https://kolnovel.com/series/b/"></a></div>` +
+        `<div class="todtitle">B</div></div></div>`,
+      "text/html",
+    );
+    expect(parseHomeSections(doc, BASE, createTestHost()).map((s) => s.id)).toEqual([
+      "trending",
+      "hot",
+    ]);
+  });
+
+  it("keeps a .bixbox id unchanged when an earlier section renders no cards", () => {
+    const bixbox = (heading: string, order: string, slug: string) =>
+      `<div class="bixbox"><div class="releases"><h3>${heading}</h3>` +
+      `<a class="vl" href="/series/?status=&order=${order}">See more</a></div>` +
+      `<div class="listupd"><article class="bs"><div class="bsx">` +
+      `<a href="https://kolnovel.com/series/${slug}/"><div class="tt">` +
+      `<h4 class="ntitle">${slug}</h4></div></a></div></article></div></div>`;
+    // A .bixbox that parses to zero cards — it is dropped either way; what
+    // matters is that the rails after it keep their ids.
+    const emptyBixbox =
+      `<div class="bixbox"><div class="releases"><h3>Empty</h3></div>` +
+      `<div class="listupd"></div></div>`;
+
+    const ids = (html: string) =>
+      parseHomeSections(
+        new DOMParser().parseFromString(html, "text/html"),
+        BASE,
+        createTestHost(),
+      ).map((s) => s.id);
+
+    expect(ids(bixbox("A", "popular", "a") + bixbox("B", "update", "b"))).toEqual([
+      "bixbox-popular",
+      "bixbox-update",
+    ]);
+    expect(ids(emptyBixbox + bixbox("A", "popular", "a") + bixbox("B", "update", "b"))).toEqual([
+      "bixbox-popular",
+      "bixbox-update",
+    ]);
+  });
+
+  it("falls back to the heading slug for a .bixbox whose 'see more' link carries no usable query", () => {
+    const html =
+      `<div class="bixbox"><div class="releases"><h3>Latest Updates</h3></div>` +
+      `<div class="listupd"><article class="bs"><div class="bsx">` +
+      `<a href="https://kolnovel.com/series/a/"><div class="tt">` +
+      `<h4 class="ntitle">A</h4></div></a></div></article></div></div>`;
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(parseHomeSections(doc, BASE, createTestHost()).map((s) => s.id)).toEqual([
+      "bixbox-latest-updates",
+    ]);
+  });
 });
 
 describe("parseVolumes", () => {

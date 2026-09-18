@@ -1098,19 +1098,79 @@ describe("parseHomeSections", () => {
     }
   });
 
-  // Pins the site's actual section titles and their document-order ids —
+  // Pins the site's actual section titles and the ids derived from them —
   // titles are exempt from this task's "no site prose in assertions" rule
   // (they're the thing under test here, same as parseNovelPage's own
   // "عبد الظل" title assertions elsewhere in this file).
-  it("assigns ids in document order and reads each section's own title", () => {
+  it("reads each section's own title and keys its id off what the section IS", () => {
     const sections = parseHomeSections(parseHtml(homeHtml), HOME_URL, host);
-    expect(sections.map((s) => s.id)).toEqual(sections.map((_, i) => `home-${i}`));
     expect(sections.map((s) => s.title)).toEqual([
       "أشهر الروايات",
       "روايات إثارة",
       "روايات يابانية",
       "روايات كورية",
       "أحدث الفصول",
+    ]);
+    // Three of these rails link `/library?category=…`; that param is the
+    // site's own name for what the row holds. The two that don't (a bare
+    // `/library`, and "latest chapters" with no link at all) fall back to
+    // their heading. Nothing here is positional.
+    expect(sections.map((s) => s.id)).toEqual([
+      "أشهر-الروايات",
+      "category-إثارة",
+      "category-ياباني",
+      "category-كوري",
+      "أحدث-الفصول",
+    ]);
+  });
+
+  // The defect the ids above replace: `home-${idx}` was incremented only
+  // for sections that SURVIVED the zero-cards filter, so a rail rendering
+  // no cards today shifted the id of every rail below it. SourceSection.id
+  // is contracted to be stable and useful for caching.
+  it("keeps a section's id unchanged when an earlier section renders no cards", () => {
+    const rail = (title: string, href: string, novel: string) =>
+      `<section dir="rtl" class="home-section">` +
+      `<div class="section-header"><h3>${title}</h3>` +
+      `<a href="${href}">المزيد</a></div>` +
+      `<div class="section-body"><a href="/novel/${novel}"><h4>${novel}</h4></a></div>` +
+      `</section>`;
+    // Same two real rails in both runs; in the second, a rail ABOVE them
+    // has stopped rendering cards and is dropped.
+    const emptyRail =
+      `<section dir="rtl" class="home-section">` +
+      `<div class="section-header"><h3>Empty Today</h3></div>` +
+      `<div class="section-body"></div></section>`;
+
+    const full = parseHomeSections(
+      parseHtml(rail("A", "/library?category=korean", "a") + rail("B", "/library?category=japanese", "b")),
+      HOME_URL,
+      host,
+    );
+    const shifted = parseHomeSections(
+      parseHtml(
+        emptyRail + rail("A", "/library?category=korean", "a") + rail("B", "/library?category=japanese", "b"),
+      ),
+      HOME_URL,
+      host,
+    );
+
+    expect(full.map((s) => s.id)).toEqual(["category-korean", "category-japanese"]);
+    expect(shifted.map((s) => s.id)).toEqual(full.map((s) => s.id));
+  });
+
+  it("disambiguates two sections that would otherwise derive the same id", () => {
+    const doc = parseHtml(
+      `<section dir="rtl" class="home-section">` +
+        `<div class="section-header"><h3>Same Name</h3></div>` +
+        `<div class="section-body"><a href="/novel/a"><h4>A</h4></a></div></section>` +
+        `<section dir="rtl" class="home-section">` +
+        `<div class="section-header"><h3>Same Name</h3></div>` +
+        `<div class="section-body"><a href="/novel/b"><h4>B</h4></a></div></section>`,
+    );
+    expect(parseHomeSections(doc, HOME_URL, host).map((s) => s.id)).toEqual([
+      "same-name",
+      "same-name-2",
     ]);
   });
 
