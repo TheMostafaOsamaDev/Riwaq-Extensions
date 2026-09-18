@@ -355,7 +355,13 @@ export interface Source {
    *  a host-fetchable URL (e.g. images extracted from a downloaded PDF), the
    *  importer calls resolveImage(content) to obtain the bytes out-of-band
    *  instead of host.fetchBytes. Return null to fall back to URL fetch.
-   *  The returned shape matches the importer's internal DownloadedImage. */
+   *  The returned shape matches the importer's internal DownloadedImage.
+   *
+   *  Lifetime: a ref minted during one `getChapterContent` call is valid
+   *  until the next `getChapterContent` call on the same Source instance.
+   *  Resolve a chapter's images before asking for the next chapter — a
+   *  source is free to drop the previous chapter's refs, and one that
+   *  holds every chapter's images for the life of the instance is leaking. */
   resolveImage?(
     ref: string,
   ): Promise<{ bytes: Uint8Array; mimeType: string; extension: string } | null>;

@@ -60,7 +60,8 @@ const AJAX_URL = `${BASE_URL}/wp-admin/admin-ajax.php`;
 export default function createSource(host: SourceHost): Source {
   // Images extracted from chapter PDFs during getChapterContent, keyed by
   // the ref emitted in image SourceLines. The host reads them back through
-  // resolveImage. Cleared per novel so the map doesn't grow across imports.
+  // resolveImage. Cleared at the start of every PDF extraction (and in
+  // getNovel) so the map holds one chapter's images, not a session's.
   const imageStore = new Map<string, ExtractedImage>();
   let lastNovelTitle: string | undefined;
 
@@ -130,6 +131,15 @@ export default function createSource(host: SourceHost): Source {
       if (htmlLines.length > 0) return htmlLines;
 
       host.log("debug", `no HTML body — falling back to PDF for ${chapter.url}`);
+      // Drop the previous call's refs before minting new ones. getNovel is
+      // the only other place this is cleared, and a reader that opens
+      // chapter after chapter from a snapshot never calls getNovel at all —
+      // so without this the map grows for the whole session, holding every
+      // image of every PDF chapter ever opened. Clearing here is safe
+      // because a ref is only ever resolved between the getChapterContent
+      // call that minted it and the next one on this instance (see
+      // Source.resolveImage in @riwaq/extension-api).
+      imageStore.clear();
       const postId = extractPostId(chapter.url);
       if (!postId) {
         throw new Error(`KolNovel: couldn't find a post id in chapter URL: ${chapter.url}`);
@@ -260,8 +270,12 @@ async function requestPdfUrl(
  *  a maintainer reading it later, need to be able to tell an HTML loader page
  *  from an empty body from a CDN challenge without re-running the download. */
 function assertPdf(bytes: Uint8Array, chapterUrl: string): void {
+  // `>= 4`, not `> 4`: the check reads bytes 0-3, so four bytes is exactly
+  // enough to evaluate it. `> 4` was right only by accident — no 4-byte
+  // file is a valid PDF, so nothing was ever wrongly rejected — but the
+  // bound should say what the code below actually needs.
   const ok =
-    bytes.length > 4 &&
+    bytes.length >= 4 &&
     bytes[0] === 0x25 && // %
     bytes[1] === 0x50 && // P
     bytes[2] === 0x44 && // D

@@ -74,7 +74,8 @@ falls back to the site's token-gated download flow:
    failures** below for why that is not paranoia.
 2. `GET` that tokenized URL → the PDF bytes. `assertPdf` checks the `%PDF`
    magic bytes before proceeding, since an expired/invalid token makes the
-   endpoint return an HTML error/login page instead of a file. This is a
+   endpoint return an HTML error/login page instead of a file. The length
+   bound is `>= 4`, which is what reading bytes 0-3 actually needs. This is a
    magic-byte check and not a `Content-Type` check because the extension
    cannot see the content type at all: `SourceHost.fetchBytes` returns a bare
    `Promise<Uint8Array>` with no headers beside it (only the text `fetch`
@@ -90,14 +91,19 @@ falls back to the site's token-gated download flow:
    `imageStore` map; `resolveImage(ref)` reads them back out for the host to
    package. This mirrors how any source emits an image `SourceLine` whose
    `content` is not a directly-fetchable URL — see `resolveImage` on
-   `Source` in `@riwaq/extension-api`.
+   `Source` in `@riwaq/extension-api`. The map is cleared at the start of
+   every PDF extraction, so it holds one chapter's images rather than a
+   session's: a ref is valid only until the next `getChapterContent` call on
+   the same instance, which is the lifetime `Source.resolveImage` documents.
+   It used to be cleared only in `getNovel`, which a reader working through
+   an already-imported snapshot never calls.
 
 There is no length heuristic gating the HTML-vs-PDF choice: a real chapter's
 HTML body can legitimately be short or image-heavy, and guessing from length
 would wrongly route those to the PDF endpoint (which fails for HTML-only
 chapters). "Zero lines extracted" is the only trigger for the PDF fallback.
 
-### Never a hollow chapter
+### Never a hollow chapter, and never a hollow novel
 
 If the HTML body parses to nothing *and* the PDF extracts to nothing,
 `getChapterContent` **throws**, naming the chapter URL. It does not return an
@@ -106,6 +112,29 @@ reader as a blank page, indistinguishable from a chapter that is genuinely
 empty — there is no layer above this one that can tell the difference, so the
 refusal has to happen here. A genuinely empty *search* result is a different
 thing and returns empty without throwing.
+
+`parseNovelPage` applies the same ruling to a novel page: `title` falls back
+to `""`, `tags` to `[]` and `volumes` to `[]`, so a blocked or errored page
+served with HTTP 200 would otherwise produce a structurally valid but
+completely empty `SourceNovel` that imports as a book with no chapters. It
+**throws** when no title can be read, naming the page URL. A real novel page
+that simply has no chapters listed yet is *not* refused — that is a page the
+site legitimately serves.
+
+### Dedup is adjacency-only, not whole-chapter
+
+`parseChapterContent` dedups a line only against the immediately-preceding
+line of the same type, not against every line seen earlier in the chapter.
+A whole-chapter `Set` silently deletes a legitimately repeated short
+paragraph — a one-word interjection reused at unrelated points in the
+narrative — from the imported book. That is not hypothetical: `extensions/
+cenele` hit exactly this on a live capture (three unrelated one-word
+paragraphs, all identical, two of them dropped) and its README records it.
+No loss is demonstrated in kolnovel's own live capture — `chapter-live.html`
+yields 163 kept paragraphs, all distinct, so both strategies produce
+identical output there — so this is the known-good fix ported before the
+site hands us the case. See the comment at the dedup site for the known
+limitation the trade-off accepts, and the test that pins the difference.
 
 ### Token-flow failures
 
@@ -183,7 +212,7 @@ specifically to guard against this being "restored" by a future edit.
 
 | Field          | Selector |
 |----------------|----------|
-| Title          | `.sertobig h1.entry-title` (falls back to a bare `h1.entry-title`) |
+| Title          | `.sertobig h1.entry-title` (falls back to a bare `h1.entry-title`; **no title at all is a refusal**, see [Never a hollow chapter, and never a hollow novel](#never-a-hollow-chapter-and-never-a-hollow-novel)) |
 | Original title | `.sertobig .alter` |
 | Status         | `.sertobig .sertostat > span` — kept as the site's own text; a host UI renders it verbatim as a badge |
 | Cover image    | `.sertobig .sertothumb img` |

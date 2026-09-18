@@ -7,6 +7,7 @@ import {
   collectHiddenClasses,
   parseChapterContent,
   parseHomeSections,
+  parseNovelPage,
   parseSearchResults,
   parseVolumes,
 } from "../src/theme";
@@ -181,6 +182,136 @@ describe("parseChapterContent", () => {
     expect(parseChapterContent(doc, "https://kolnovel.com")).toEqual([
       { type: "text", content: "نص الفصل هنا." },
     ]);
+  });
+
+  // SYNTHETIC. chapter-live.html shows no loss from either dedup strategy
+  // (163 kept paragraphs, 163 distinct), so the live capture cannot tell
+  // them apart — this snippet is what pins the difference. The failure it
+  // guards against is not hypothetical: extensions/cenele hit it on a real
+  // capture, where a whole-chapter Set collapsed three unrelated one-word
+  // paragraphs into one and deleted two real lines from an imported book
+  // (extensions/cenele/README.md records it).
+  it("dedups only against the immediately-preceding line of the same type, never the whole chapter", () => {
+    const doc = new DOMParser().parseFromString(
+      `<div class="epcontent">
+        <p>لكن…</p>
+        <p>لكن…</p>
+        <p>سطر حقيقي في منتصف الفصل.</p>
+        <p>لكن…</p>
+        <img src="https://kolnovel.com/wp-content/uploads/2024/02/a.jpg">
+        <img src="https://kolnovel.com/wp-content/uploads/2024/02/a.jpg">
+        <img src="https://kolnovel.com/wp-content/uploads/2024/02/b.jpg">
+        <img src="https://kolnovel.com/wp-content/uploads/2024/02/a.jpg">
+      </div>`,
+      "text/html",
+    );
+
+    expect(parseChapterContent(doc, "https://kolnovel.com")).toEqual([
+      // Back-to-back repeat: one copy survives.
+      { type: "text", content: "لكن…" },
+      { type: "text", content: "سطر حقيقي في منتصف الفصل." },
+      // The SAME text again, now separated by a real line — this one must
+      // survive. A whole-chapter Set drops it, silently.
+      { type: "text", content: "لكن…" },
+      { type: "image", content: "https://kolnovel.com/wp-content/uploads/2024/02/a.jpg" },
+      { type: "image", content: "https://kolnovel.com/wp-content/uploads/2024/02/b.jpg" },
+      { type: "image", content: "https://kolnovel.com/wp-content/uploads/2024/02/a.jpg" },
+    ]);
+  });
+});
+
+// ── novel-page parsing ──────────────────────────────────────────────────────
+//
+// SYNTHETIC markup, not a live capture: this extension ships no novel-page
+// fixture and the rule for this branch is that fixtures are captured from
+// the live site, never invented — so rather than fabricate a 200 KB "live"
+// page, these use the smallest markup that exercises each selector
+// parseNovelPage actually reads, in the shapes ../src/theme.ts documents.
+// Until now parseNovelPage had no test at all.
+describe("parseNovelPage", () => {
+  const NOVEL_URL = "https://kolnovel.com/series/silent-shadows/";
+  const novelHtml = `
+    <div class="sertobig">
+      <h1 class="entry-title">سيد الظلال الصامتة</h1>
+      <span class="alter">Silent Shadows</span>
+      <div class="sertostat"><span>مستمرة</span></div>
+      <div class="sertothumb"><img src="/wp-content/uploads/2026/07/shadows.jpg"></div>
+      <div class="serl"><span class="sername">الكاتب</span><span class="serval"><a href="/author/kim/">كيم</a></span></div>
+      <div class="serl"><span class="sername">النوع</span><span class="serval">: رواية كورية</span></div>
+      <div class="sertogenre"><a>اكشن مغامرات</a><a>ايسيكاي</a></div>
+      <div class="sersys entry-content"><p>وصف الرواية.</p><script>adsbygoogle()</script></div>
+    </div>
+    <div class="ts-chl-collapsible">المجلد 1</div>
+    <div class="ts-chl-collapsible-content">
+      <ul>
+        <li><a href="/ch-2/"><span class="epl-title">الفصل 2</span></a></li>
+        <li><a href="/ch-1/"><span class="epl-title">الفصل 1</span></a></li>
+      </ul>
+    </div>`;
+
+  const parseNovel = (html: string) =>
+    parseNovelPage(
+      new DOMParser().parseFromString(html, "text/html"),
+      BASE,
+      NOVEL_URL,
+      createTestHost(),
+    );
+
+  it("reads title, original title, status, cover, tags, description and meta rows", () => {
+    const novel = parseNovel(novelHtml);
+    expect(novel.title).toBe("سيد الظلال الصامتة");
+    expect(novel.originalTitle).toBe("Silent Shadows");
+    expect(novel.status).toBe("مستمرة");
+    expect(novel.coverUrl).toBe("https://kolnovel.com/wp-content/uploads/2026/07/shadows.jpg");
+    expect(novel.tags).toEqual(["اكشن مغامرات", "ايسيكاي"]);
+    expect(novel.language).toBe("ar");
+    expect(novel.direction).toBe("rtl");
+    // The injected <script> is stripped out of the description.
+    expect(novel.description).toBe("وصف الرواية.");
+    expect(novel.meta).toEqual([
+      { label: "الكاتب", value: "كيم", url: "https://kolnovel.com/author/kim/" },
+      // The leading colon the theme renders is stripped; a row with no
+      // anchor carries no url.
+      { label: "النوع", value: "رواية كورية", url: undefined },
+    ]);
+  });
+
+  it("lifts the author out of the meta rows", () => {
+    expect(parseNovel(novelHtml).author).toBe("كيم");
+  });
+
+  it("returns chapters oldest-first, with ids running from 1", () => {
+    const volumes = parseNovel(novelHtml).volumes;
+    expect(volumes).toHaveLength(1);
+    expect(volumes[0].chapters).toEqual([
+      { id: 1, title: "الفصل 1", url: "https://kolnovel.com/ch-1/", lines: [] },
+      { id: 2, title: "الفصل 2", url: "https://kolnovel.com/ch-2/", lines: [] },
+    ]);
+  });
+
+  it("refuses a page with no title instead of returning a hollow SourceNovel", async () => {
+    // The defect this guards: title fell back to "", tags to [] and volumes
+    // to [], so an anti-bot interstitial or error page served with HTTP 200
+    // produced a structurally valid, completely empty novel that imported as
+    // a book with no chapters and nothing anywhere saying why.
+    expect(() => parseNovel(`<html><body><h1>Attention Required</h1></body></html>`)).toThrow(
+      NOVEL_URL,
+    );
+  });
+
+  it("refuses a page whose title container is present but empty", () => {
+    expect(() =>
+      parseNovel(`<div class="sertobig"><h1 class="entry-title">  </h1></div>`),
+    ).toThrow(/couldn't find a novel title/);
+  });
+
+  it("does NOT refuse a real novel page that simply has no chapters listed yet", () => {
+    // Deliberately survivable: a novel the site has published but not yet
+    // added chapters to is a page the site really serves, and refusing it
+    // would deny the user a novel the site itself renders.
+    const novel = parseNovel(`<div class="sertobig"><h1 class="entry-title">رواية جديدة</h1></div>`);
+    expect(novel.title).toBe("رواية جديدة");
+    expect(novel.volumes).toEqual([]);
   });
 });
 
@@ -385,8 +516,9 @@ describe("getChapterContent — HTML first", () => {
     // test's business: there is a body, it is substantial, every line is a
     // known type, and no line is blank.
     expect(lines.length).toBeGreaterThan(20);
-    expect(new Set(lines.map((l) => l.type)).size).toBeGreaterThan(0);
-    expect(lines.every((l) => l.type === "text" || l.type === "image")).toBe(true);
+    // The exact type set this capture yields. `new Set(...).size > 0`, which
+    // this used to assert, cannot fail once the line above has passed.
+    expect(new Set(lines.map((l) => l.type))).toEqual(new Set(["text"]));
     expect(lines.every((l) => l.content.trim().length > 0)).toBe(true);
 
     // The point of the test: exactly one request, a GET of the chapter page,
@@ -492,6 +624,38 @@ describe("getChapterContent — PDF fallback", () => {
     ]);
     expect(await source.resolveImage!("kolnovel:img:293246:1")).toBe(image);
     expect(await source.resolveImage!("kolnovel:img:293246:9")).toBeNull();
+  });
+
+  it("drops the previous chapter's image refs when the next PDF chapter is extracted", async () => {
+    // imageStore used to be cleared only in getNovel. A reader working
+    // through a snapshot never calls getNovel, so the map grew for the whole
+    // session, holding every image of every PDF chapter opened. The observable
+    // consequence of the fix: a ref from the previous call no longer resolves.
+    const image = { bytes: new Uint8Array([1]), mimeType: "image/png", extension: "png" };
+    const otherChapter = "https://kolnovel.com/another-chapter-293247/";
+    const otherToken = "https://kolnovel.com/another-chapter-293247/pdf/?tspdftoken=abc";
+    const host = hostWithPdf(
+      {
+        responses: {
+          [CHAPTER_URL]: EMPTY_BODY_CHAPTER,
+          [otherChapter]: EMPTY_BODY_CHAPTER,
+          [AJAX_URL]: tokenJson,
+        },
+        byteResponses: { [TOKEN_URL]: PDF_BYTES, [otherToken]: PDF_BYTES },
+      },
+      async (_bytes, options) => [{ type: "image", content: options.mintImageRef(image) }],
+    );
+    const source = createSource(host);
+
+    await source.getChapterContent(chapterStub());
+    expect(await source.resolveImage!("kolnovel:img:293246:1")).toBe(image);
+
+    // Same post id in the ref because tokenJson is the canned reply for both;
+    // what matters is that the FIRST call's entry is gone and the second
+    // call's is present.
+    await source.getChapterContent(chapterStub(otherChapter));
+    expect(await source.resolveImage!("kolnovel:img:293247:1")).toBe(image);
+    expect(await source.resolveImage!("kolnovel:img:293246:1")).toBeNull();
   });
 
   it("throws when the permalink carries no post id, without calling the endpoint", async () => {
