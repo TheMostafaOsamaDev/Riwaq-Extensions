@@ -7,9 +7,17 @@
 // returns the entire catalogue (every novel, no query params, no
 // pagination) in one call — see cardFor/fetchCatalogue below. getNovel
 // fetches GET /api/novel/<slug>, which carries the full chapter list in one
-// response (see getNovel below). getChapterContent still throws "not
-// implemented" and is filled in by a later task in this plan.
+// response (see getNovel below).
+//
+// getChapterContent is the one place this extension cannot use the JSON
+// API: GET /api/novel/<slug>/chapters/<id> 403s with
+// {"error":"Invalid or expired token"}. The rendered chapter page at
+// /novels/<slug>/chapters/<id> is public, though, so getChapterContent
+// fetches that HTML page and parses the chapter body out of
+// `article.reader-content` instead (see getChapterContent below).
 import {
+  parseHtml,
+  sanitizeText,
   SourceUrlError,
   type FetchResponse,
   type NovelCard,
@@ -257,8 +265,34 @@ export default function createSource(host: SourceHost): Source {
       };
     },
 
-    async getChapterContent(_chapter: SourceChapter): Promise<SourceLine[]> {
-      throw new Error("not implemented");
+    async getChapterContent(chapter: SourceChapter): Promise<SourceLine[]> {
+      host.log("info", `getChapterContent(${chapter.id})`);
+      const resp = await host.fetch(chapter.url);
+      const doc = parseHtml(resp.text);
+      const root = doc.querySelector("article.reader-content");
+      if (!root) {
+        throw new Error(
+          `Sea Novel: no chapter body (article.reader-content) at ${chapter.url}. ` +
+            `The site layout may have changed.`,
+        );
+      }
+      // `p.sr-only` marks screen-reader-only SEO copy, not chapter text —
+      // and there are TWO of them, not one: a leading "you are reading
+      // chapter N of <novel>..." blurb AND a trailing "chapter N of
+      // <novel> ended, keep reading on seanovel.org..." blurb after the
+      // real body. Both must be skipped; only checking the first
+      // paragraph (as an earlier draft of this task's brief described)
+      // would leak the trailing one into the last line of every chapter.
+      const lines: SourceLine[] = [];
+      for (const p of Array.from(root.querySelectorAll("p"))) {
+        if (p.classList.contains("sr-only")) continue;
+        const content = sanitizeText(p.textContent);
+        if (content) lines.push({ type: "text", content });
+      }
+      if (lines.length === 0) {
+        throw new Error(`Sea Novel: chapter body at ${chapter.url} parsed to zero lines.`);
+      }
+      return lines;
     },
   };
 }

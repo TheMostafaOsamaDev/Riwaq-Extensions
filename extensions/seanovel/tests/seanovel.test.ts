@@ -10,7 +10,7 @@ import createSource, {
   type NovelDetailRow,
 } from "../src/index";
 import { strings } from "../src/strings";
-import { SourceUrlError } from "@riwaq/extension-api";
+import { parseHtml, sanitizeText, SourceUrlError } from "@riwaq/extension-api";
 import { createTestHost } from "@riwaq/extension-api/testing";
 
 // Deliberately not `readFileSync(new URL("./fixtures/novels.json", import.meta.url), ...)`:
@@ -43,6 +43,37 @@ const novelDetail = JSON.parse(novelFixture) as Required<
 > &
   NovelDetailRow;
 
+// The committed chapter fixture is a live capture of
+// https://seanovel.org/novels/shadow-slave/chapters/1 (2026-09-18) — the
+// one page this extension cannot read through the JSON API (the chapter
+// endpoint 403s with "Invalid or expired token"). As with the two fixtures
+// above, every expectation below is derived by parsing this fixture at
+// test time, not from a count observed on capture day.
+//
+// Derivation is intentionally independent of src/index.ts's own
+// getChapterContent: it re-walks the DOM here with the same public
+// parseHtml/sanitizeText helpers rather than importing anything from
+// index.ts, so a broken implementation can't make its own test trivially
+// true by sharing buggy logic with the assertion.
+const chapterFixture = readFileSync(join(FIXTURES_DIR, "chapter.html"), "utf8");
+const chapterDoc = parseHtml(chapterFixture);
+const chapterFixtureRoot = chapterDoc.querySelector("article.reader-content");
+if (!chapterFixtureRoot) {
+  throw new Error("fixture sanity: chapter.html has no article.reader-content — re-capture it");
+}
+const chapterFixtureParagraphs = Array.from(chapterFixtureRoot.querySelectorAll("p"));
+const chapterFixtureSrOnly = chapterFixtureParagraphs.filter((p) =>
+  p.classList.contains("sr-only"),
+);
+const chapterFixtureContentLines = chapterFixtureParagraphs
+  .filter((p) => !p.classList.contains("sr-only"))
+  .map((p) => sanitizeText(p.textContent))
+  .filter((text) => text !== "");
+
+const CHAPTER_URL = `https://seanovel.org/novels/${novelDetail.slug}/chapters/1`;
+const chapterHost = () =>
+  createTestHost({ responses: { [CHAPTER_URL]: chapterFixture } });
+
 const host = (locale: "en" | "ar" = "ar") =>
   createTestHost({ responses: { "/api/novels": novelsFixture }, locale });
 
@@ -57,13 +88,6 @@ const NOVEL_URL = `https://seanovel.org/novels/${novelDetail.slug}`;
 describe("seanovel: createSource", () => {
   it("constructs a Source from a host", () => {
     expect(() => createSource(createTestHost())).not.toThrow();
-  });
-
-  it("getChapterContent is not implemented yet", async () => {
-    const source = createSource(createTestHost());
-    await expect(
-      source.getChapterContent({ id: 1, title: "t", url: "https://example.com/c/1", lines: [] }),
-    ).rejects.toThrow("not implemented");
   });
 });
 
@@ -552,5 +576,137 @@ describe("malformed API responses", () => {
     await expect(source.getNovel("https://seanovel.org/novels/x")).rejects.toThrow(
       "Sea Novel: /api/novel/x did not return a novel object.",
     );
+  });
+});
+
+describe("getChapterContent", () => {
+  it("returns exactly the fixture's non-sr-only paragraphs, all as non-empty text lines", async () => {
+    // Fixture sanity: the captured page actually has sr-only markup to
+    // filter and a substantial body — a fixture with neither would make
+    // every assertion below vacuously true.
+    expect(chapterFixtureSrOnly.length).toBeGreaterThan(0);
+    expect(chapterFixtureContentLines.length).toBeGreaterThan(20);
+
+    const source = createSource(chapterHost());
+    const lines = await source.getChapterContent({
+      id: 1,
+      title: "الفصل 1",
+      url: CHAPTER_URL,
+      lines: [],
+    });
+
+    // Exact count, not just "more than a handful": a broken implementation
+    // that leaked either sr-only paragraph back in, dropped a real one, or
+    // emitted duplicates would land on a different number.
+    expect(lines).toHaveLength(chapterFixtureContentLines.length);
+    expect(lines.every((l) => l.type === "text")).toBe(true);
+    expect(lines.every((l) => l.content.trim() !== "")).toBe(true);
+  });
+
+  it("preserves paragraph order — line lengths line up 1:1 with the fixture's paragraph order", async () => {
+    // Comparing lengths (not the text itself) is a structural check: a
+    // shuffle, a dropped paragraph, or a duplicated one would shift this
+    // sequence, without the test needing to embed any chapter prose.
+    const source = createSource(chapterHost());
+    const lines = await source.getChapterContent({ id: 1, title: "", url: CHAPTER_URL, lines: [] });
+    expect(lines.map((l) => l.content.length)).toEqual(
+      chapterFixtureContentLines.map((t) => t.length),
+    );
+  });
+
+  it("drops the leading screen-reader SEO blurb (\"you are reading chapter N of ...\")", async () => {
+    const source = createSource(chapterHost());
+    const lines = await source.getChapterContent({ id: 1, title: "", url: CHAPTER_URL, lines: [] });
+    expect(lines[0].content).not.toMatch(/أنت تقرأ الفصل/);
+  });
+
+  it("also drops the TRAILING screen-reader blurb after the body — the brief only named the leading one", async () => {
+    // Fixture reality check (see task report): the captured page carries
+    // TWO sr-only paragraphs inside article.reader-content, not one — a
+    // matching one appears after the last real paragraph
+    // ("chapter N of <novel> ended, keep reading on seanovel.org...").
+    // Confirm the fixture actually has both before trusting the
+    // assertion below.
+    expect(chapterFixtureSrOnly.length).toBe(2);
+
+    const source = createSource(chapterHost());
+    const lines = await source.getChapterContent({ id: 1, title: "", url: CHAPTER_URL, lines: [] });
+    expect(lines[lines.length - 1].content).not.toMatch(/انتهى الفصل/);
+    expect(lines.some((l) => /أنت تقرأ الفصل|انتهى الفصل/.test(l.content))).toBe(false);
+  });
+
+  it("fetches exactly chapter.url, never rebuilding it from chapter.id (which may be a non-integer)", async () => {
+    // Carried forward from task 3: chapter ids are non-contiguous and not
+    // all integers (e.g. 1841.1). getChapterContent must never parse,
+    // truncate, or otherwise rebuild a URL from chapter.id — it only ever
+    // has to fetch the URL it was already given.
+    const calls: Array<{ url: string; method: string }> = [];
+    const oddUrl = `${NOVEL_URL}/chapters/1841.1`;
+    const source = createSource(
+      createTestHost({ responses: { [oddUrl]: chapterFixture }, calls }),
+    );
+    await source.getChapterContent({ id: 1841.1, title: "", url: oddUrl, lines: [] });
+    expect(calls.some((c) => c.url === oddUrl && c.method === "GET")).toBe(true);
+  });
+
+  it("throws specifically for the missing container, not by falling through to the zero-lines guard", async () => {
+    // Deliberately NOT an empty <body>: the body here has real, non-empty
+    // paragraph text — just not inside article.reader-content. A tamper
+    // that fell back to `doc.body` (or any other container) when the
+    // selector misses would find this text and return it as chapter
+    // lines rather than throwing at all, so this fixture is the one that
+    // actually exercises the "container not found" branch on its own —
+    // an empty <body> would also satisfy the (separate) "parsed to zero
+    // lines" guard and pass even if the container check were deleted.
+    const wrongContainer = createSource(
+      createTestHost({
+        responses: {
+          "/chapters/9": `<html><body><div class="not-the-reader"><p>محتوى خارج الحاوية الصحيحة تمامًا.</p></div></body></html>`,
+        },
+      }),
+    );
+    await expect(
+      wrongContainer.getChapterContent({
+        id: 9,
+        title: "",
+        url: "https://seanovel.org/novels/x/chapters/9",
+        lines: [],
+      }),
+    ).rejects.toThrow(/article\.reader-content/i);
+  });
+
+  it("throws when the container is missing from an otherwise truly empty page", async () => {
+    const empty = createSource(
+      createTestHost({ responses: { "/chapters/9": "<html><body></body></html>" } }),
+    );
+    await expect(
+      empty.getChapterContent({
+        id: 9,
+        title: "",
+        url: "https://seanovel.org/novels/x/chapters/9",
+        lines: [],
+      }),
+    ).rejects.toThrow(/reader-content|chapter body/i);
+  });
+
+  it("throws rather than silently returning [] when the container exists but has no usable text", async () => {
+    // Every paragraph present is sr-only, so after filtering there is
+    // nothing left — this must fail loudly, not hand back an empty
+    // chapter that looks successful.
+    const onlyBlurb = createSource(
+      createTestHost({
+        responses: {
+          "/chapters/9": `<html><body><article class="reader-content"><p class="sr-only">x</p></article></body></html>`,
+        },
+      }),
+    );
+    await expect(
+      onlyBlurb.getChapterContent({
+        id: 9,
+        title: "",
+        url: "https://seanovel.org/novels/x/chapters/9",
+        lines: [],
+      }),
+    ).rejects.toThrow(/zero lines|chapter body/i);
   });
 });
