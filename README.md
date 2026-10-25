@@ -169,10 +169,10 @@ interaction: the user types and presses Enter, and `search(query, page)` fills t
 results grid. There is no as-you-type suggest endpoint anywhere in this interface — don't
 wire one up even if the site has one. If your site renders every match on a single page
 (no real pagination), ignore the `page` argument entirely and always return `hasMore:
-false` — `extensions/kolnovel` does exactly this, and its `README.md` explains why: two
-different pagination URL forms both return HTTP 500 on the live site, so honoring a
-"next page" click would just be a broken link. Don't guess at this — check what your
-site's own pagination actually does before deciding.
+false`, so the app never offers a "next page" that leads nowhere. Don't guess at this —
+check what your site's own pagination actually does before deciding, and check again when
+the site changes: kolnovel.com answered both of its pagination URL forms with HTTP 500 for
+a year, then served them fine after its October 2026 redesign.
 
 ### Data shapes
 

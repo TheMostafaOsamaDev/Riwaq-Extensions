@@ -14,54 +14,114 @@ already saved in a user's library keeps resolving after the merge:
 - `kolnovel.online` — a third domain the site's own "view more" links point
   at; treated as an alias, not fetched directly
 
-Theme: a custom WordPress build; mostly static — the browse, search and
-novel pages ship their data in the initial HTML. `src/theme.ts` holds the
-DOM→data parsing (private to this extension); `src/index.ts` wires it to
-`host` and owns the one thing the theme doesn't hand over in HTML: PDF-only
+Theme: a custom WordPress theme the site calls **starless**, live since
+October 2026 (v1.1.0 of this extension). It replaced the previous theme
+wholesale — every home, search and novel-page selector changed at once, and
+chapter lists stopped being part of the novel page — so v1.0.x returns
+nothing from this site. URLs did not change: novels are still
+`/series/<slug>/` and chapters `/<slug>-<post id>/`, so books already in a
+library keep resolving. `src/theme.ts` holds the DOM→data parsing (private
+to this extension); `src/index.ts` wires it to `host` and owns the two
+things the pages don't hand over in HTML: chapter lists and PDF-only
 chapters.
 
 ## Capabilities
 
 | Method                | Supported | Notes |
 |-----------------------|-----------|-------|
-| `getHomeSections`     | ✓         | parses `.trendarea`, `.homehot`, `.bixbox + .listupd` |
-| `search`              | ✓ (unpaginated) | `GET /?s=<q>` only — see **Search** below |
-| `getNovel`            | ✓         | `/series/<slug>/` — `.sertobig` + `.ts-chl-collapsible` |
+| `getHomeSections`     | ✓         | every `section.kol-home-section` plus the hero grid — see **Home sections** |
+| `search`              | ✓ (paginated) | `GET /?s=<q>`, then `/page/<N>/?s=<q>` — see **Search** |
+| `getNovel`            | ✓         | `/series/<slug>/` — metadata plus every volume, **without** chapters |
+| `hasLazyVolumes`      | `true`    | see **Chapter lists** |
+| `getVolumeChapters`   | ✓         | the `kol_series_volume_chapters` AJAX action, 50 rows a page |
 | `searchChapters`      | —         | no in-novel search on the site |
 | `getChapterContent`   | ✓ (HTML + PDF fallback) | see **Chapter content** below; throws rather than return an empty chapter |
 
 ## Search
 
-`search()` always issues `GET https://kolnovel.com/?s=<query>` — nothing
-else. It ignores its `page` argument and **always returns `hasMore: false`**,
-for two site facts verified against the live site:
+`GET https://kolnovel.com/?s=<query>` renders 20 matches a page as
+`article.kol-search__item`; page N is `/page/<N>/?s=<query>`. `hasMore` comes
+from WordPress's own pager — a `.next.page-numbers` link, or a numbered one
+past the current page. (Verified live 2026-10-25: `سيد` has 21 matches, 20 on
+page 1 with a pager, 1 on page 2 without one.)
 
-- The site renders every match on a single page — there is no numeric
-  pager on this template.
-- Both pagination forms return **HTTP 500**: `?s=<q>&paged=<N>` and
-  `/page/<N>/?s=<q>`. `parseSearchResults` (in `theme.ts`) still derives an
-  independent `hasMore` reading from the theme's `.pagination` block —
-  because on broad queries the theme *does* render a pager even though
-  clicking through it 500s — so `index.ts`'s `search()` deliberately
-  discards that reading and hardcodes `false` rather than trusting the DOM.
-  `tests/kolnovel.test.ts` pins both the true-from-DOM and the
-  false-forced-by-the-extension cases so this override can't quietly regress.
+The previous theme answered both pagination forms — and broad one-word
+queries like `رواية` — with HTTP 500, so v1.0.x ignored `page` and always
+reported `hasMore: false`. On this theme both work.
 
-**The site also 500s on broad queries.** This isn't a hypothetical edge
-case: a live-site check recorded in this repo's `docs/design.md` ("Field
-findings — 2026-08-27" → kolnovel.com) found that the single-word queries
-`رواية` and `ال` each produced a WordPress error page, while the narrower
-query `سيد` returned 21 results. A host UI calling `search()` needs a
-first-class error state for whatever `host.fetch` surfaces on a 500 — this
-extension does not retry or paper over it.
+## Chapter lists
+
+The novel page carries every volume's name and chapter count but **no
+chapter rows**: each volume is an empty `<details data-kol-chapter-volume=
+"<name>">` that the site's `series-chapters.js` fills when it is opened. The
+request it makes, and the one this extension makes:
+
+```
+GET /wp-admin/admin-ajax.php?action=kol_series_volume_chapters
+      &nonce=<data-kol-volume-nonce>&series_id=<data-kol-series-id>
+      &volume=<data-kol-chapter-volume>&page=<n>
+→ { "success": true,
+    "data": { "html": "<li data-chapter-id=…>…", "page": 1, "pages": 56, "total": 2756, … } }
+```
+
+Facts about it, verified against the live site on 2026-10-25:
+
+- **50 rows a page, fixed.** `per_page`, `posts_per_page` and `limit` are all
+  ignored. A 2,756-chapter volume is 56 requests; `getVolumeChapters` reads
+  page 1 for the page count and fetches the rest six at a time (a 6,703-
+  chapter, 15-volume novel loads in ~85s volume after volume, the bulk of it
+  that one 2,756-chapter volume at ~12s).
+- **The nonce is required.** Without it, or with a wrong one, the endpoint
+  answers **HTTP 403** with the bare body `-1`
+  (`tests/fixtures/volume-bad-nonce.json`). It is a WordPress nonce for the
+  anonymous user, so it is the same on every novel page and expires within a
+  day. `getVolumeChapters` treats a refusal as a stale nonce: it reloads the
+  novel page once and retries before failing.
+- **The empty string is a real volume name.** It is the site's "no volume"
+  bucket, titled `الفصول`.
+- **Volumes and rows are newest first**; both are reversed, so volume 1 /
+  chapter 1 come first in reading order.
+
+Chapter ids run across the whole novel, oldest volume first: a volume's first
+id is one past the sum of the counts of every volume before it. That keeps a
+chapter's id independent of which volume the app loads first, and matches
+the running numbering v1.0.x produced when the old page listed every chapter
+inline. The volume is found by its name (`SourceVolume.key`), not its
+position, so a snapshot whose ids were assigned on an earlier visit still
+loads the right one. `getVolumeChapters` works cold — the app calls it for a
+saved novel without a `getNovel` first — by fetching the novel page for the
+series id and nonce.
+
+A row's title is `الفصل <number> - <name>` from its `data-kol-chapter-number`
+and `data-kol-chapter-title`. The number is free text on the site — special
+chapters carry `---` or `1INFO1` — and only a real number becomes the
+prefix; otherwise the name stands alone. Rows under a release countdown
+(`[data-kol-countdown-end]`) are skipped: they name chapters that are not
+readable yet.
 
 ## Chapter content
 
 `getChapterContent` reads HTML first: it fetches the chapter page and runs
-`parseChapterContent` (in `theme.ts`) against `.epcontent` (falling back to
-the older `#kol_content` markup, then `.entry-content`, then `<body>`). Most
-chapters return their full text this way — official illustrations included,
-served inline as `<img>` — with no PDF round-trip at all.
+`parseChapterContent` (in `theme.ts`) against `#kol_content` (falling back to
+`.epcontent`, then `.entry-content`, then `<body>`). On the starless theme the
+body element is `<div id="kol_content" class="epcontent entry-content">` —
+the one container that survived the redesign unchanged. Most chapters return
+their full text this way — official illustrations included, served inline as
+`<img>` — with no PDF round-trip at all.
+
+**Unclosed `<p>` tags.** Some chapter bodies open paragraphs they never close
+(`<p>` + newline + `<p>text</p>`; `tests/fixtures/chapter-starless.html`). A
+spec HTML parser — the app's — closes the open one at the next `<p>`, but
+happy-dom nests them, and a paragraph's `textContent` then holds the whole
+rest of the chapter: the live probe read 132 lines and 337,043 characters
+out of a 10 KB chapter. A paragraph's text is therefore read with any nested
+`<p>` removed; each nested one is visited on its own.
+
+**The PDF token endpoint is broken on the site as of 2026-10-25:** `POST
+action=ts_ln_dl_url` answers HTTP 500 with WordPress's "critical error" page.
+No chapter reached while porting to the new theme was PDF-only, so the
+fallback below is kept as it was; a chapter that does reach it now fails with
+the non-JSON error (reporting the HTTP 500) rather than with an empty page.
 
 Some chapters on `kolnovel.com` ship **only** as a downloadable PDF (no
 usable HTML body). When the HTML pass yields zero lines, `getChapterContent`
@@ -166,9 +226,10 @@ empty body from a CDN challenge without re-running the download.
 
 ## Why static fetch is enough
 
-The visible chapter body on this theme is not JS-injected — it ships
-server-rendered in the initial HTML. What some JS on the live page *does*
-inject are invisible decoy paragraphs meant to defeat copy-paste (rotating
+The visible chapter body is not JS-injected — it ships server-rendered in
+the initial HTML — and the one thing the site does load from JS, a volume's
+chapter list, is a plain GET returning JSON. What some JS on the old theme's
+page *did* inject are invisible decoy paragraphs meant to defeat copy-paste (rotating
 hex CSS classes with `opacity: 0` + `-99999px` positioning, or an inline
 `position: fixed; ...; text-indent: ...` variant). `parseChapterContent`
 discovers the rotating hidden classes from the page's own `<style>` blocks
@@ -179,85 +240,72 @@ extension works on any host that implements the static-fetch capability.
 
 ## Card-URL filtering
 
-KolNovel surfaces both novel-index URLs (`/series/<slug>/`) and direct
-chapter URLs in the same homepage rows. Every card parser filters on
-`/series/` in the href so only novel-index links become cards — a host UI
-is expected to navigate a card click to a novel detail view, not a chapter.
+Every card on the theme — home rails and search results alike — carries one
+hook: an element marked `data-kol-series-title-source` whose text is the
+title and whose `href` is the series URL (on the homepage hero's `<h1>`, the
+URL is in `data-kol-series-title-url` instead). Cards are read through that
+hook rather than through each rail's own layout classes, and only hooks
+pointing at `/series/<slug>/` become cards — never the bare `/series/`
+listing or a chapter — because a host UI navigates a card click to a novel
+detail view. The cover is the first `<img>` in the card's `article`/`li`.
 
-## Home section shapes
+## Home sections
+
+| Rail (class)                 | id            | Notes |
+|------------------------------|---------------|-------|
+| `section.kol-home-hero-grid` | `hero-grid`   | the featured novel plus the "rising" list beside it, titled by that list's `<h2>` |
+| `.kol-home-rising-kings`     | `rising-kings` | "trending this week" carousel; its cover is a `<button>`, the title hook is in the details panel |
+| `.kol-home-updates`          | `updates`     | latest-updates rows; the newest chapter link (`.kol-home-chapter-links a`) is the card's subtitle |
+| `.kol-home-most-read`        | `most-read`   | rankings by total reads |
+| `.kol-home-newly-added`      | `newly-added` | |
+| `.kol-home-completed`        | `completed`   | |
 
 **Section ids are derived from the section, never from its position.**
-`SourceSection.id` is contracted to be stable and useful for caching.
-`.trendarea` is `trending` and `.homehot` is `hot` (one of each per page);
-a `.bixbox` takes `bixbox-` plus the `order`/`status`/`type` query of its
-own "see more" link (`/series/?status=&order=update` → `bixbox-update`),
-falling back to a slug of its heading. A document-order `home-<idx>` —
-which this used to emit, and which was incremented only for sections that
-survived the zero-cards filter — reindexed every rail below any rail that
-happened to render nothing that run. `extensions/cenele` abandoned the
-same scheme for the same reason and keys off each section's CSS class.
-
-| Class        | Cards under         | Notes |
-|--------------|----------------------|-------|
-| `.trendarea` | `.trendlist`         | "Trending" hero list; falls back to the extension's own `trendingFallback` string when the theme omits a heading |
-| `.homehot`   | `.hotoday`           | "Hot updates" big-card row; falls back to `hotUpdatesFallback` |
-
-A `.bixbox` section's optional "view more" link (`.releases .vl`) is
-resolved with `absoluteUrl(href, baseUrl)`, deliberately **not** by reading
-the anchor element's `.href` property. A `DOMParser`-produced `Document`
-has no real page location — its base URL is `about:blank` — so a relative
-`href` there cannot resolve the way it would on a live page; per the
-`HTMLHyperlinkElementUtils` spec, `.href` then falls back to returning the
-raw, unresolved attribute string instead of an absolute URL (some DOM
-implementations, e.g. the happy-dom environment this repo tests under,
-substitute their own fake page location instead — the effect is the same
-kind of wrong URL, just a different wrong URL). This differs from what the
-pre-split app's `kolnovel-theme.ts` did (it read `.href` directly) — that
-was a latent bug carried over from the original app, not a porting mistake,
-and the fix here is deliberate. `tests/kolnovel.test.ts`'s
-`parseHomeSections` suite pins a fixture with a relative `viewMoreUrl` href
-specifically to guard against this being "restored" by a future edit.
-| `.bixbox`    | `.listupd` (`.utao` or `article.bs` cards) | most other sections — completed novels, recommendations, new novels, … Sidebar/blog widgets sharing `.bixbox` are skipped by checking for `.blogbox, .lexa` |
+`SourceSection.id` is contracted to be stable and useful for caching, so each
+rail is keyed by its `kol-home-<name>` modifier class (falling back to a slug
+of its heading). A document-order `home-<idx>` reindexes every rail below one
+that rendered nothing that run; `extensions/cenele` abandoned that scheme for
+the same reason. The community blocks (stats, donors, translator
+leaderboards) are `section`s without `kol-home-section` and carry no novel
+cards. A rail's "view all" link (`a.kol-home-section-link`) becomes its
+`viewMoreUrl`, resolved with `absoluteUrl(href, baseUrl)` rather than the
+anchor's `.href` — a `DOMParser` document has no real location to resolve
+against. A card's rating (`★ 9.1`, from whichever element in it has a
+`rating` class) becomes its one badge.
 
 ## Novel-page selectors
 
 | Field          | Selector |
 |----------------|----------|
-| Title          | `.sertobig h1.entry-title` (falls back to a bare `h1.entry-title`; **no title at all is a refusal**, see [Never a hollow chapter, and never a hollow novel](#never-a-hollow-chapter-and-never-a-hollow-novel)) |
-| Original title | `.sertobig .alter` |
-| Status         | `.sertobig .sertostat > span` — kept as the site's own text; a host UI renders it verbatim as a badge |
-| Cover image    | `.sertobig .sertothumb img` |
-| Meta rows      | `.sertobig .serl`, each `<div><span class="sername">label</span><span class="serval">value</span></div>` |
-| Author         | meta row labeled `الكاتب` / `writer` / `author` |
-| Tags           | `.sertobig .sertogenre a` |
-| Synopsis       | `.sertobig .sersys.entry-content` (or `.sersys`) — ad/script wrappers stripped before extraction |
-| Volumes        | `.ts-chl-collapsible` headers + their `.ts-chl-collapsible-content` sibling's `ul li > a` (direct-child anchors only — a per-chapter PDF download link some chapters also render is a nested, non-direct-child anchor and is excluded so it isn't parsed as a phantom chapter) |
-
-The page lists volumes and chapters newest-first; `parseVolumes` reverses
-both so volume 1 / chapter 1 come first, matching reading order.
+| Title          | `h1.kol-series-editorial__title` (**no title at all is a refusal**, see [Never a hollow chapter, and never a hollow novel](#never-a-hollow-chapter-and-never-a-hollow-novel)) |
+| Original title | `.kol-series-editorial__alt-title` — the site sometimes puts a release-schedule note here instead; it is passed through as-is |
+| Status         | `.kol-series-editorial__status` — kept as the site's own text |
+| Cover image    | `.kol-series-editorial__cover img` |
+| Meta rows      | `<dt>`/`<dd>` pairs in `.kol-series-editorial__quick-facts` (chapters, year, language, views) and `.kol-series-editorial__facts` (type), plus the translators (`.kol-series-translators__label strong`) as one row |
+| Author         | a meta row labelled `الكاتب` / `المؤلف` / `writer` / `author` — the theme prints none today, so `author` is `""` and the host localizes its own fallback |
+| Tags           | `.kol-series-editorial__genres a` |
+| Synopsis       | `.kol-series-editorial__prose` — scripts, styles and the donation widget the theme appends to every synopsis (`.shola-widget`) stripped first |
+| Volumes        | `[data-kol-chapter-index]` → `details[data-kol-chapter-volume]`; see **Chapter lists** |
 
 ## i18n
 
-This extension ships four of its own fallback strings in `src/strings.ts`,
+This extension ships three of its own fallback strings in `src/strings.ts`,
 used only when the site itself doesn't label something:
 
 - `volumeFallback` — a volume with no title text (`"Volume {n}"` / `"المجلد {n}"`)
 - `chapterNoTitleFallback` — a chapter whose scraped title is empty after
   sanitizing (`"{n} - No Title"` / `"{n} - بلا عنوان"`)
-- `trendingFallback` — the `.trendarea` section when the theme omits its
-  heading (`"Trending"` / `"الرائج"`)
-- `hotUpdatesFallback` — the `.homehot` section under the same condition
-  (`"Hot updates"` / `"تحديثات رائجة"`)
+- `trendingFallback` — a home rail with neither an `<h2>` nor an
+  `aria-label` (`"Trending"` / `"الرائج"`)
 
 These values match what Riwaq shipped before the extensions were split out
-of the app, so books and cached sections imported under the old in-app
-sources keep the same text. An extension cannot reach the app's message
-catalogue — it reads `host.locale` (`"en" | "ar"`) and picks from its own
+of the app, so books imported under the old in-app sources keep the same
+text. An extension cannot reach the app's message catalogue — it reads `host.locale` (`"en" | "ar"`) and picks from its own
 small catalogue instead.
 
 ## Fetch-only, no ambient authority
 
-`getHomeSections`, `search`, `getNovel` and the HTML pass of
+`getHomeSections`, `search`, `getNovel`, `getVolumeChapters` and the HTML pass of
 `getChapterContent` use only `host.fetch`. The PDF fallback additionally
 uses `host.fetchBytes` and `host.pdf.extractChapter` — both host
 capabilities, never a bundled dependency. This extension has no

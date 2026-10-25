@@ -7,9 +7,17 @@
 // resolving after the merge.
 //
 // Discovery (home, search, novel page) is delegated to ./theme.ts, the
-// shared KolNovel WordPress-theme DOM parsers. It is private to this
-// extension now — there is no second KolNovel-family extension left to
-// share it with.
+// DOM parsers for the site's "starless" theme.
+//
+// Chapter lists are lazy: the novel page carries every volume's name and
+// chapter count but no chapter rows, and each volume's rows come from
+//
+//   GET /wp-admin/admin-ajax.php?action=kol_series_volume_chapters
+//         &nonce=<page nonce>&series_id=<id>&volume=<name>&page=<n>
+//     → { success: true, data: { html, page, pages, total } }   (50 rows a page)
+//
+// so `getNovel` returns volumes with empty `chapters[]` and `getVolumeChapters`
+// fills one on demand, cenele-style.
 //
 // Chapter content is read HTML-first from the page's `.epcontent` body
 // (translated text + official illustrations, served inline). That covers
@@ -34,10 +42,8 @@
 // kind of mistake), so the host owns the one shared pdf.js instance and this
 // extension only ever sees the bytes going in and SourceLines coming out.
 //
-// Search uses the site's WordPress results page (`GET /?s=<query>`). See
-// this extension's README: every match renders on one page and every
-// pagination URL on this host returns HTTP 500, so `search` ignores its
-// `page` argument and always reports `hasMore: false`.
+// Search uses the site's WordPress results page: `GET /?s=<query>`, then
+// `/page/<N>/?s=<query>` for later pages, 20 results each.
 
 import {
   absoluteUrl,
@@ -48,14 +54,22 @@ import {
   type SourceLine,
 } from "@riwaq/extension-api";
 import {
+  numberChapters,
   parseChapterContent,
+  parseChapterIndex,
   parseHomeSections,
   parseNovelPage,
   parseSearchResults,
+  parseVolumeChapterRows,
+  type ChapterIndex,
+  type ChapterRow,
 } from "./theme";
 
 const BASE_URL = "https://kolnovel.com";
 const AJAX_URL = `${BASE_URL}/wp-admin/admin-ajax.php`;
+/** Pages of one volume's listing in flight at once. A 2,756-chapter volume
+ *  is 56 pages; one after another that is most of a minute. */
+const PAGE_CONCURRENCY = 6;
 
 export default function createSource(host: SourceHost): Source {
   // Images extracted from chapter PDFs during getChapterContent, keyed by
@@ -64,8 +78,27 @@ export default function createSource(host: SourceHost): Source {
   // getNovel) so the map holds one chapter's images, not a session's.
   const imageStore = new Map<string, ExtractedImage>();
   let lastNovelTitle: string | undefined;
+  // The novel page's chapter index (series id, nonce, volume names and
+  // counts), keyed by novel URL. getVolumeChapters needs it and is often
+  // called with no getNovel this session — the app reopens a saved novel
+  // from its snapshot — so a miss refetches the page.
+  const indexCache = new Map<string, ChapterIndex>();
+
+  async function loadIndex(novelUrl: string): Promise<ChapterIndex> {
+    const resp = await host.fetch(novelUrl);
+    const index = parseChapterIndex(parseHtml(resp.text), BASE_URL);
+    if (!index) {
+      throw new Error(
+        `kolnovel: couldn't find the chapter index on ${novelUrl} — the layout may have changed.`,
+      );
+    }
+    indexCache.set(novelUrl, index);
+    return index;
+  }
 
   return {
+    hasLazyVolumes: true,
+
     canHandle(url) {
       try {
         const h = new URL(url).hostname.toLowerCase();
@@ -89,7 +122,7 @@ export default function createSource(host: SourceHost): Source {
       return parseHomeSections(parseHtml(resp.text), BASE_URL, host);
     },
 
-    async search(query) {
+    async search(query, page = 1) {
       const trimmed = query.trim();
       // An empty query is a real, correct empty result — nothing to search
       // for — not a reason to fetch the site's own "no search term" page.
@@ -97,30 +130,65 @@ export default function createSource(host: SourceHost): Source {
       if (!trimmed) {
         return { cards: [], hasMore: false, query: trimmed, page: 1 };
       }
-      const url = `${BASE_URL}/?${new URLSearchParams({ s: trimmed })}`;
-      host.log("info", `search(${trimmed}) → ${url}`);
+      const n = Math.max(1, Math.floor(page));
+      const path = n > 1 ? `/page/${n}/` : "/";
+      const url = `${BASE_URL}${path}?${new URLSearchParams({ s: trimmed })}`;
+      host.log("info", `search(${trimmed}, ${n}) → ${url}`);
       const resp = await host.fetch(url);
-      // KolNovel renders every match on one page, and BOTH `?s=<q>&paged=<N>`
-      // and `/page/<N>/?s=<q>` return HTTP 500 on this host (verified against
-      // the live site — see README). parseSearchResults derives `hasMore`
-      // from the theme's `.pagination` block, which the theme does populate
-      // on broad queries — so the `page` argument is ignored (there is only
-      // ever a page 1 to fetch) and `hasMore` is forced to false here rather
-      // than trusted from the DOM. A true value would offer a "Load more"
-      // control whose click could only ever refetch the same page.
-      return {
-        ...parseSearchResults(parseHtml(resp.text), BASE_URL, trimmed, 1),
-        hasMore: false,
-      };
+      return parseSearchResults(parseHtml(resp.text), BASE_URL, trimmed, n);
     },
 
     async getNovel(url) {
       host.log("info", `getNovel(${url})`);
       imageStore.clear();
       const resp = await host.fetch(url);
-      const novel = parseNovelPage(parseHtml(resp.text), BASE_URL, url, host);
+      const doc = parseHtml(resp.text);
+      const novel = parseNovelPage(doc, BASE_URL, url, host);
+      const index = parseChapterIndex(doc, BASE_URL);
+      if (index) indexCache.set(url, index);
       lastNovelTitle = novel.title;
       return novel;
+    },
+
+    async getVolumeChapters(novelUrl, volume) {
+      host.log("debug", `getVolumeChapters(${novelUrl}, #${volume.id})`);
+      let index = indexCache.get(novelUrl) ?? (await loadIndex(novelUrl));
+      // Find the volume by its site name (`key`), not by position: a saved
+      // snapshot's ids were assigned on an earlier visit, and a volume added
+      // since shifts every position after it.
+      const findVolume = (ix: ChapterIndex) => {
+        const pos =
+          volume.key !== undefined
+            ? ix.volumes.findIndex((v) => v.key === volume.key)
+            : volume.id - 1;
+        return pos >= 0 && pos < ix.volumes.length ? pos : -1;
+      };
+      let pos = findVolume(index);
+      if (pos < 0) {
+        index = await loadIndex(novelUrl);
+        pos = findVolume(index);
+      }
+      if (pos < 0) {
+        throw new Error(
+          `kolnovel: volume "${volume.key ?? volume.title}" is no longer listed on ${novelUrl}.`,
+        );
+      }
+      // Ids run across the whole novel, oldest volume first, so chapter n of
+      // the novel keeps id n whichever volume is loaded first.
+      const startId = 1 + index.volumes.slice(0, pos).reduce((sum, v) => sum + v.count, 0);
+
+      let rows: ChapterRow[];
+      try {
+        rows = await fetchVolumeRows(host, index, index.volumes[pos].key);
+      } catch (e) {
+        if (!(e instanceof NonceRejected)) throw e;
+        // WordPress nonces expire within a day; a long-lived session (or a
+        // cached index) holds a stale one. Reload the page once for a fresh
+        // nonce before giving up.
+        index = await loadIndex(novelUrl);
+        rows = await fetchVolumeRows(host, index, index.volumes[pos].key);
+      }
+      return numberChapters(rows, startId, host);
     },
 
     async getChapterContent(chapter): Promise<SourceLine[]> {
@@ -185,6 +253,68 @@ export default function createSource(host: SourceHost): Source {
       return imageStore.get(ref) ?? null;
     },
   };
+}
+
+/** The AJAX endpoint answered `-1`/HTTP 403 or `success: false`: the nonce
+ *  it was given is stale or wrong. */
+class NonceRejected extends Error {}
+
+/** Every row of one volume, oldest first. Page 1 says how many pages there
+ *  are; the rest are fetched a few at a time. A chapter published between
+ *  two page requests shifts the listing by one row, so rows are de-duplicated
+ *  by URL. */
+async function fetchVolumeRows(host: SourceHost, index: ChapterIndex, key: string): Promise<ChapterRow[]> {
+  const first = await fetchVolumePage(host, index, key, 1);
+  const pages: ChapterRow[][] = [first.rows];
+  let next = 2;
+  const worker = async () => {
+    while (next <= first.pages) {
+      const n = next++;
+      pages[n - 1] = (await fetchVolumePage(host, index, key, n)).rows;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PAGE_CONCURRENCY, first.pages - 1) }, worker));
+  const seen = new Set<string>();
+  const rows = pages.flat().filter((r) => !seen.has(r.url) && seen.add(r.url));
+  return rows.reverse();
+}
+
+async function fetchVolumePage(
+  host: SourceHost,
+  index: ChapterIndex,
+  key: string,
+  page: number,
+): Promise<{ rows: ChapterRow[]; pages: number }> {
+  const params = new URLSearchParams({
+    action: "kol_series_volume_chapters",
+    nonce: index.nonce,
+    series_id: index.seriesId,
+    volume: key,
+    page: String(page),
+  });
+  const resp = await host.fetch(`${index.ajaxUrl}?${params}`, {
+    headers: { Accept: "application/json" },
+  });
+  // A refused nonce comes back as the bare body `-1`, which is valid JSON.
+  let json: { success?: boolean; data?: { html?: unknown; pages?: unknown } } | -1 | null;
+  try {
+    json = JSON.parse(resp.text);
+  } catch {
+    json = null;
+  }
+  if (resp.status === 403 || json === -1 || json?.success === false) {
+    throw new NonceRejected(
+      `kolnovel: the chapter-list endpoint refused series ${index.seriesId} (HTTP ${resp.status}).`,
+    );
+  }
+  const data = json === null ? undefined : json.data;
+  if (!data || typeof data.html !== "string" || typeof data.pages !== "number") {
+    throw new Error(
+      `kolnovel: the chapter-list endpoint returned an unexpected response for series ` +
+        `${index.seriesId}, volume "${key}", page ${page} (HTTP ${resp.status}).`,
+    );
+  }
+  return { rows: parseVolumeChapterRows(parseHtml(data.html), BASE_URL), pages: Math.max(1, data.pages) };
 }
 
 /** The WordPress post id is the trailing number in the chapter permalink,
