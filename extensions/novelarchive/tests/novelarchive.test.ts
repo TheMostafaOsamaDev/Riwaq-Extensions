@@ -107,15 +107,7 @@ async function settled<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-describe("manifest + icon", () => {
-  it("ships a 128×128 PNG icon", () => {
-    const png = readFileSync(join(FIXTURES_DIR, "..", "..", "icon.png"));
-    expect(png.subarray(1, 4).toString("ascii")).toBe("PNG");
-    // IHDR: width and height are the first two big-endian uint32s of its data.
-    expect(png.readUInt32BE(16)).toBe(128);
-    expect(png.readUInt32BE(20)).toBe(128);
-  });
-
+describe("manifest", () => {
   it("points baseUrl at the site the source talks to", () => {
     const manifest = JSON.parse(readFileSync(join(FIXTURES_DIR, "..", "..", "manifest.json"), "utf8"));
     expect(manifest.baseUrl).toBe(BASE_URL);

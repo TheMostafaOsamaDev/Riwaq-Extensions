@@ -835,7 +835,7 @@ describe("retrying a dropped request", () => {
   });
 });
 
-// ── catalogue + icon ───────────────────────────────────────────────────
+// ── catalogue ──────────────────────────────────────────────────────────
 
 describe("strings + manifest", () => {
   it("has the same keys in both locales", async () => {
@@ -846,14 +846,6 @@ describe("strings + manifest", () => {
     expect(ar("allChapters")).toBe("جميع الفصول");
     expect(en("chapterFallback", { n: 7 })).toBe("Chapter 7");
     expect(ar("chapterFallback", { n: 7 })).toBe("الفصل 7");
-  });
-
-  it("ships a 128x128 icon.png", () => {
-    const png = readFileSync(join(FIXTURES_DIR, "..", "..", "icon.png"));
-    expect(png.subarray(1, 4).toString("ascii")).toBe("PNG");
-    expect(png.subarray(12, 16).toString("ascii")).toBe("IHDR");
-    expect(png.readUInt32BE(16)).toBe(128);
-    expect(png.readUInt32BE(20)).toBe(128);
   });
 
   it("declares the id the errors are prefixed with", () => {

@@ -28,7 +28,6 @@ const fixture = (name: string) => readFileSync(join(FIXTURES_DIR, name), "utf8")
  *  renaming the id without updating the messages fails this suite. */
 const MANIFEST = JSON.parse(readFileSync(join(FIXTURES_DIR, "..", "..", "manifest.json"), "utf8")) as {
   id: string;
-  icon: string;
 };
 const ID = MANIFEST.id;
 const PREFIX = `${ID}:`;
@@ -143,13 +142,6 @@ describe("manifest", () => {
     expect(ID).toBe("chikari");
   });
 
-  it("ships a 128×128 PNG icon", () => {
-    const png = readFileSync(join(FIXTURES_DIR, "..", "..", MANIFEST.icon));
-    expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
-    expect(png.subarray(12, 16).toString("latin1")).toBe("IHDR");
-    expect(png.readUInt32BE(16)).toBe(128);
-    expect(png.readUInt32BE(20)).toBe(128);
-  });
 });
 
 describe("strings", () => {

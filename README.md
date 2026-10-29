@@ -208,13 +208,11 @@ plus one call-out below the table for a convention it does *not* enforce.
 | `description` | object | yes | a locale map; **must include an `en` key** — a description without `en` is rejected outright | `{ "en": "…", "ar": "…" }` |
 | `author` | string | yes | non-empty | `"Riwaq"` |
 
-**128×128 is a convention, not something `validateManifest` checks.** The rule above is
-real: `icon` must literally be the string `"icon.png"`. The *pixel dimensions* of that
-file are never read — a 512×512 (or any other size) `icon.png` passes `pnpm validate` and
-`pnpm build` without complaint. 128×128 is what every extension in this repo actually
-ships, what `pnpm new-extension` generates, and what its own test asserts by decoding the
-`IHDR` chunk — so treat it as the size to use, just don't expect the tooling to catch it
-if you don't.
+**The icon's 128×128 size is checked by `pnpm validate`, not by `validateManifest`.**
+The manifest rule above is only that `icon` is literally the string `"icon.png"`;
+`scripts/validate.ts` then reads that file's PNG `IHDR` chunk and fails any extension
+whose icon is not a 128×128 PNG. `pnpm build` alone does not read the pixels — CI runs
+`pnpm validate` first. 128×128 is also what `pnpm new-extension` generates.
 
 A real one, `extensions/cenele/manifest.json`:
 
@@ -467,7 +465,7 @@ Three things about it are easy to mistake for bugs:
   `extensions/<id>/`: `scripts/build.ts` bundles, so `packages/extension-api` is inlined
   verbatim into every published bundle. A change under `packages/`, or to
   `scripts/build.ts` itself, therefore requires a version bump on **every** extension.
-- **Icon is a 128×128 PNG named exactly `icon.png`.** Only the filename is validated (see [Manifest reference](#manifest-reference)) — 128×128 is convention, matching what `pnpm new-extension` generates.
+- **Icon is a 128×128 PNG named exactly `icon.png`.** `pnpm validate` checks both (see [Manifest reference](#manifest-reference)); `pnpm new-extension` generates one.
 - **Keep bundles small.** `scripts/build.ts` refuses to bundle anything over 512 KB
   minified. Going over almost always means a heavy dependency slipped in that belongs on
   `host` instead — `pdf.js` is the canonical example: PDF parsing is `host.pdf`, never

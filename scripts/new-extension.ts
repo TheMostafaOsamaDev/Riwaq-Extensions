@@ -19,9 +19,9 @@ const REPO_ROOT = join(fileURLToPath(import.meta.url), "..", "..");
 const DEFAULT_EXTENSIONS_DIR = join(REPO_ROOT, "extensions");
 
 // A real, minimal 128×128 PNG (flat fill) — actual decoded bytes, not a
-// text file wearing a .png extension. scripts/build.ts and
-// scripts/manifest.ts both require exactly this file at this size; replace
-// it with a real icon before shipping (see the README's manifest reference).
+// text file wearing a .png extension. scripts/build.ts requires this file
+// and scripts/validate.ts this size; replace it with a real icon before
+// shipping (see the README's manifest reference).
 const PLACEHOLDER_ICON_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAA80lEQVR42u3SMQ0AAAjAMPxr4EMAEsEGCT1mYGlk9ehvYQIARgAg" +
   "AASAABAAAkAACAABIAAEgAAQAAJAAAgAASAABIAAEAACQAAIAAEgAASAABAAAkAACAABIAAEgAAQAAJAAAgAASAABIAAEAACQAAI" +
