@@ -14,6 +14,7 @@ import createSource, {
   novelPath,
   searchUrl,
   slugFromUrl,
+  stripWatermarks,
 } from "../src/index";
 import { strings } from "../src/strings";
 import { parseHtml, sanitizeText, SourceUrlError, type SourceHost } from "@riwaq/extension-api";
@@ -45,6 +46,8 @@ const PREFIX = `${ID}: `;
 //   chapter.html       https://novelbuddy.me/shadows-oath/chapter-108
 //   chapter-heading.html  …/complete-martial-arts-attributes/chapter-4895-…-life-stain-2
 //   chapter-mtl.html   https://novelbuddy.me/mtl-cultivation-fishermen/chapter-1
+//   chapter-scraped.html  https://novelbuddy.me/martial-peak/chapter-6106-blood-binding-seal
+//   chapter-glued.html    https://novelbuddy.me/martial-peak/chapter-6081-disciplinary-hall
 const homeHtml = fixture("home.html");
 const searchHtml = fixture("search.html");
 const searchPage2Html = fixture("search-page2.html");
@@ -55,6 +58,8 @@ const novelRichHtml = fixture("novel-rich.html");
 const chapterHtml = fixture("chapter.html");
 const chapterHeadingHtml = fixture("chapter-heading.html");
 const chapterMtlHtml = fixture("chapter-mtl.html");
+const chapterScrapedHtml = fixture("chapter-scraped.html");
+const chapterGluedHtml = fixture("chapter-glued.html");
 
 /** The test's own __NEXT_DATA__ reader — deliberately not the one in
  *  src/index.ts, so a bug there can't make its own test pass. */
@@ -562,15 +567,42 @@ const chapterOf = (url: string) => ({ id: 1, title: "t", url, lines: [] });
 describe("getChapterContent", () => {
   const CH_URL = "https://novelbuddy.me/shadows-oath/chapter-108";
 
-  it("returns the chapter's paragraphs minus credit lines and the site's TTS notice", async () => {
+  it("returns the chapter's paragraphs minus credits, the watermark and the TTS notice", async () => {
     const lines = await createSource(host({ [CH_URL]: chapterHtml })).getChapterContent(chapterOf(CH_URL));
     const credits = /^\[(Translator|Proofreader) - \w+\]$/;
+    const watermark = "Foll𝑜w current novℯls on ƒrēewebnoѵёl.cσm.";
     const paragraphs = paragraphsOf(chapterHtml);
-    expect(paragraphs.filter((p) => credits.test(p)).length).toBeGreaterThan(0); // fixture sanity
+    // Fixture sanity: credits at both ends and mid-body, one watermark line.
+    expect(paragraphs.filter((p) => credits.test(p)).length).toBe(6);
+    expect(paragraphs).toContain(watermark);
 
-    expect(lines).toEqual(paragraphs.filter((p) => !credits.test(p)).map((content) => ({ type: "text", content })));
+    expect(lines).toEqual(
+      paragraphs.filter((p) => !credits.test(p) && p !== watermark).map((content) => ({ type: "text", content })),
+    );
     expect(lines.some((l) => /text-to-speech/.test(l.content))).toBe(false);
     expect(pageProps(chapterHtml).initialChapter.content).toContain("text-to-speech"); // fixture sanity
+  });
+
+  it("cuts a watermark glued onto a story paragraph without losing the story text", async () => {
+    const page = pageProps(chapterGluedHtml).initialChapter;
+    const url = `https://novelbuddy.me${page.url}`;
+    const glued = "After he left, the Twins had not seen him since. Not until today at least.𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖";
+    const paragraphs = paragraphsOf(chapterGluedHtml);
+    // Fixture sanity: heading and Author credit as the first two <p>s.
+    expect(paragraphs.slice(0, 2)).toEqual([page.name, "Author: Silavin"]);
+    expect(paragraphs).toContain(glued);
+
+    const lines = await createSource(host({ [url]: chapterGluedHtml })).getChapterContent({
+      id: 1,
+      title: page.name,
+      url,
+      lines: [],
+    });
+    expect(lines.map((l) => l.content)).toEqual(
+      paragraphs
+        .slice(2)
+        .map((p) => (p === glued ? "After he left, the Twins had not seen him since. Not until today at least." : p)),
+    );
   });
 
   it("drops a wrapper heading and an Editor credit that sit outside <p>", async () => {
@@ -597,6 +629,21 @@ describe("getChapterContent", () => {
     const lines = await createSource(host({ [url]: chapterMtlHtml })).getChapterContent(chapterOf(url));
     expect(lines.map((l) => l.content)).toEqual(expected.slice(1, -1));
     expect(lines.every((l) => l.type === "text")).toBe(true);
+  });
+
+  it("cleans an older, scraped chapter: bare heading, Author credit, report-errors footer", async () => {
+    const url = "https://novelbuddy.me/martial-peak/chapter-6106-blood-binding-seal";
+    const content: string = pageProps(chapterScrapedHtml).initialChapter.content;
+    // Fixture sanity: the three pieces of furniture this test is about.
+    expect(content).toMatch(/<p><\/p>Chapter 6106, Blood Binding Seal<p>/);
+    expect(content).toContain("<strong>Author: </strong><strong>Silavin</strong>");
+    expect(content).toMatch(/If you find any errors[^<]*let us know/);
+
+    const lines = await createSource(host({ [url]: chapterScrapedHtml })).getChapterContent(chapterOf(url));
+    const paragraphs = paragraphsOf(chapterScrapedHtml);
+    expect(paragraphs[0]).toBe("Author: Silavin");
+    expect(lines.map((l) => l.content)).toEqual(paragraphs.slice(1));
+    expect(lines.some((l) => /report chapter|Blood Binding Seal$/.test(l.content))).toBe(false);
   });
 
   it("fetches the canonical URL for a mirror or legacy chapter URL", async () => {
@@ -662,12 +709,92 @@ describe("htmlToRawLines + chapterLinesFrom", () => {
     expect(chapterLinesFrom(raw).map((l) => l.content)).toEqual(["Chapter 3: Rain", "It rained."]);
   });
 
+  it("drops bare credits only at the chapter's edges, bracketed credits anywhere", () => {
+    const middle = Array.from({ length: 12 }, (_, i) => `<p>Line ${i + 1}.</p>`);
+    middle.splice(6, 0, "<p>Author: Unknown</p>", "<p>[Translator - Night]</p>");
+    const raw = htmlToRawLines(
+      `<p>Translator: Night</p>${middle.join("")}<p>Editor: Gun</p><p>[Editor - Gun]</p>`,
+      "https://novelbuddy.me/n/c",
+    );
+    const out = chapterLinesFrom(raw).map((l) => l.content);
+    expect(out).toContain("Author: Unknown");
+    expect(out).not.toContain("Translator: Night");
+    expect(out).not.toContain("[Translator - Night]");
+    expect(out).not.toContain("Editor: Gun");
+    expect(out).not.toContain("[Editor - Gun]");
+    expect(out).toHaveLength(13);
+  });
+
+  it("drops a first paragraph that repeats the chapter title, and only that", () => {
+    const raw = htmlToRawLines("<p>Chapter 3 - Rain!</p><p>It rained.</p>", "https://novelbuddy.me/n/c");
+    expect(chapterLinesFrom(raw, "chapter 3: rain").map((l) => l.content)).toEqual(["It rained."]);
+    expect(chapterLinesFrom(raw, "Chapter 3: Snow").map((l) => l.content)).toEqual(["Chapter 3 - Rain!", "It rained."]);
+  });
+
+  it("drops scraped chapter-navigation lines at the chapter's edges", () => {
+    const body = Array.from({ length: 8 }, (_, i) => `<p>Line ${i + 1}.</p>`).join("");
+    const raw = htmlToRawLines(
+      `<p>Next Chapter</p>${body}<p>Previous Chapter | Next Chapter</p><p>Previous Chapter</p>`,
+      "https://novelbuddy.me/n/c",
+    );
+    expect(chapterLinesFrom(raw).map((l) => l.content)).toEqual(Array.from({ length: 8 }, (_, i) => `Line ${i + 1}.`));
+    const mid = htmlToRawLines(`${body}<p>Next chapter</p>${body}`, "https://novelbuddy.me/n/c");
+    expect(chapterLinesFrom(mid).map((l) => l.content)).toContain("Next chapter");
+  });
+
+  it("strips private-use obfuscation glyphs, dropping lines made only of them", () => {
+    const raw = htmlToRawLines(
+      "<p>\ue5e5I'm back!!!</p><p>\ue5e5\ue5e5<br />\ue5e5<br />Done.</p>",
+      "https://novelbuddy.me/n/c",
+    );
+    expect(raw.map((l) => l.content)).toEqual(["I'm back!!!", "Done."]);
+  });
+
+  it("removes zero-width characters the site leaves between words", () => {
+    const raw = htmlToRawLines("<p>Chapter\u200c \u200c2309:\u200c The\u200b Power\ufeff</p>", "https://novelbuddy.me/n/c");
+    expect(raw.map((l) => l.content)).toEqual(["Chapter 2309: The Power"]);
+  });
+
   it("does not mistake dialogue that mentions an editor for a credit line", () => {
     const raw = htmlToRawLines(
       "<p>The editor: a tired man who never slept.</p><p>Editor: Henyee Translations</p>",
       "https://novelbuddy.me/n/c",
     );
     expect(chapterLinesFrom(raw).map((l) => l.content)).toEqual(["The editor: a tired man who never slept."]);
+  });
+});
+
+describe("stripWatermarks", () => {
+  it("drops every freewebnovel watermark line seen live", () => {
+    for (const line of [
+      "Foll𝑜w current novℯls on ƒrēewebnoѵёl.cσm.",
+      "Updat𝓮d fr𝙤m ƒгeeweɓn૦vel.com.",
+      "The 𝘮ost uptodat𝑒 novels are pub𝙡ished on freeweɓnovēl.coɱ.",
+      "Visit frёewebnoѵel.ƈo๓ for the b𝘦st novel reading experience.",
+      "The 𝘮ost uptodat𝑒 novels are pub𝙡ished on fre(e)webno(v)el.𝒸𝑜𝘮",
+      "Read the latest chapters at freewebnovel.com",
+    ]) {
+      expect(stripWatermarks(line), line).toBe("");
+    }
+  });
+
+  it("cuts only the watermark sentence out of a story paragraph", () => {
+    expect(stripWatermarks("Not until today at least.𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖")).toBe("Not until today at least.");
+    expect(
+      stripWatermarks('"Go." Visit frёewebnoѵel.ƈo๓ for the b𝘦st novel reading experience. He went.'),
+    ).toBe('"Go." He went.');
+    expect(stripWatermarks("𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖He went.")).toBe("He went.");
+  });
+
+  it("leaves story text that merely talks about web novels alone", () => {
+    for (const line of [
+      "He spent the night reading a free web novel.",
+      "Her novel, completed at last, was the best thing she had written.",
+      "The café served crème brûlée to the novelist.",
+      "“Novel bin? Throw it in the novel bin,” she joked.",
+    ]) {
+      expect(stripWatermarks(line), line).toBe(line);
+    }
   });
 });
 
@@ -701,6 +828,46 @@ describe("searchChapters", () => {
     const calls: Array<{ url: string; method: string }> = [];
     expect(await createSource(novelHost({ calls })).searchChapters!(NOVEL_URL, "  ")).toEqual([]);
     expect(calls).toEqual([]);
+  });
+});
+
+// ── transient failures ─────────────────────────────────────────────────
+
+describe("retrying a dropped request", () => {
+  const CH_URL = "https://novelbuddy.me/shadows-oath/chapter-108";
+
+  it("retries once when the request itself fails, then succeeds", async () => {
+    const logs: LogEntry[] = [];
+    const base = host({ [CH_URL]: chapterHtml }, { logs });
+    let attempts = 0;
+    const flaky: SourceHost = {
+      ...base,
+      async fetch(url, o) {
+        attempts++;
+        if (attempts === 1) throw new Error("curl: (35) Recv failure: Connection reset by peer");
+        return base.fetch(url, o);
+      },
+    };
+    const lines = await createSource(flaky).getChapterContent(chapterOf(CH_URL));
+    expect(attempts).toBe(2);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(logs.filter((l) => l.level === "debug").map((l) => l.message)).toContain(
+      `${PREFIX}${CH_URL} failed (curl: (35) Recv failure: Connection reset by peer); retrying once.`,
+    );
+  });
+
+  it("retries a 5xx once and reports the second answer", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(host({ "/home": homeHtml }, { calls, status: () => 502 }));
+    await expect(source.getHomeSections()).rejects.toThrow(`${PREFIX}https://novelbuddy.me/home answered HTTP 502.`);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("does not retry a 4xx", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(host({ [CH_URL]: chapterHtml }, { calls, status: () => 404 }));
+    await expect(source.getChapterContent(chapterOf(CH_URL))).rejects.toThrow("HTTP 404");
+    expect(calls).toHaveLength(1);
   });
 });
 

@@ -379,7 +379,7 @@ export interface RawLine {
  *
  *  This is deliberately a walk of the whole fragment rather than a
  *  `querySelectorAll("p")`: chapter bodies on this site come in three
- *  shapes (measured over 40 chapters from 40 different novels) —
+ *  shapes (measured over 73 chapters from 54 novels) —
  *  `<p>` paragraphs; a `<div>` holding a bare heading text node and then
  *  `<p>`s; and, on machine-translated titles, bare text nodes separated by
  *  `<br /><br />` with no `<p>` at all. A `<p>`-only reader returns zero
@@ -391,7 +391,12 @@ export function htmlToRawLines(html: string, baseUrl: string): RawLine[] {
   let bufInParagraph = false;
 
   const flush = () => {
-    const text = sanitizeText(buf);
+    // Zero-width characters (U+200B-U+200D, U+2060, U+FEFF) are not `\s`,
+    // so sanitizeText keeps them; Reverend Insanity's later chapters put a
+    // U+200C after nearly every word. Private-Use-Area code points
+    // (U+E000-U+F8FF) are the source site's font-obfuscation glyphs (whole
+    // lines of U+E5E5 in MTL chapters) and render as tofu without that font.
+    const text = sanitizeText(buf.replace(/[\u200b-\u200d\u2060\ufeff\ue000-\uf8ff]/g, ""));
     if (text) out.push({ type: "text", content: text, inParagraph: bufInParagraph });
     buf = "";
     bufInParagraph = false;
@@ -436,17 +441,127 @@ export function htmlToRawLines(html: string, baseUrl: string): RawLine[] {
   return out;
 }
 
-/** The site's own UI notice, injected into some chapter bodies as a bare
- *  `<div>` ("A new text-to-speech function has been added. You can try
- *  clicking on the settings!"). Not story text. */
-const SITE_NOTICE_RE = /^a new text-to-speech function has been added\b/i;
+/** Site furniture baked into chapter bodies, dropped wherever it appears.
+ *  Both are distinctive whole sentences, never story text:
+ *  - the site's own UI notice, a bare `<div>` at the end of some chapters:
+ *    "A new text-to-speech function has been added. You can try clicking
+ *    on the settings!"
+ *  - the footer older, scraped chapters carry from the site they were
+ *    copied from: "If you find any errors ( Ads popup, ads redirect,
+ *    broken links, non-standard content, etc.. ), Please let us know
+ *    < report chapter > so we can fix it as soon as possible." */
+const SITE_NOTICE_RES = [
+  /^a new text-to-speech function has been added\b/i,
+  /^if you find any errors\b.*\blet us know\b/i,
+];
 
-/** Translation-team credit lines: `Editor: Henyee Translations`,
- *  `[Translator - Night]`, `[Proofreader - Gun]` (all seen live). Bounded
- *  to short lines with a separator right after the role word, so a line of
- *  dialogue that merely mentions an editor is never caught. */
-const CREDIT_RE =
-  /^\[?\s*(?:translator|translated by|editor|edited by|proofreader|proofread by)\s*[:：\-–—]\s*[^\]]{1,60}\]?$/i;
+/** Translation-team credit lines (all four shapes seen live): a role word,
+ *  a separator, and a short name — nothing else on the line.
+ *
+ *  - Bracketed, `[Translator - Night]` / `[Proofreader - Gun]`: dropped
+ *    wherever they appear. Shadow's Oath chapters are two source chapters
+ *    glued together, so the pair shows up mid-body as well as at both
+ *    ends, and a whole line in brackets with a role word is unambiguous.
+ *  - Bare, `Editor: Henyee Translations` / `Author: Silavin`: dropped only
+ *    among a chapter's first and last CREDIT_EDGE text lines, where credits
+ *    sit, so a system panel reading "Author: Unknown" mid-chapter stays. */
+const CREDIT_ROLE = "(?:author|translator|translated by|editor|edited by|proofreader|proofread by)";
+const BRACKETED_CREDIT_RE = new RegExp(`^\\[\\s*${CREDIT_ROLE}\\s*[:：\\-–—]\\s*[^\\]]{1,60}\\]$`, "i");
+const BARE_CREDIT_RE = new RegExp(`^${CREDIT_ROLE}\\s*[:：\\-–—]\\s*[^\\[\\]]{1,60}$`, "i");
+const CREDIT_EDGE = 4;
+
+/** A chapter-navigation link scraped in as text: "Previous Chapter",
+ *  "Next Chapter", "Previous Chapter | Next Chapter", "Table of Contents"
+ *  (seen as the last `<p>` of Against the Gods' prologue). Whole line only,
+ *  and only among the edge lines, like the bare credits. */
+const NAV_PART = "(?:(?:previous|prev|next)\\s+chapter|table\\s+of\\s+contents)";
+const NAV_RE = new RegExp(`^${NAV_PART}(?:\\s*[|/·•–—-]\\s*${NAV_PART})*$`, "i");
+
+// ── aggregator watermarks ───────────────────────────────────────────────
+//
+// Many chapters were copied from freewebnovel.com and still carry its
+// watermark, spelled with look-alike characters so a plain string match
+// misses it. All seen live, on four different novels:
+//
+//   Foll𝑜w current novℯls on ƒrēewebnoѵёl.cσm.                (own <p>)
+//   Updat𝓮d fr𝙤m ƒгeeweɓn૦vel.com.                            (own <p>)
+//   The 𝘮ost uptodat𝑒 novels are pub𝙡ished on freeweɓnovēl.coɱ. (own <p>)
+//   Visit frёewebnoѵel.ƈo๓ for the b𝘦st novel reading experience.
+//   The 𝘮ost uptodat𝑒 novels are pub𝙡ished on fre(e)webno(v)el.𝒸𝑜𝘮
+//   …Not until today at least.𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖                (glued onto story text)
+//
+// `foldForMatch` undoes what it can — NFKD turns the mathematical letters
+// (𝓮, 𝕗, 𝚌, 𝒸) and accented ones (ē) back into ASCII — and turns every
+// other non-ASCII letter or digit (ƒ г ɓ ૦ ѵ σ ƈ ๓ ɱ) into a wildcard, so
+// no confusables table has to be complete. A domain then matches when it
+// is one of the aggregator names below plus a TLD — one bracket or
+// punctuation character of noise allowed between letters, "fre(e)webno(v)el"
+// — with at most half of its letters wildcards. Requiring the TLD keeps a
+// story that merely mentions a "web novel" safe.
+
+const WATERMARK_SITES = ["freewebnovel", "novelbin", "lightnovelpub", "lightnovelworld", "novelfire", "novelfull"];
+const WATERMARK_TLDS = ["com", "net", "org", "me", "co"];
+const WILD = "\u0001";
+const NOISE = "()\\[\\]{}*_'\\-";
+const wildWord = (w: string) => Array.from(w, (c) => `[${c}${WILD}]`).join(`[${NOISE}]?`);
+const WATERMARK_RE = new RegExp(
+  `(?:${WATERMARK_SITES.map(wildWord).join("|")})\\s*[.·${WILD}]\\s*(?:${WATERMARK_TLDS.map(wildWord).join("|")})`,
+  "g",
+);
+const SENTENCE_END = /[.!?。！？…]/;
+const CLOSERS = /["'”’)\]\s]/;
+
+/** Lower-cased, ASCII-folded copy of `text` (one entry per output char)
+ *  and, for each folded char, the index of the code point it came from. */
+function foldForMatch(chars: string[]): { folded: string; origin: number[] } {
+  let folded = "";
+  const origin: number[] = [];
+  chars.forEach((ch, i) => {
+    const base = ch.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
+    for (const c of Array.from(base)) {
+      folded += c.charCodeAt(0) < 128 ? c : /[\p{L}\p{N}]/u.test(c) ? WILD : c;
+      origin.push(i);
+    }
+  });
+  return { folded, origin };
+}
+
+/** Removes every aggregator watermark sentence from one line. The cut
+ *  runs from the start of the sentence holding the domain to that
+ *  sentence's end — unless the domain is glued straight onto the next
+ *  word, where only the domain itself goes. Returns "" when nothing but
+ *  watermark was on the line. */
+export function stripWatermarks(text: string): string {
+  // Fast path: a plain-ASCII line that never says "novel" can't hold one.
+  if (!/[^\x00-\x7f]/.test(text) && !/novel/i.test(text)) return text;
+  let chars = Array.from(text);
+  for (let guard = 0; guard < 5; guard++) {
+    const { folded, origin } = foldForMatch(chars);
+    let hit: { start: number; end: number } | null = null;
+    for (const m of folded.matchAll(WATERMARK_RE)) {
+      const letters = m[0].replace(/[\s.·()[\]{}*_'-]/g, "");
+      const wild = letters.split(WILD).length - 1;
+      if (wild * 2 <= letters.length) {
+        hit = { start: origin[m.index!], end: origin[m.index! + m[0].length - 1] + 1 };
+        break;
+      }
+    }
+    if (!hit) break;
+
+    let start = hit.start;
+    while (start > 0 && !SENTENCE_END.test(chars[start - 1])) start--;
+    while (start < hit.start && CLOSERS.test(chars[start])) start++;
+
+    let end = hit.end;
+    if (end < chars.length && !/[\p{L}\p{N}]/u.test(chars[end])) {
+      while (end < chars.length && !SENTENCE_END.test(chars[end])) end++;
+      while (end < chars.length && SENTENCE_END.test(chars[end])) end++;
+      while (end < chars.length && CLOSERS.test(chars[end]) && chars[end] !== " ") end++;
+    }
+    chars = [...chars.slice(0, start), ...chars.slice(end)];
+  }
+  return sanitizeText(chars.join(""));
+}
 
 /** The trailer machine-translated chapters end on — the source site's
  *  "本章完" rendered as a line of its own. Exact whole-line match only. */
@@ -458,27 +573,41 @@ const END_MARKER_RE = /^\(\s*end of (?:this )?chapter\s*\)$/i;
  *  the chapter title the reader already shows. */
 const LEADING_HEADING_RE = /^chapter\s*\d+/i;
 
-/** Raw lines of one chapter body → the lines a reader should see. Drops
- *  the site's TTS notice, credit lines and the MTL end marker anywhere, and
- *  the leading heading only when it is the first line AND sits outside a
- *  `<p>` (the wrapper heading described above). A "Chapter N" line a
- *  translator wrote as a real paragraph is left alone. */
-export function chapterLinesFrom(raw: RawLine[]): SourceLine[] {
+/** Case- and punctuation-blind form of a heading, for comparing a body's
+ *  first line with the chapter title. */
+const headingKey = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+
+/** Raw lines of one chapter body → the lines a reader should see. Cuts
+ *  aggregator watermark sentences out of every line (dropping the line if
+ *  nothing else was on it); drops site notices, bracketed credits and the
+ *  MTL end marker anywhere; bare credit lines and navigation remnants among
+ *  the first/last CREDIT_EDGE text lines; and a leading heading — the first text line,
+ *  when it either sits outside a `<p>` and reads "Chapter N…" (the wrapper
+ *  heading described above) or, in a `<p>`, is the chapter's own title
+ *  again ignoring case and punctuation ("Chapter 6081, Disciplinary Hall").
+ *  Any other "Chapter N" paragraph a translator wrote is left alone. */
+export function chapterLinesFrom(raw: RawLine[], chapterTitle = ""): SourceLine[] {
+  const titleKey = headingKey(chapterTitle);
+  const textAt = raw.flatMap((l, i) => (l.type === "text" ? [i] : []));
+  const edges = new Set([...textAt.slice(0, CREDIT_EDGE), ...textAt.slice(-CREDIT_EDGE)]);
   const lines: SourceLine[] = [];
-  let first = true;
-  for (const line of raw) {
+  raw.forEach((line, i) => {
     if (line.type === "image") {
       lines.push({ type: "image", content: line.content });
-      continue;
+      return;
     }
-    const isFirst = first;
-    first = false;
-    if (isFirst && !line.inParagraph && LEADING_HEADING_RE.test(line.content)) continue;
-    if (SITE_NOTICE_RE.test(line.content)) continue;
-    if (CREDIT_RE.test(line.content)) continue;
-    if (END_MARKER_RE.test(line.content)) continue;
-    lines.push({ type: "text", content: line.content });
-  }
+    const text = stripWatermarks(line.content);
+    if (!text) return;
+    if (i === textAt[0]) {
+      if (!line.inParagraph && LEADING_HEADING_RE.test(text)) return;
+      if (titleKey && headingKey(text) === titleKey) return;
+    }
+    if (SITE_NOTICE_RES.some((re) => re.test(text))) return;
+    if (BRACKETED_CREDIT_RE.test(text)) return;
+    if (edges.has(i) && (BARE_CREDIT_RE.test(text) || NAV_RE.test(text))) return;
+    if (END_MARKER_RE.test(text)) return;
+    lines.push({ type: "text", content: text });
+  });
   return lines;
 }
 
@@ -633,9 +762,30 @@ export default function createSource(host: SourceHost): Source {
     }
   };
 
+  /** host.fetch with ONE immediate retry when the request throws (network
+   *  error) or answers 5xx. The site is slow and flaky under plain load —
+   *  measured 1–21 s per page, an occasional 60 s stall, and the odd TLS
+   *  "connection reset by peer" — and one dropped request would otherwise
+   *  fail a chapter in the middle of a long import. 4xx answers are not
+   *  retried: they are the site's real answer. No back-off delay: timers
+   *  are not something an extension can count on having. */
+  async function get(url: string): Promise<FetchResponse> {
+    try {
+      const resp = await host.fetch(url);
+      if (resp.status < 500) return resp;
+      host.log("debug", `novelbuddy: ${url} answered HTTP ${resp.status}; retrying once.`);
+    } catch (err) {
+      host.log(
+        "debug",
+        `novelbuddy: ${url} failed (${err instanceof Error ? err.message : String(err)}); retrying once.`,
+      );
+    }
+    return host.fetch(url);
+  }
+
   async function loadNovelPage(slug: string): Promise<Json> {
     const pageUrl = novelUrl(slug);
-    const resp = await host.fetch(pageUrl);
+    const resp = await get(pageUrl);
     const props = readPageProps(resp, pageUrl);
     const manga = props.initialManga;
     if (!isObject(manga) || !sanitizeText(str(manga.name))) {
@@ -653,7 +803,7 @@ export default function createSource(host: SourceHost): Source {
       throw new Error(`novelbuddy: ${novelUrl(slug)} carried no usable title id (got "${titleId}").`);
     }
     const listUrl = chapterListUrl(titleId, manga.cv);
-    const resp = await host.fetch(listUrl);
+    const resp = await get(listUrl);
     const chapters = parseChapterList(resp.text, listUrl, resp.status, fallbackTitle);
 
     const stats = isObject(manga.stats) ? manga.stats : {};
@@ -680,7 +830,7 @@ export default function createSource(host: SourceHost): Source {
     async getHomeSections(): Promise<SourceSection[]> {
       const pageUrl = `${BASE_URL}/home`;
       host.log("info", "getHomeSections");
-      const resp = await host.fetch(pageUrl);
+      const resp = await get(pageUrl);
       const props = readPageProps(resp, pageUrl);
       return parseHomeSections(resp.text, props, pageUrl);
     },
@@ -692,7 +842,7 @@ export default function createSource(host: SourceHost): Source {
 
       const url = searchUrl(trimmed, pageNo);
       host.log("info", `search(${trimmed}) page ${pageNo} -> ${url}`);
-      const resp = await host.fetch(url);
+      const resp = await get(url);
       const props = readPageProps(resp, url);
       const items = props.ssrItems;
       if (!Array.isArray(items)) {
@@ -736,7 +886,7 @@ export default function createSource(host: SourceHost): Source {
       const url = canonicalChapterUrl(chapter.url);
       // debug, not info: one call per chapter of an import.
       host.log("debug", `getChapterContent(${url})`);
-      const resp = await host.fetch(url);
+      const resp = await get(url);
       const props = readPageProps(resp, url);
       const data = props.initialChapter;
       const content = isObject(data) ? data.content : undefined;
@@ -746,7 +896,7 @@ export default function createSource(host: SourceHost): Source {
           `novelbuddy: ${url} carried no chapter text (pageProps.initialChapter.content)${why ? `: ${why}` : ""}.`,
         );
       }
-      const lines = chapterLinesFrom(htmlToRawLines(content, url));
+      const lines = chapterLinesFrom(htmlToRawLines(content, url), chapter.title);
       if (!lines.some((l) => l.type === "text")) {
         throw new Error(`novelbuddy: chapter body at ${url} parsed to zero lines of text.`);
       }
