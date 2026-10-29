@@ -24,9 +24,9 @@ import { sanitizeText } from "./dom";
 // wherever a character has a look-alike — and cut out of the original, so
 // the story text around one comes through untouched.
 
-/** Stands in for a letter or digit with no known ASCII look-alike (ƒ г ɓ ૦
- *  σ ๓ …). It matches any brand letter, so the table below never has to be
- *  complete; WATERMARK_SPAN_RE's callers cap how many a match may use. */
+/** Stands in for a letter or digit with no known ASCII look-alike (г ૦ σ
+ *  ๓ …). It matches any letter of a name, so the table below never has to
+ *  be complete; stripWatermarks caps it at half of a match's letters. */
 const WILD = "\u0001";
 
 /** Look-alikes NFKD leaves alone (it already folds mathematical, fullwidth,
@@ -166,8 +166,10 @@ const CLOSER_RE = /["'”’)\]|\s]/;
  *  domain goes with the sentence it sits in ("Visit frёewebnoѵel.ƈo๓ for
  *  the b𝘦st novel reading experience.") — but alone when it opens a
  *  sentence of its own, glued or not ("…at least.𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖",
- *  `auzw.com "Ha." With a grin…`). Any other watermark goes with its
- *  lead-in, decoration and promo aside, and the sentence around it stays. */
+ *  `auzw.com "Ha." With a grin…`), unless the words after it carry on in
+ *  lower case. Any other watermark — a decorated domain included — goes
+ *  with its lead-in, decoration and promo aside, and the sentence around
+ *  it stays. */
 export function stripWatermarks(line: string): string {
   if (!FOLD_NEEDED_RE.test(line) && !BRAND_CORE_RE.test(line)) return line;
 
