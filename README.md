@@ -303,6 +303,25 @@ Use them rather than writing your own, so every extension behaves the same way.
     `Retry-After` (or `defaultWaitMs`) throws at once without a request.
 
   Extensions run in the app's webview, so `setTimeout` is there to back off with.
+- **Chapter-text cleanup** (`src/clean.ts`) for text copied from aggregator sites:
+  - `stripWatermarks(line)` cuts aggregator watermarks out of one line and returns the
+    rest (`""` when nothing readable is left). It folds look-alike letters to ASCII
+    (NFKD, a confusables table, and a capped wildcard for anything else), allows digit
+    swaps (`Nove1Fire`) and one character of noise between letters (`f(r)eewebn(o)vel`),
+    and only counts a known name (`WATERMARK_BRANDS`) when it has a TLD, is disguised,
+    or is wrapped in decoration (`❖ Novelight ❖`) — never a plain mention. A domain goes
+    with the sentence it sits in; a decorated name goes with its lead-in and promo
+    aside; a bracket group holding one goes whole. Lines of plain ASCII and punctuation
+    skip the per-character fold.
+  - `findCreditLines(lines)` finds translation-team credit lines: `[Translator - Night]`
+    anywhere, `Editor: Henyee Translations` / `TL: Hanguk` / a bare `Translator:` label
+    and its name line only near a chapter's edges, and never a speaker line
+    (`Ed: [Hey, wait!]`).
+  - `isLeadingHeading(line, { title, numbered })` — is a body's first line just the
+    chapter heading again ("Chapter 12…", or the title in other punctuation)?
+
+  What only one site does (promo lines, publisher notices, donation plugs) stays in that
+  extension.
 
 ## Testing
 

@@ -139,8 +139,13 @@ the site displays them: `The<em>Myrrason Family.</em>` becomes
 
 ### Junk lines
 
-The text is the scanlator's as uploaded, so some chapters carry plugs.
-`isJunkLine` drops a line when it is:
+The text is the scanlator's as uploaded, so some chapters carry plugs and
+credits. Two rules are the shared ones from `@riwaq/extension-api` (see the repo
+README's "Shared helpers"): `findCreditLines` drops a credit line of names after
+`Translator:`, `Editor:`, `Proofreader:`, `TL:`, `ED:` etc. ("Translator:
+AtlasStudios Editor: AtlasStudios") within 4 lines of either end of the chapter, and
+`stripWatermarks` cuts a known aggregator's watermark out of a line, keeping the
+story around it. Then `isJunkLine` drops a line when it is:
 
 - a link (`http(s)://`, `www.`) or a bare `name.com/.net/.org/.moe` domain
   (the TLD is matched lower-case so `time.Me` can't hit);
@@ -150,9 +155,7 @@ The text is the scanlator's as uploaded, so some chapters carry plugs.
 - a Discord plug (`join our/the discord`, `in the discord`, `Discord:`,
   `discord server/link/channel`), not the plain noun ("discord between the sects");
 - an "advance(d) chapters" / "Adv4nc3 Ch4pt3r" upsell;
-- a translator-notes header (`Translator's Comments`, `Translator Notes: …`, `TL notes`);
-- a credit line of at most 160 chars starting `Translator:`, `Editor:`,
-  `Proofreader:`, `TL:`, `ED:` etc. ("Translator: AtlasStudios Editor: AtlasStudios").
+- a translator-notes header (`Translator's Comments`, `Translator Notes: …`, `TL notes`).
 
 Calibrated against ~85 chapters across ~75 novels. Every pattern is a
 shape actually seen, and ordinary prose ("The coffee here is delicious.",

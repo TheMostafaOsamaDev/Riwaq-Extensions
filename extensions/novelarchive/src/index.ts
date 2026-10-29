@@ -22,10 +22,12 @@
 // chapter.
 //
 // Chapter text is the archive's plain text, scrubbed of the watermarks and
-// leftovers it picked up from the sites it was gathered from (clean.ts).
+// leftovers it picked up from the sites it was gathered from (the shared
+// rules in @riwaq/extension-api, plus this archive's own in clean.ts).
 // See README.md for the endpoints, field mapping and quirks.
 import {
   createFetcher,
+  isLeadingHeading,
   sanitizeText,
   SourceUrlError,
   type NovelCard,
@@ -59,10 +61,10 @@ export const PAGE_SIZE = 24;
 
 const NOVEL_ID_RE = /^[0-9a-f]{24}$/i;
 
-/** The leading "Chapter 12" / "Chapter 2 - 2" line many chapters open with.
- *  The site's reader drops it (trimLeadingHeading in reader-page.js) because
- *  it only repeats the chapter title; the same test is used here. */
-const LEADING_HEADING_RE = /^chapter\s*\d+/i;
+/** The leading "Chapter 12" / "Chapter 2 - 2" line many chapters open with
+ *  only repeats the chapter title. The site's reader drops it when it is
+ *  shorter than this (trimLeadingHeading in reader-page.js) — plain text has
+ *  nothing else to tell a heading from a paragraph by — and so does this. */
 const LEADING_HEADING_MAX_LENGTH = 80;
 
 /** Site categories that ride along in `genres` but are not genres. Copied
@@ -233,8 +235,8 @@ export function chaptersFor(
  *  archive stores text only, paragraphs separated by blank lines in most
  *  novels and by single newlines in others (the site renders the latter as
  *  <br>), so every non-empty line is a paragraph. Aggregator watermarks,
- *  credits and other leftovers are removed (see clean.ts), and a leading
- *  "Chapter N…" heading is dropped, as the site's reader drops it. */
+ *  credits and other leftovers are removed (see clean.ts), and a short
+ *  leading "Chapter N…" heading is dropped, as the site's reader drops it. */
 export function contentToLines(content: string): SourceLine[] {
   const paragraphs = cleanLines(
     repairMojibake(content)
@@ -245,7 +247,7 @@ export function contentToLines(content: string): SourceLine[] {
   if (
     paragraphs.length > 1 &&
     paragraphs[0].length < LEADING_HEADING_MAX_LENGTH &&
-    LEADING_HEADING_RE.test(paragraphs[0])
+    isLeadingHeading(paragraphs[0])
   ) {
     paragraphs.shift();
   }

@@ -166,12 +166,15 @@ Reads `chapter.url` back into `(novelId, n)` (it never trusts `chapter.id`), fet
 A body that cleans down to nothing throws `chapter <n> of novel <id> has no text`
 rather than returning an empty chapter that looks like a successful read.
 
-## Cleaning chapter text (`src/clean.ts`)
+## Cleaning chapter text
 
 The archive's text came from aggregator sites, and some of it still carries what
 they stamped into it. Every rule exists because a live chapter showed it; a scan of
 roughly 270 chapters across 100 novels (popular, longest, top-rated and newest)
-found these:
+found these. Watermarks and credit lines are handled by the shared
+`stripWatermarks` and `findCreditLines` from `@riwaq/extension-api` (see the repo
+README's "Shared helpers"); promo lines, bracketed URLs, the publisher notice, code
+fences and mojibake by this extension's own `src/clean.ts`:
 
 | Leftover | Example (verbatim) | Handling |
 |---|---|---|
@@ -180,31 +183,35 @@ found these:
 | promo tail on a story line | `\|Additional Boon: …\| ɪꜰ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ʀᴇᴀᴅ ᴍᴏʀᴇ ᴄʜᴀᴘᴛᴇʀs, ᴘʟᴇᴀsᴇ ᴠɪsɪᴛ Nove1Fire.net` | tail cut, system message kept |
 | bracketed URL | `The [Liancheng www.wsx5.cn] branch of …` · `Fenglian [笔趣阁www.biqugeso.me] Ye Yu` | bracket group cut |
 | aggregator promo line | `Remember [www.wuxiaspot.com] for one second, update fast, no pop-up window, free to read!` · `If you like the Dragon Emperor, please collect it: (www.novelbuddy.com) …` · `Table of Contents URL: https://www.mtlnovel.com/…` | line dropped |
-| credits at the top | `Translator:` / `Nyoi-Bo Studio` / `Editor:` / `Nyoi-Bo Studio` · `Translator: Henyee Translations Editor: Henyee Translations` · `Proofread By:` / `Archbishop#750` · `TL: Hanguk` | dropped (first 8 lines only; a label alone takes its name line with it) |
+| credits at the top | `Translator:` / `Nyoi-Bo Studio` / `Editor:` / `Nyoi-Bo Studio` · `Translator: Henyee Translations Editor: Henyee Translations` · `Proofread By:` / `Archbishop#750` · `TL: Hanguk` | dropped (within 4 lines of either end, or touching another credit there; a label alone takes its name line with it; `Ed: [Hey, wait!]` is dialogue and stays) |
 | publisher notice | `This book is produced and distributed electronically by Zhangyue Technology authorized by Hongshu.com (Dejian)` / `all rights reserved` / `·` / `Infringement will be investigated` | block dropped |
 | code fences | `` ```html `` … `` ``` `` | dropped |
 
-How the watermark matching works:
+How the watermark matching works (the shared `stripWatermarks`):
 
-- Each line is **folded** for matching: every character maps to one lowercase ASCII
-  character where it has a look-alike — NFKD covers mathematical, fullwidth,
-  Roman-numeral and accented letters (`𝒆`, `ｎ`, `Ⅰ`, `é`), and a table covers the
-  Cyrillic, Greek, IPA and small-capital ones NFKD leaves alone (`о`, `ѳ`, `ɾ`,
-  `ɓ`, `ɭ`, `ᴘ`, `ꜰ`, …). The fold keeps a per-character index map, so a match is
+- Each line is **folded** for matching: NFKD covers mathematical, fullwidth,
+  Roman-numeral and accented letters (`𝒆`, `ｎ`, `Ⅰ`, `é`), a table covers the
+  Cyrillic, Greek, IPA and small-capital ones NFKD leaves alone (`о`, `ѳ`, `ɾ`, `ɓ`,
+  `ɭ`, `ᴘ`, `ꜰ`, …), and any non-ASCII letter or digit still left (`г`, `૦`, `σ`, `๓`)
+  is a wildcard, at most half of a match. The fold keeps an index map, so a match is
   cut out of the *original* line and the text around it is untouched.
-- Brands are matched letter by letter with an optional space or parenthesis between
-  letters (`N o v e l i g h t`, `f(r)eewebn(o)vel`) and the usual digit swaps
-  (`Nove1Fire`). The list is in `BRANDS`; add to it when a new one turns up.
-- A brand only counts as a watermark when it has a TLD glued on (`novelfire.net`),
-  is disguised (any non-ASCII letter, digit swap or parenthesis inside it), or is
-  wrapped in decoration (any Unicode symbol: `❖ ➤ ✪ ◈ ~ °• #`). A plain mention
-  survives — a translator's afterword saying "after about a year on NovelFire." is
-  kept as written.
-- After cutting, a line with nothing readable left, or whose remainder is aggregator
+- Names are matched letter by letter with one space or bracket of noise allowed
+  between letters (`N o v e l i g h t`, `f(r)eewebn(o)vel`) and the usual digit swaps
+  (`Nove1Fire`). The list is `WATERMARK_BRANDS` in `packages/extension-api`; add to it
+  when a new one turns up.
+- A name only counts as a watermark when it has a TLD glued on (`novelfire.net`), is
+  disguised (a look-alike letter, digit swap or bracket inside it), or is wrapped in
+  decoration (`❖ ➤ ✪ ◈ ~ °• #`). A plain mention survives — a translator's afterword
+  saying "after about a year on NovelFire." is kept as written.
+- A domain goes with the sentence it sits in (`Biquge www.novelbuddy.com, update the
+  latest chapter…!`), or alone when it stands as a sentence of its own
+  (`auzw.com "Ha." With a grin, …`); a decorated name goes with its lead-in and promo
+  aside; a short bracket group holding one goes whole.
+- Then, here: a bracket group holding any URL is cut, and a line that lost a
+  watermark or URL, or still carries a URL, is dropped when what is left is aggregator
   promo speak ("fastest", "latest chapters", "please collect", "free to read",
-  "published on", …), is dropped. That promo test only runs on lines that carried a
-  watermark or a URL, so ordinary story text never trips it; a bare reference URL in
-  a translator's note (`https://en.m.wikipedia.org/wiki/…`) is kept.
+  "published on", …). Ordinary story text never trips that; a bare reference URL in a
+  translator's note (`https://en.m.wikipedia.org/wiki/…`) is kept.
 
 ### Mojibake
 

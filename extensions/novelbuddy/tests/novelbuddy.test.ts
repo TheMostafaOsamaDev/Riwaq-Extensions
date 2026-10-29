@@ -14,7 +14,6 @@ import createSource, {
   novelPath,
   searchUrl,
   slugFromUrl,
-  stripWatermarks,
 } from "../src/index";
 import { strings } from "../src/strings";
 import { parseHtml, sanitizeText, SourceUrlError, type SourceHost } from "@riwaq/extension-api";
@@ -758,40 +757,6 @@ describe("htmlToRawLines + chapterLinesFrom", () => {
       "https://novelbuddy.me/n/c",
     );
     expect(chapterLinesFrom(raw).map((l) => l.content)).toEqual(["The editor: a tired man who never slept."]);
-  });
-});
-
-describe("stripWatermarks", () => {
-  it("drops every freewebnovel watermark line seen live", () => {
-    for (const line of [
-      "Foll𝑜w current novℯls on ƒrēewebnoѵёl.cσm.",
-      "Updat𝓮d fr𝙤m ƒгeeweɓn૦vel.com.",
-      "The 𝘮ost uptodat𝑒 novels are pub𝙡ished on freeweɓnovēl.coɱ.",
-      "Visit frёewebnoѵel.ƈo๓ for the b𝘦st novel reading experience.",
-      "The 𝘮ost uptodat𝑒 novels are pub𝙡ished on fre(e)webno(v)el.𝒸𝑜𝘮",
-      "Read the latest chapters at freewebnovel.com",
-    ]) {
-      expect(stripWatermarks(line), line).toBe("");
-    }
-  });
-
-  it("cuts only the watermark sentence out of a story paragraph", () => {
-    expect(stripWatermarks("Not until today at least.𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖")).toBe("Not until today at least.");
-    expect(
-      stripWatermarks('"Go." Visit frёewebnoѵel.ƈo๓ for the b𝘦st novel reading experience. He went.'),
-    ).toBe('"Go." He went.');
-    expect(stripWatermarks("𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖He went.")).toBe("He went.");
-  });
-
-  it("leaves story text that merely talks about web novels alone", () => {
-    for (const line of [
-      "He spent the night reading a free web novel.",
-      "Her novel, completed at last, was the best thing she had written.",
-      "The café served crème brûlée to the novelist.",
-      "“Novel bin? Throw it in the novel bin,” she joked.",
-    ]) {
-      expect(stripWatermarks(line), line).toBe(line);
-    }
   });
 });
 

@@ -107,35 +107,34 @@ same JSON for one request and never go stale.
 ## What `getChapterContent` strips
 
 Applied by `chapterLinesFrom` to the lines `htmlToRawLines` produced
-(`chapter.title` is passed in for the heading rule):
+(`chapter.title` is passed in for the heading rule). The watermark, credit and
+heading rules are the shared ones from `@riwaq/extension-api` (`stripWatermarks`,
+`findCreditLines`, `isLeadingHeading` — see the repo README's "Shared helpers"); the
+notices, navigation and end marker are this site's own:
 
 | Line | Seen on | Rule |
 |---|---|---|
 | `Foll𝑜w current novℯls on ƒrēewebnoѵёl.cσm.`, `Updat𝓮d fr𝙤m ƒгeeweɓn૦vel.com.`, `…on fre(e)webno(v)el.𝒸𝑜𝘮`, `Visit frёewebnoѵel.ƈo๓ for the b𝘦st novel reading experience.` | chapters copied from freewebnovel.com (Shadow's Oath, Lord of Mysteries fan-fic, Overgeared, Martial Peak, …) | the **sentence** holding the domain is cut, anywhere; the line goes only if nothing else was on it — see below |
-| `…Not until today at least.𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖` | the same watermark glued onto a real paragraph (Martial Peak) | only the domain goes; the story sentence stays |
+| `…Not until today at least.𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖` | the same watermark glued onto a real paragraph (Martial Peak) | a domain that stands as a sentence of its own goes alone; the story sentence stays |
 | `Chapter 4566: One Too Many (Part 2)` | wrapper-`<div>` and MTL chapters, as a bare text node | first text line, outside a `<p>`, reading "Chapter N…" |
 | `Chapter 6081, Disciplinary Hall` | the same heading inside a `<p>` (Martial Peak) | first text line equal to the chapter's own title, ignoring case and punctuation. Any other "Chapter N" paragraph stays |
 | `A new text-to-speech function has been added. You can try clicking on the settings!` | the site's own notice, a bare `<div>` | anywhere |
 | `If you find any errors ( Ads popup, … ), Please let us know < report chapter > …` | footer copied in with older scraped chapters (Martial Peak) | anywhere |
 | `[Translator - Night]`, `[Proofreader - Gun]` | Shadow's Oath — at both ends *and* mid-body, where two source chapters were glued together | a whole bracketed role/name line, anywhere |
-| `Editor: Henyee Translations`, `Author: Silavin`, `Translator: Skyfarrow Editor: Skyfarrow` | Complete Martial Arts Attributes, Martial Peak, Reverend Insanity | bare role/name lines, only among the first and last 4 text lines — so a system panel's "Author: Unknown" mid-chapter stays |
+| `Editor: Henyee Translations`, `Author: Silavin`, `Translator: Skyfarrow Editor: Skyfarrow` | Complete Martial Arts Attributes, Martial Peak, Reverend Insanity | bare role/name lines, only among the first and last 4 text lines (or touching another credit there) — so a system panel's "Author: Unknown" mid-chapter stays |
 | `Previous Chapter`, `Next Chapter`, `Previous Chapter \| Next Chapter` | navigation scraped in as a `<p>` (Against the Gods) | whole line, only among the first and last 4 text lines |
 | `(End of this chapter)` | MTL chapters (the source's "本章完") | exact whole line, anywhere |
 
-**The watermark matcher.** freewebnovel spells its domain with look-alike
-characters, a different mix on every chapter. `stripWatermarks` folds each
-line with NFKD (mathematical letters such as 𝓮 𝕗 𝚌 𝒸 and accented letters
-such as ē come back as ASCII), turns every *remaining* non-ASCII letter or
-digit (ƒ г ɓ ૦ ѵ σ ƈ ๓ ɱ …) into a wildcard, and then looks for one of a few
-aggregator names (`freewebnovel`, `novelbin`, `lightnovelpub`,
-`lightnovelworld`, `novelfire`, `novelfull`) **followed by a TLD**, allowing
-one bracket/punctuation character between letters (`fre(e)webno(v)el`) and
-at most half the letters as wildcards. No confusables table has to be
-complete, and requiring the TLD keeps a story that talks about "a free web
-novel" untouched. The cut runs from the start of the sentence holding the
-domain to its end — unless the domain is glued straight onto the next
-word, where only the domain goes. A plain-ASCII line that never says
-"novel" skips all of this.
+**The watermark matcher** is the shared `stripWatermarks`. freewebnovel spells
+its domain with look-alike characters, a different mix on every chapter: the
+matcher folds each line with NFKD (𝓮 𝕗 𝚌 𝒸 ē come back as ASCII) and a
+confusables table (Cyrillic, Greek, small capitals), and turns whatever non-ASCII
+letter or digit is *still* left (ƒ г ɓ ૦ σ ๓ …) into a wildcard, at most half of a
+match's letters. A known aggregator name only counts with a TLD, disguised, or
+wrapped in decoration, so a story that talks about "a free web novel" is untouched.
+The cut runs from the start of the sentence holding the domain to its end — unless
+the domain stands as a sentence of its own (glued onto the next word, or followed
+by a new sentence), where only the domain goes.
 
 Left in on purpose: author's and translator's notes ("Author's Note: …",
 "TL note: …", "A/N: Join Patreon…") — they are the author's own words and no

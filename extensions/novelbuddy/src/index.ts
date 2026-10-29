@@ -36,9 +36,12 @@
 import {
   absoluteUrl,
   createFetcher,
+  findCreditLines,
+  isLeadingHeading,
   parseHtml,
   sanitizeText,
   SourceUrlError,
+  stripWatermarks,
   type FetchResponse,
   type NovelCard,
   type Source,
@@ -456,141 +459,34 @@ const SITE_NOTICE_RES = [
   /^if you find any errors\b.*\blet us know\b/i,
 ];
 
-/** Translation-team credit lines (all four shapes seen live): a role word,
- *  a separator, and a short name — nothing else on the line.
- *
- *  - Bracketed, `[Translator - Night]` / `[Proofreader - Gun]`: dropped
- *    wherever they appear. Shadow's Oath chapters are two source chapters
- *    glued together, so the pair shows up mid-body as well as at both
- *    ends, and a whole line in brackets with a role word is unambiguous.
- *  - Bare, `Editor: Henyee Translations` / `Author: Silavin`: dropped only
- *    among a chapter's first and last CREDIT_EDGE text lines, where credits
- *    sit, so a system panel reading "Author: Unknown" mid-chapter stays. */
-const CREDIT_ROLE = "(?:author|translator|translated by|editor|edited by|proofreader|proofread by)";
-const BRACKETED_CREDIT_RE = new RegExp(`^\\[\\s*${CREDIT_ROLE}\\s*[:：\\-–—]\\s*[^\\]]{1,60}\\]$`, "i");
-const BARE_CREDIT_RE = new RegExp(`^${CREDIT_ROLE}\\s*[:：\\-–—]\\s*[^\\[\\]]{1,60}$`, "i");
-const CREDIT_EDGE = 4;
-
 /** A chapter-navigation link scraped in as text: "Previous Chapter",
  *  "Next Chapter", "Previous Chapter | Next Chapter", "Table of Contents"
  *  (seen as the last `<p>` of Against the Gods' prologue). Whole line only,
- *  and only among the edge lines, like the bare credits. */
+ *  and only among a chapter's first and last NAV_EDGE text lines. */
 const NAV_PART = "(?:(?:previous|prev|next)\\s+chapter|table\\s+of\\s+contents)";
 const NAV_RE = new RegExp(`^${NAV_PART}(?:\\s*[|/·•–—-]\\s*${NAV_PART})*$`, "i");
-
-// ── aggregator watermarks ───────────────────────────────────────────────
-//
-// Many chapters were copied from freewebnovel.com and still carry its
-// watermark, spelled with look-alike characters so a plain string match
-// misses it. All seen live, on four different novels:
-//
-//   Foll𝑜w current novℯls on ƒrēewebnoѵёl.cσm.                (own <p>)
-//   Updat𝓮d fr𝙤m ƒгeeweɓn૦vel.com.                            (own <p>)
-//   The 𝘮ost uptodat𝑒 novels are pub𝙡ished on freeweɓnovēl.coɱ. (own <p>)
-//   Visit frёewebnoѵel.ƈo๓ for the b𝘦st novel reading experience.
-//   The 𝘮ost uptodat𝑒 novels are pub𝙡ished on fre(e)webno(v)el.𝒸𝑜𝘮
-//   …Not until today at least.𝕗𝗿𝕖𝐞𝐰𝗲𝕓𝐧𝕠𝕧𝗲𝐥.𝚌𝐨𝚖                (glued onto story text)
-//
-// `foldForMatch` undoes what it can — NFKD turns the mathematical letters
-// (𝓮, 𝕗, 𝚌, 𝒸) and accented ones (ē) back into ASCII — and turns every
-// other non-ASCII letter or digit (ƒ г ɓ ૦ ѵ σ ƈ ๓ ɱ) into a wildcard, so
-// no confusables table has to be complete. A domain then matches when it
-// is one of the aggregator names below plus a TLD — one bracket or
-// punctuation character of noise allowed between letters, "fre(e)webno(v)el"
-// — with at most half of its letters wildcards. Requiring the TLD keeps a
-// story that merely mentions a "web novel" safe.
-
-const WATERMARK_SITES = ["freewebnovel", "novelbin", "lightnovelpub", "lightnovelworld", "novelfire", "novelfull"];
-const WATERMARK_TLDS = ["com", "net", "org", "me", "co"];
-const WILD = "\u0001";
-const NOISE = "()\\[\\]{}*_'\\-";
-const wildWord = (w: string) => Array.from(w, (c) => `[${c}${WILD}]`).join(`[${NOISE}]?`);
-const WATERMARK_RE = new RegExp(
-  `(?:${WATERMARK_SITES.map(wildWord).join("|")})\\s*[.·${WILD}]\\s*(?:${WATERMARK_TLDS.map(wildWord).join("|")})`,
-  "g",
-);
-const SENTENCE_END = /[.!?。！？…]/;
-const CLOSERS = /["'”’)\]\s]/;
-
-/** Lower-cased, ASCII-folded copy of `text` (one entry per output char)
- *  and, for each folded char, the index of the code point it came from. */
-function foldForMatch(chars: string[]): { folded: string; origin: number[] } {
-  let folded = "";
-  const origin: number[] = [];
-  chars.forEach((ch, i) => {
-    const base = ch.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
-    for (const c of Array.from(base)) {
-      folded += c.charCodeAt(0) < 128 ? c : /[\p{L}\p{N}]/u.test(c) ? WILD : c;
-      origin.push(i);
-    }
-  });
-  return { folded, origin };
-}
-
-/** Removes every aggregator watermark sentence from one line. The cut
- *  runs from the start of the sentence holding the domain to that
- *  sentence's end — unless the domain is glued straight onto the next
- *  word, where only the domain itself goes. Returns "" when nothing but
- *  watermark was on the line. */
-export function stripWatermarks(text: string): string {
-  // Fast path: a plain-ASCII line that never says "novel" can't hold one.
-  if (!/[^\x00-\x7f]/.test(text) && !/novel/i.test(text)) return text;
-  let chars = Array.from(text);
-  for (let guard = 0; guard < 5; guard++) {
-    const { folded, origin } = foldForMatch(chars);
-    let hit: { start: number; end: number } | null = null;
-    for (const m of folded.matchAll(WATERMARK_RE)) {
-      const letters = m[0].replace(/[\s.·()[\]{}*_'-]/g, "");
-      const wild = letters.split(WILD).length - 1;
-      if (wild * 2 <= letters.length) {
-        hit = { start: origin[m.index!], end: origin[m.index! + m[0].length - 1] + 1 };
-        break;
-      }
-    }
-    if (!hit) break;
-
-    let start = hit.start;
-    while (start > 0 && !SENTENCE_END.test(chars[start - 1])) start--;
-    while (start < hit.start && CLOSERS.test(chars[start])) start++;
-
-    let end = hit.end;
-    if (end < chars.length && !/[\p{L}\p{N}]/u.test(chars[end])) {
-      while (end < chars.length && !SENTENCE_END.test(chars[end])) end++;
-      while (end < chars.length && SENTENCE_END.test(chars[end])) end++;
-      while (end < chars.length && CLOSERS.test(chars[end]) && chars[end] !== " ") end++;
-    }
-    chars = [...chars.slice(0, start), ...chars.slice(end)];
-  }
-  return sanitizeText(chars.join(""));
-}
+const NAV_EDGE = 4;
 
 /** The trailer machine-translated chapters end on — the source site's
  *  "本章完" rendered as a line of its own. Exact whole-line match only. */
 const END_MARKER_RE = /^\(\s*end of (?:this )?chapter\s*\)$/i;
 
-/** The heading many chapter bodies open with as a bare text node — inside
- *  their wrapper `<div>` ("Chapter 4566: One Too Many (Part 2)"), or at the
- *  top of a `<br>`-separated machine translation ("Chapter 1") — a copy of
- *  the chapter title the reader already shows. */
-const LEADING_HEADING_RE = /^chapter\s*\d+/i;
-
-/** Case- and punctuation-blind form of a heading, for comparing a body's
- *  first line with the chapter title. */
-const headingKey = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
-
-/** Raw lines of one chapter body → the lines a reader should see. Cuts
- *  aggregator watermark sentences out of every line (dropping the line if
- *  nothing else was on it); drops site notices, bracketed credits and the
- *  MTL end marker anywhere; bare credit lines and navigation remnants among
- *  the first/last CREDIT_EDGE text lines; and a leading heading — the first text line,
- *  when it either sits outside a `<p>` and reads "Chapter N…" (the wrapper
- *  heading described above) or, in a `<p>`, is the chapter's own title
- *  again ignoring case and punctuation ("Chapter 6081, Disciplinary Hall").
- *  Any other "Chapter N" paragraph a translator wrote is left alone. */
+/** Raw lines of one chapter body → the lines a reader should see. With
+ *  the shared rules from @riwaq/extension-api: aggregator watermarks are cut
+ *  out of every line (freewebnovel's look-alike-spelled domain, on a line
+ *  of its own or glued onto a story paragraph — the line goes only if
+ *  nothing else was on it); translation-team credits go (bracketed ones
+ *  anywhere, bare ones near the chapter's edges); and so does a leading
+ *  heading — the first text line, when it repeats the chapter's own title
+ *  ignoring case and punctuation ("Chapter 6081, Disciplinary Hall"), or
+ *  sits outside a `<p>` and reads "Chapter N…" (the wrapper heading or MTL
+ *  first line). Any other "Chapter N" paragraph a translator wrote is left
+ *  alone. This site's own: notices anywhere, the MTL end marker anywhere,
+ *  and navigation remnants among the first/last NAV_EDGE text lines. */
 export function chapterLinesFrom(raw: RawLine[], chapterTitle = ""): SourceLine[] {
-  const titleKey = headingKey(chapterTitle);
   const textAt = raw.flatMap((l, i) => (l.type === "text" ? [i] : []));
-  const edges = new Set([...textAt.slice(0, CREDIT_EDGE), ...textAt.slice(-CREDIT_EDGE)]);
+  const edges = new Set([...textAt.slice(0, NAV_EDGE), ...textAt.slice(-NAV_EDGE)]);
+  const credits = new Set(Array.from(findCreditLines(textAt.map((i) => raw[i].content)), (k) => textAt[k]));
   const lines: SourceLine[] = [];
   raw.forEach((line, i) => {
     if (line.type === "image") {
@@ -599,13 +495,10 @@ export function chapterLinesFrom(raw: RawLine[], chapterTitle = ""): SourceLine[
     }
     const text = stripWatermarks(line.content);
     if (!text) return;
-    if (i === textAt[0]) {
-      if (!line.inParagraph && LEADING_HEADING_RE.test(text)) return;
-      if (titleKey && headingKey(text) === titleKey) return;
-    }
+    if (i === textAt[0] && isLeadingHeading(text, { title: chapterTitle, numbered: !line.inParagraph })) return;
     if (SITE_NOTICE_RES.some((re) => re.test(text))) return;
-    if (BRACKETED_CREDIT_RE.test(text)) return;
-    if (edges.has(i) && (BARE_CREDIT_RE.test(text) || NAV_RE.test(text))) return;
+    if (credits.has(i)) return;
+    if (edges.has(i) && NAV_RE.test(text)) return;
     if (END_MARKER_RE.test(text)) return;
     lines.push({ type: "text", content: text });
   });

@@ -7,3 +7,4 @@
 export * from "./types";
 export * from "./dom";
 export * from "./fetch";
+export * from "./clean";

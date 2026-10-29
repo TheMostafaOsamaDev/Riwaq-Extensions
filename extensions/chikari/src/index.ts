@@ -21,8 +21,10 @@
 // rate limiter.
 import {
   createFetcher,
+  findCreditLines,
   sanitizeText,
   SourceUrlError,
+  stripWatermarks,
   type FetchResponse,
   type NovelCard,
   type Source,
@@ -289,16 +291,18 @@ const BR_RE = /<br\s*\/?>/gi;
 // The reader's own paragraph split.
 const PARAGRAPH_SPLIT_RE = /\n\s*\n|\n/;
 
-/** Lines that are never story text: links, donation/promo plugs, and
- *  translator/editor credits. Calibrated against ~85 chapters across ~75
- *  novels; each pattern names a shape actually seen. Ordinary prose that
- *  merely mentions coffee, comments or translating survives — see the
- *  tests. */
+/** Lines that are never story text: links and donation/promo plugs.
+ *  Calibrated against ~85 chapters across ~75 novels; each pattern names a
+ *  shape actually seen. Ordinary prose that merely mentions coffee,
+ *  comments or translating survives — see the tests. Aggregator watermarks
+ *  and credit lines are the shared rules (see parseChapterBody). */
 const JUNK_LINE_RES = [
   // Any link: "Discord: https://dsc.gg/…", "…my Patreon here –> https://…".
   /https?:\/\/|\bwww\.[a-z0-9-]+\.[a-z]/i,
-  // A bare domain watermark ("lightnovelworld.com"). TLD kept lower-case and
-  // short-listed so a missing space after a full stop ("time.Me") can't hit.
+  // A bare domain is a link too ("Support me at mysite.com"); a known
+  // aggregator's watermark has already been cut out of the line by then.
+  // TLD kept lower-case and short-listed so a missing space after a full
+  // stop ("time.Me") can't hit.
   /\b[A-Za-z0-9-]{2,}\.(?:com|net|org|moe)\b/,
   // "… thanks to … on Ko-fi!", and "<strong>KO-FI</strong><strong>BUY ME A
   // COFEE</strong>", which loses its space once the tags go — hence no
@@ -314,24 +318,29 @@ const JUNK_LINE_RES = [
   // "Translator's Comments", "Translator Notes: …".
   /^(?:translator'?s?|tl|t\/n)\s*(?:notes?|comments?)\b/i,
 ];
-/** "Translator: AtlasStudios Editor: AtlasStudios", "Editor: echo". */
-const CREDIT_LINE_RE =
-  /^(?:translator|translated by|translation|editor|edited by|proofreader|proofread by|tl|ed|tlc)\s*[:：]/i;
-
 export function isJunkLine(line: string): boolean {
-  if (CREDIT_LINE_RE.test(line) && line.length <= 160) return true;
   return JUNK_LINE_RES.some((re) => re.test(line));
 }
 
-/** A chapter `body` → text lines, the way the site's reader splits it. */
+/** A chapter `body` → text lines, the way the site's reader splits it,
+ *  without what isn't story text: translator credit lines
+ *  ("Translator: AtlasStudios Editor: AtlasStudios") near the chapter's
+ *  edges, aggregator watermarks cut out of any line (both shared rules from
+ *  @riwaq/extension-api), then this site's link and plug lines. */
 export function parseChapterBody(body: string): SourceLine[] {
-  const lines: SourceLine[] = [];
+  const pieces: string[] = [];
   for (const para of body.split(PARAGRAPH_SPLIT_RE)) {
     for (const piece of para.split(BR_RE)) {
       const content = sanitizeText(piece.replace(INLINE_TAG_RE, ""));
-      if (content && !isJunkLine(content)) lines.push({ type: "text", content });
+      if (content) pieces.push(content);
     }
   }
+  const credits = findCreditLines(pieces);
+  const lines: SourceLine[] = [];
+  pieces.forEach((piece, i) => {
+    const content = credits.has(i) ? "" : stripWatermarks(piece);
+    if (content && !isJunkLine(content)) lines.push({ type: "text", content });
+  });
   return lines;
 }
 

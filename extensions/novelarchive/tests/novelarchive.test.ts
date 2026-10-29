@@ -14,9 +14,9 @@ import createSource, {
   PAGE_SIZE,
   type NovelRow,
 } from "../src/index";
-import { cleanLines, fold, repairMojibake, stripWatermarks } from "../src/clean";
+import { cleanLine, cleanLines, repairMojibake } from "../src/clean";
 import { strings } from "../src/strings";
-import { SourceUrlError, type FetchResponse, type SourceHost } from "@riwaq/extension-api";
+import { SourceUrlError, stripWatermarks, type FetchResponse, type SourceHost } from "@riwaq/extension-api";
 import { createTestHost, type TestHostOptions } from "@riwaq/extension-api/testing";
 
 // Read fixtures with fileURLToPath(import.meta.url) + path.join, never a
@@ -611,7 +611,8 @@ describe("getChapterContent", () => {
       "\"...I ❖ Nоvеl𝚒ght ❖ (Exclusive on Nоvеl𝚒ght) informed the General at the banquet. Told him that you had a purpose,",
     );
     expect(lines).toContain("\"...I informed the General at the banquet. Told him that you had a purpose,");
-    expect(lines.some((l) => /n\s?o\s?v\s?e\s?l\s?i\s?g\s?h\s?t/.test(fold(l).text))).toBe(false);
+    // Nothing the watermark rule would still cut is left in any line.
+    expect(lines.filter((l) => stripWatermarks(l) !== l)).toEqual([]);
     expect(lines).toHaveLength(raw.length);
   });
 
@@ -620,7 +621,8 @@ describe("getChapterContent", () => {
     expect(lines).toContain(
       "|Additional Boon: Your Way of Mana has been confirmed to completely supersede all Light-based concepts.|",
     );
-    expect(lines.some((l) => /nove1fire/.test(fold(l).text))).toBe(false);
+    expect(lines.some((l) => /Nove1Fire|ᴘʟᴇᴀsᴇ ᴠɪsɪᴛ/.test(l))).toBe(false);
+    expect(lines.filter((l) => stripWatermarks(l) !== l)).toEqual([]);
   });
 
   it("removes a domain glued to the front of a story line", async () => {
@@ -769,6 +771,8 @@ describe("network resilience", () => {
 });
 
 describe("clean.ts units", () => {
+  // The watermark and credit rules themselves are shared and tested in
+  // packages/extension-api/src/clean.test.ts; these pin this archive's own.
   it("repairs only Latin-1-read UTF-8 that contains a C1 control", () => {
     expect(repairMojibake("aâ\u0080\u0083b")).toBe("a b");
     expect(repairMojibake("â\u0080» Note")).toBe("※ Note");
@@ -777,23 +781,16 @@ describe("clean.ts units", () => {
     expect(repairMojibake("plain text — “quoted”")).toBe("plain text — “quoted”");
   });
 
-  it("folds look-alike letters to ASCII one character at a time", () => {
-    const folded = fold("fɾeeweɓnѳveɭ.𝐜𝐨𝐦");
-    expect(folded.text).toBe("freewebnovel.com");
-    expect(folded.starts).toHaveLength(folded.text.length);
-    expect(fold("ᴘʟᴇᴀsᴇ ᴠɪsɪᴛ").text).toBe("please visit");
-  });
-
   it("leaves story text alone", () => {
-    for (const line of [
+    const story = [
       "That's it. The Second Coming of Gluttony is officially over after about a year on NovelFire. This marks the third.",
       "https://en.m.wikipedia.org/wiki/Dano_(festival)",
       "He opened the novel bin and read on.",
       "“Tie Zhu, you have great talent! When you are successful in the future, don’t forget to come back and visit.”",
       "|Status: Bound| ~ Level 4 ~",
-    ]) {
-      expect(stripWatermarks(line)).toBe(line);
-    }
+      "* * *",
+    ];
+    expect(cleanLines(story)).toEqual(story);
   });
 
   it("keeps a speaker line that only looks like a credit", () => {
@@ -801,32 +798,22 @@ describe("clean.ts units", () => {
     expect(cleanLines(["TL: Hanguk", "Story."])).toEqual(["Story."]);
   });
 
-  it("only looks for credits at the top of a chapter", () => {
+  it("only looks for credits near a chapter's edges", () => {
     const lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
-    expect(cleanLines([...lines, "Editor: Someone"])).toEqual([...lines, "Editor: Someone"]);
+    const middle = [...lines.slice(0, 5), "Editor: Someone", ...lines.slice(5)];
+    expect(cleanLines(middle)).toEqual(middle);
+    expect(cleanLines([...lines, "Editor: Someone"])).toEqual(lines);
   });
 
-  it("strips the watermark variants seen on the live site", () => {
-    expect(stripWatermarks("The killing intent emanating °• N 𝑜 v 𝑒 l i g h t •° from them was intense.")).toBe(
-      "The killing intent emanating from them was intense.",
+  it("drops promo lines and cuts bracketed URLs", () => {
+    expect(cleanLine("READ MORE CHAPTERS HERE-https://beastnovels.com")).toBe("");
+    expect(cleanLine("If you like the Dragon Emperor, please collect it: (www.novelbuddy.com)")).toBe("");
+    expect(cleanLine("Remember [www.wuxiaspot.com] for one second, update fast, no pop-up window, free to read!")).toBe(
+      "",
     );
-    expect(stripWatermarks("When Koi got ➤ NоvеⅠight ➤ (Read more on our source) home, he showered.")).toBe(
-      "When Koi got home, he showered.",
-    );
-    expect(stripWatermarks("their ◈ Nоvеlіgһт ◈ (Continue reading) children.")).toBe("their children.");
-    expect(stripWatermarks("Ryo ~Nоvеl𝕚ght~ showed the ‘Holy Seal’.")).toBe("Ryo showed the ‘Holy Seal’.");
-    expect(stripWatermarks("This chapter is updat𝙚d by f(r)eew𝒆bn(o)vel.com")).toBe("");
-    expect(stripWatermarks("New novel 𝓬hapters are published on freёwebnoѵel.com.")).toBe("");
-    expect(stripWatermarks("Read lat𝙚st chapters at fɾeewebnoveℓ.co๓ Only.")).toBe("");
-    expect(stripWatermarks("𝚏𝕣𝕖𝚎𝚠𝚎𝚋𝚗𝐨𝐯𝕖𝕝.𝕔𝐨𝕞")).toBe("");
-    expect(stripWatermarks("# Nоvеlight #")).toBe("");
-    expect(stripWatermarks('"Black belt?" 𝐛𝐞𝗱𝗻𝐨𝐯𝗲𝗹.𝐜𝐨𝐦')).toBe('"Black belt?"');
-    expect(stripWatermarks("Biquge www.novelbuddy.com, update the latest chapter of Master Dan Dao as soon as possible!")).toBe("");
-    expect(stripWatermarks("Table of Contents URL: https://1stkissnovel.org/novel/children-of-the-holy-emperor/")).toBe("");
-    expect(stripWatermarks("READ MORE CHAPTERS HERE-https://beastnovels.com")).toBe("");
-    expect(stripWatermarks("When the room leaks, it's even Fenglian [笔趣阁www.biqugeso.me] Ye Yu, and my girlfriend left.")).toBe(
-      "When the room leaks, it's even Fenglian Ye Yu, and my girlfriend left.",
-    );
+    expect(
+      cleanLine("When the room leaks, it's even Fenglian [笔趣阁www.biqugeso.me] Ye Yu, and my girlfriend left."),
+    ).toBe("When the room leaks, it's even Fenglian Ye Yu, and my girlfriend left.");
   });
 
   it("contentToLines keeps a lone heading rather than returning nothing", () => {

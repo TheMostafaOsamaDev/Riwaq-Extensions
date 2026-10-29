@@ -663,11 +663,30 @@ describe("parseChapterBody / isJunkLine", () => {
     ]);
   });
 
-  it("flags promo, link and credit lines", () => {
-    for (const junk of [
+  it("drops credit lines at a chapter's top or bottom, not in the middle", () => {
+    for (const credit of [
       "Translator: ChibiGeneral Editor: ChibiGeneral",
       "Editor: echo",
       "Translator: Willia",
+    ]) {
+      const story = ["One.", "Two.", "Three.", "Four.", "Five.", "Six.", "Seven.", "Eight."];
+      const texts = (body: string[]) => parseChapterBody(body.join("\n\n")).map((l) => l.content);
+      expect(texts([credit, ...story]), credit).toEqual(story);
+      expect(texts([...story, credit]), credit).toEqual(story);
+      const middle = [...story.slice(0, 4), credit, ...story.slice(4)];
+      expect(texts(middle), credit).toEqual(middle);
+    }
+  });
+
+  it("cuts an aggregator watermark out of a story line instead of dropping the line", () => {
+    expect(parseChapterBody("He went home.lightnovelworld.com\n\nThe end.").map((l) => l.content)).toEqual([
+      "He went home.",
+      "The end.",
+    ]);
+  });
+
+  it("flags promo and link lines", () => {
+    for (const junk of [
       "For more chapters, you can check out my Patreon here –> https://patreon.com/warriorsballad",
       "Discord:https://dsc.gg/reapercomics",
       "12/17 Bonus chapter thanks to @Nathan To and others on Ko-fi!",
