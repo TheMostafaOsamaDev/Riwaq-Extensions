@@ -8,8 +8,8 @@
 //
 // "Changed" means "changed in a way that reaches a published bundle",
 // which is wider than `extensions/`: build.ts bundles, so
-// packages/extension-api is inlined verbatim into all four served
-// bundles. See SHARED_BUNDLE_PATHS.
+// packages/extension-api is inlined verbatim into every served bundle
+// (all seven today). See SHARED_BUNDLE_PATHS.
 //
 // `decideChangedExtensionIds` and `decideVersionBumps` are pure functions
 // over already-collected data and are what check-version-bump.test.ts
@@ -70,8 +70,8 @@ export interface VersionBumpCheckResult {
  *  `packages/extension-api` is inlined verbatim into each bundle rather
  *  than imported at runtime (`grep -c '^import' dist/*\/index.js` → 0).
  *  A one-line edit to `packages/extension-api/src/dom.ts`, or to the
- *  esbuild settings in `scripts/build.ts` itself, therefore changes all
- *  four SERVED bundles while touching nothing under `extensions/` — and
+ *  esbuild settings in `scripts/build.ts` itself, therefore changes EVERY
+ *  served bundle while touching nothing under `extensions/` — and
  *  this check used to diff `-- extensions` only, print "no extensions
  *  changed", and let publish.yml republish every bundle under its
  *  already-published `(id, version)` pair. A reader that treats that pair
