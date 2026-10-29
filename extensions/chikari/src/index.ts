@@ -20,6 +20,7 @@
 // See README.md for the response shapes, the reader's body format and the
 // rate limiter.
 import {
+  createFetcher,
   sanitizeText,
   SourceUrlError,
   type FetchResponse,
@@ -186,7 +187,8 @@ export function readJson(resp: FetchResponse, endpoint: string, what: string): u
   if (resp.status === 429) {
     // The site's own client recognises exactly this shape, pops a
     // human-verification dialog and retries. A plain HTTP client cannot
-    // pass that, so the best it can do is back off.
+    // pass that, so the best it can do is back off (the fetcher's
+    // "challenge" mode: see createSource).
     const challenge = isObject(parsed) && parsed.code === "challenge_required";
     throw new Error(
       challenge
@@ -398,9 +400,16 @@ export function parseNovel(detail: NovelDetail, chapters: SourceChapter[], t: Tr
 export default function createSource(host: SourceHost): Source {
   const t = strings(host.locale);
 
+  /** host.fetch with the shared retry policy: a dropped request or a 5xx is
+   *  retried with a backoff. A 429 here is the human-verification challenge
+   *  (see readJson), which retrying can't pass and would only prolong, so it
+   *  comes straight back and every request for the next while (its
+   *  Retry-After, else a minute) fails fast without being sent. */
+  const get = createFetcher(host, { id: "chikari", on429: "challenge" });
+
   async function getJson(url: string, what: string): Promise<unknown> {
     const endpoint = url.slice(BASE_URL.length);
-    return readJson(await host.fetch(url), endpoint, what);
+    return readJson(await get(url), endpoint, what);
   }
 
   /** Every page of a novel's chapter list (optionally filtered by `q`), in

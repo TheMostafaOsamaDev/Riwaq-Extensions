@@ -281,6 +281,29 @@ interface SourceHost {
   to bundle per-extension, so the host owns the one shared instance — never parse PDF
   bytes yourself. See `extensions/kolnovel/src/index.ts` for a full PDF-fallback flow.
 
+### Shared helpers
+
+`@riwaq/extension-api` also bundles a few helpers for problems more than one site has.
+Use them rather than writing your own, so every extension behaves the same way.
+
+- **`createFetcher(host, { id, … })`** (`src/fetch.ts`) — `host.fetch` with one retry
+  policy. Build it once per `Source` (in `createSource`'s closure): the app's importer
+  calls `getChapterContent` from 4 workers on one instance, and they share its state.
+  - One budget, `attempts` (default 3), covers every retry of a call. A POST/PUT/DELETE
+    is never sent twice.
+  - A thrown request or a `5xx` is retried after `retryDelayMs` (default 1 s), doubled
+    each time, with ±50% jitter. One that keeps throwing throws
+    `<id>: <url> could not be fetched: …`; a `5xx` that outlasts the budget is returned,
+    so your own code reports the status.
+  - `on429: "wait"` (default): a `429` holds back **every** caller of that fetcher until
+    its `Retry-After` (or `RateLimit-Reset`; `defaultWaitMs`, 60 s, when neither is
+    usable; capped at `maxWaitMs`, 300 s), then retries.
+  - `on429: "challenge"`: for a site whose `429` is a human-verification check a plain
+    client can't pass. The `429` comes straight back, and every call until its
+    `Retry-After` (or `defaultWaitMs`) throws at once without a request.
+
+  Extensions run in the app's webview, so `setTimeout` is there to back off with.
+
 ## Testing
 
 Every extension gets fixture-driven parser tests: save real HTML from the live site into

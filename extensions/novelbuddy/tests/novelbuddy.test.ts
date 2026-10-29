@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -85,6 +85,20 @@ type LogEntry = NonNullable<TestHostOptions["logs"]>[number];
 
 /** Shorthand for a fixture host answering `responses`. */
 const host = (responses: Record<string, string>, opts: TestHostOptions = {}) => createTestHost({ responses, ...opts });
+
+/** Settles `run()` under fake timers, so the shared fetcher's retry
+ *  backoffs and 429 pauses take no real time. */
+async function settled<T>(run: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    const pending = run();
+    pending.catch(() => {});
+    await vi.runAllTimersAsync();
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
 
 const novelHost = (opts: TestHostOptions = {}) =>
   host({ [NOVEL_URL]: novelHtml, [CHAPTER_LIST_URL]: chaptersJson }, opts);
@@ -229,7 +243,9 @@ describe("getHomeSections", () => {
 
   it("throws, naming the status, on a non-2xx answer", async () => {
     const source = createSource(host({ "/home": homeHtml }, { status: { "/home": 503 } }));
-    await expect(source.getHomeSections()).rejects.toThrow(`${PREFIX}https://novelbuddy.me/home answered HTTP 503.`);
+    await expect(settled(() => source.getHomeSections())).rejects.toThrow(
+      `${PREFIX}https://novelbuddy.me/home answered HTTP 503.`,
+    );
   });
 
   it("throws on a page with no __NEXT_DATA__ (a challenge or error page)", async () => {
@@ -338,9 +354,10 @@ describe("search", () => {
   });
 
   it("throws on a non-2xx answer and on a page with no results list", async () => {
-    await expect(
-      createSource(host({ "/search": searchHtml }, { status: { "/search": 429 } })).search("shadow"),
-    ).rejects.toThrow(`${PREFIX}https://novelbuddy.me/search?q=shadow answered HTTP 429.`);
+    const limited = createSource(host({ "/search": searchHtml }, { status: { "/search": 429 } }));
+    await expect(settled(() => limited.search("shadow"))).rejects.toThrow(
+      `${PREFIX}https://novelbuddy.me/search?q=shadow answered HTTP 429.`,
+    );
     // The home page is a real Next.js page, just not a search page.
     await expect(createSource(host({ "/search": homeHtml })).search("shadow")).rejects.toThrow(
       `${PREFIX}search page https://novelbuddy.me/search?q=shadow carried no results list`,
@@ -465,7 +482,7 @@ describe("getNovel", () => {
         host({ [NOVEL_URL]: novelHtml, [CHAPTER_LIST_URL]: body }, { status: { [CHAPTER_LIST_URL]: status } }),
       ).getNovel(NOVEL_URL);
 
-    await expect(withList(chaptersJson, 500)).rejects.toThrow(
+    await expect(settled(() => withList(chaptersJson, 500))).rejects.toThrow(
       `${PREFIX}chapter list ${CHAPTER_LIST_URL} answered HTTP 500.`,
     );
     await expect(withList("<html>bad gateway</html>")).rejects.toThrow(
@@ -816,7 +833,7 @@ describe("searchChapters", () => {
 describe("retrying a dropped request", () => {
   const CH_URL = "https://novelbuddy.me/shadows-oath/chapter-108";
 
-  it("retries once when the request itself fails, then succeeds", async () => {
+  it("retries when the request itself fails, then succeeds", async () => {
     const logs: LogEntry[] = [];
     const base = host({ [CH_URL]: chapterHtml }, { logs });
     let attempts = 0;
@@ -828,19 +845,21 @@ describe("retrying a dropped request", () => {
         return base.fetch(url, o);
       },
     };
-    const lines = await createSource(flaky).getChapterContent(chapterOf(CH_URL));
+    const lines = await settled(() => createSource(flaky).getChapterContent(chapterOf(CH_URL)));
     expect(attempts).toBe(2);
     expect(lines.length).toBeGreaterThan(0);
     expect(logs.filter((l) => l.level === "debug").map((l) => l.message)).toContain(
-      `${PREFIX}${CH_URL} failed (curl: (35) Recv failure: Connection reset by peer); retrying once.`,
+      `${PREFIX}${CH_URL} failed (curl: (35) Recv failure: Connection reset by peer); retrying.`,
     );
   });
 
-  it("retries a 5xx once and reports the second answer", async () => {
+  it("retries a 5xx and reports the last answer", async () => {
     const calls: Array<{ url: string; method: string }> = [];
     const source = createSource(host({ "/home": homeHtml }, { calls, status: { "/home": 502 } }));
-    await expect(source.getHomeSections()).rejects.toThrow(`${PREFIX}https://novelbuddy.me/home answered HTTP 502.`);
-    expect(calls).toHaveLength(2);
+    await expect(settled(() => source.getHomeSections())).rejects.toThrow(
+      `${PREFIX}https://novelbuddy.me/home answered HTTP 502.`,
+    );
+    expect(calls).toHaveLength(3);
   });
 
   it("does not retry a 4xx", async () => {

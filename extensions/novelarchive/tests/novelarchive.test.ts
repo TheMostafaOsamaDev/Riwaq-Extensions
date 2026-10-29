@@ -9,14 +9,9 @@ import createSource, {
   chaptersFor,
   contentToLines,
   coverUrlFor,
-  DEFAULT_RATE_LIMIT_WAIT_SECONDS,
   genresOf,
-  MAX_RATE_LIMIT_RETRIES,
-  MAX_RATE_LIMIT_WAIT_SECONDS,
-  MAX_TRANSPORT_RETRIES,
   novelIdFromUrl,
   PAGE_SIZE,
-  rateLimitWaitSeconds,
   type NovelRow,
 } from "../src/index";
 import { cleanLines, fold, repairMojibake, stripWatermarks } from "../src/clean";
@@ -97,6 +92,20 @@ const chapterBody = (name: string): string => json(name).chapter.content;
 afterEach(() => {
   vi.useRealTimers();
 });
+
+/** Settles `run()` under fake timers, so the shared fetcher's retry
+ *  backoffs and 429 pauses take no real time. */
+async function settled<T>(run: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    const pending = run();
+    pending.catch(() => {});
+    await vi.runAllTimersAsync();
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
 
 describe("manifest + icon", () => {
   it("ships a 128×128 PNG icon", () => {
@@ -286,13 +295,14 @@ describe("getHomeSections", () => {
       status: { "/novels/editors-choice": 500 },
       logs,
     });
-    const sections = await createSource(host).getHomeSections();
+    const sections = await settled(() => createSource(host).getHomeSections());
     expect(sections.map((s) => s.id)).toEqual(["trending", "latest-updates"]);
     expect(logs.some((l) => l.level === "warn" && l.message.includes("editors-choice"))).toBe(true);
   });
 
   it("throws, prefixed with the manifest id, when every row fails", async () => {
-    await expect(createSource(answering(503, "Service Unavailable")).getHomeSections()).rejects.toThrow(PREFIX);
+    const source = createSource(answering(503, "Service Unavailable"));
+    await expect(settled(() => source.getHomeSections())).rejects.toThrow(PREFIX);
   });
 });
 
@@ -693,6 +703,8 @@ describe("getChapterContent", () => {
 });
 
 describe("network resilience", () => {
+  // The retry policy itself is the shared fetcher's (packages/extension-api
+  // fetch.test.ts); these pin how this source configures and reports it.
   it("waits out a 429 for the advertised reset, then retries", async () => {
     vi.useFakeTimers();
     const logs: Logs = [];
@@ -712,11 +724,10 @@ describe("network resilience", () => {
     await vi.advanceTimersByTimeAsync(1);
     await expect(pending).resolves.not.toHaveLength(0);
     expect(host.requests()).toBe(2);
-    expect(logs.some((l) => l.level === "warn" && l.message.includes("in 7s"))).toBe(true);
+    expect(logs.some((l) => l.level === "warn" && l.message.startsWith(PREFIX) && l.message.includes("7s"))).toBe(true);
   });
 
-  it("gives up after MAX_RATE_LIMIT_RETRIES and reports the 429", async () => {
-    vi.useFakeTimers();
+  it("gives up after 4 requests and reports the 429 with the API's reason", async () => {
     const calls: Array<{ url: string; method: string }> = [];
     const host = createTestHost({
       responses: { [BASE_URL]: '{"error":"Too many requests"}' },
@@ -724,26 +735,24 @@ describe("network resilience", () => {
       headers: { [BASE_URL]: { "retry-after": "1" } },
       calls,
     });
-    const pending = createSource(host).search("x");
-    const assertion = expect(pending).rejects.toThrow(`${PREFIX}/api/novels?search=x&fuzzy=1&page=1&per_page=24 answered HTTP 429: Too many requests.`);
-    await vi.advanceTimersByTimeAsync(MAX_RATE_LIMIT_RETRIES * 1000);
-    await assertion;
-    expect(calls).toHaveLength(MAX_RATE_LIMIT_RETRIES + 1);
+    await expect(settled(() => createSource(host).search("x"))).rejects.toThrow(
+      `${PREFIX}/api/novels?search=x&fuzzy=1&page=1&per_page=24 answered HTTP 429: Too many requests.`,
+    );
+    expect(calls).toHaveLength(4);
   });
 
   it("retries a request that failed outright (connection reset)", async () => {
-    vi.useFakeTimers();
     const host = failingOnce(createTestHost({ responses: { [BASE_URL]: fixture("search-no-results.json") } }), () => {
       throw new Error("Recv failure: Connection reset by peer");
     });
-    const pending = createSource(host).search("zzqqxxnotathing");
-    await vi.advanceTimersByTimeAsync(1000);
-    await expect(pending).resolves.toMatchObject({ cards: [], hasMore: false });
+    await expect(settled(() => createSource(host).search("zzqqxxnotathing"))).resolves.toMatchObject({
+      cards: [],
+      hasMore: false,
+    });
     expect(host.requests()).toBe(2);
   });
 
   it("reports a request that keeps failing, prefixed with the manifest id", async () => {
-    vi.useFakeTimers();
     let n = 0;
     const host: SourceHost = {
       ...createTestHost(),
@@ -752,22 +761,10 @@ describe("network resilience", () => {
         throw new Error("Connection reset by peer");
       },
     };
-    const pending = createSource(host).search("x");
-    const assertion = expect(pending).rejects.toThrow(/^novelarchive: .* could not be fetched: Connection reset by peer$/);
-    await vi.advanceTimersByTimeAsync(10_000);
-    await assertion;
-    expect(n).toBe(MAX_TRANSPORT_RETRIES + 1);
-  });
-
-  it("reads the wait from Retry-After, then RateLimit-Reset, clamped, with a default", () => {
-    expect(rateLimitWaitSeconds({ "retry-after": "12", "ratelimit-reset": "40" })).toBe(12);
-    expect(rateLimitWaitSeconds({ "ratelimit-reset": "40" })).toBe(40);
-    expect(rateLimitWaitSeconds({ "ratelimit-reset": "0" })).toBe(1);
-    expect(rateLimitWaitSeconds({ "retry-after": "9999" })).toBe(MAX_RATE_LIMIT_WAIT_SECONDS);
-    expect(rateLimitWaitSeconds({ "retry-after": "Wed, 21 Oct 2026 07:28:00 GMT" })).toBe(
-      DEFAULT_RATE_LIMIT_WAIT_SECONDS,
+    await expect(settled(() => createSource(host).search("x"))).rejects.toThrow(
+      /^novelarchive: .* could not be fetched: Connection reset by peer$/,
     );
-    expect(rateLimitWaitSeconds({})).toBe(DEFAULT_RATE_LIMIT_WAIT_SECONDS);
+    expect(n).toBe(4);
   });
 });
 

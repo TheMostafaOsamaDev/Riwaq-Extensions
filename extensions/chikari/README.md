@@ -175,8 +175,13 @@ as they do on the site, and become readable when the window moves on. A
 
 ## Errors and the rate limiter
 
-Every error is prefixed `chikari:`. `readJson` handles every endpoint the
-same way:
+Every error is prefixed `chikari:`. Requests go through the shared
+`createFetcher` (see the repo README's "Shared helpers") in its
+`on429: "challenge"` mode: a dropped request or a `5xx` is retried with a
+backoff, but a `429` comes straight back, and every request for the next
+minute (or the response's `Retry-After`) fails at once without being sent —
+retrying can't pass the check and would only prolong it. `readJson` then
+handles every endpoint the same way:
 
 - **429** with `{"code": "challenge_required"}`: the site's API client
   intercepts exactly this, opens a human-verification dialog, and retries.

@@ -98,10 +98,11 @@ same JSON for one request and never go stale.
 6. **The site is slow and occasionally drops a connection.** Pages take
    1–21 s (a cold chapter list 20–30 s), and in a dozen sequential requests
    one stalled for 60 s; a few requests during development died with a TLS
-   "connection reset by peer". Every request goes through `get()`, which
-   retries **once**, immediately, on a thrown error or a `5xx`. A `4xx` is
-   the site's real answer and is not retried. There is no back-off delay —
-   an extension can't count on having timers.
+   "connection reset by peer". Every request goes through `get()`, the
+   shared `createFetcher` from `@riwaq/extension-api`: a thrown error or a
+   `5xx` is retried with a backoff (1 s, then 2 s, jittered; 3 requests at
+   most), a `429` pauses every request of the source for its `Retry-After`.
+   A `4xx` is the site's real answer and is not retried.
 
 ## What `getChapterContent` strips
 

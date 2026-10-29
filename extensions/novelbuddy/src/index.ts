@@ -35,6 +35,7 @@
 // caller's URL used.
 import {
   absoluteUrl,
+  createFetcher,
   parseHtml,
   sanitizeText,
   SourceUrlError,
@@ -762,26 +763,13 @@ export default function createSource(host: SourceHost): Source {
     }
   };
 
-  /** host.fetch with ONE immediate retry when the request throws (network
-   *  error) or answers 5xx. The site is slow and flaky under plain load —
-   *  measured 1–21 s per page, an occasional 60 s stall, and the odd TLS
-   *  "connection reset by peer" — and one dropped request would otherwise
-   *  fail a chapter in the middle of a long import. 4xx answers are not
-   *  retried: they are the site's real answer. No back-off delay: timers
-   *  are not something an extension can count on having. */
-  async function get(url: string): Promise<FetchResponse> {
-    try {
-      const resp = await host.fetch(url);
-      if (resp.status < 500) return resp;
-      host.log("debug", `novelbuddy: ${url} answered HTTP ${resp.status}; retrying once.`);
-    } catch (err) {
-      host.log(
-        "debug",
-        `novelbuddy: ${url} failed (${err instanceof Error ? err.message : String(err)}); retrying once.`,
-      );
-    }
-    return host.fetch(url);
-  }
+  /** host.fetch with the shared retry policy: a request that throws or
+   *  answers 5xx is retried with a backoff. The site is slow and flaky under
+   *  plain load — measured 1–21 s per page, an occasional 60 s stall, and the
+   *  odd TLS "connection reset by peer" — and one dropped request would
+   *  otherwise fail a chapter in the middle of a long import. A 4xx is the
+   *  site's real answer and is not retried. */
+  const get = createFetcher(host, { id: "novelbuddy" });
 
   async function loadNovelPage(slug: string): Promise<Json> {
     const pageUrl = novelUrl(slug);

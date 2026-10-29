@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -121,6 +121,20 @@ const statusHost = (status: number, text: string) =>
   createTestHost({ responses: { [B]: text }, status: { [B]: status } });
 
 const CHALLENGE_BODY = JSON.stringify({ code: "challenge_required" });
+
+/** Settles `run()` under fake timers, so the shared fetcher's retry
+ *  backoffs take no real time. */
+async function settled<T>(run: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  try {
+    const pending = run();
+    pending.catch(() => {});
+    await vi.runAllTimersAsync();
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
 
 // ── manifest ────────────────────────────────────────────────────────────────
 
@@ -279,7 +293,8 @@ describe("getHomeSections", () => {
   });
 
   it("throws a branded error on a non-200 or non-JSON answer", async () => {
-    await expect(createSource(statusHost(503, "<html>bad gateway</html>")).getHomeSections()).rejects.toThrow(
+    const down = createSource(statusHost(503, "<html>bad gateway</html>"));
+    await expect(settled(() => down.getHomeSections())).rejects.toThrow(
       `${PREFIX} /api/home?type=novel answered HTTP 503.`,
     );
     await expect(createSource(statusHost(200, "<!doctype html>")).getHomeSections()).rejects.toThrow(
@@ -378,7 +393,7 @@ describe("search", () => {
     await expect(createSource(statusHost(429, "slow down")).search("sword")).rejects.toThrow(
       `${PREFIX} chikari.moe is rate-limiting requests (HTTP 429`,
     );
-    await expect(createSource(statusHost(500, "oops")).search("sword")).rejects.toThrow(PREFIX);
+    await expect(settled(() => createSource(statusHost(500, "oops")).search("sword"))).rejects.toThrow(PREFIX);
     await expect(createSource(statusHost(200, "[]")).search("sword")).rejects.toThrow(
       `${PREFIX} /api/series?q=sword&type=novel&limit=36&offset=0 returned an unexpected shape`,
     );
@@ -585,6 +600,18 @@ describe("getChapterContent", () => {
     await expect(contentOf("locked")).rejects.toThrow(
       `${PREFIX} chapter 2496 of "genetic-ascension" is locked on chikari.moe — early access for supporters (the newest 8 chapters).`,
     );
+  });
+
+  it("after a human-verification challenge, fails fast without asking the site again", async () => {
+    const calls: Calls = [];
+    const source = createSource(
+      createTestHost({ responses: { [B]: CHALLENGE_BODY }, status: { [B]: 429 }, calls }),
+    );
+    await expect(source.getChapterContent(chapterOf("promo"))).rejects.toThrow(
+      `${PREFIX} chikari.moe wants a human-verification check`,
+    );
+    await expect(source.search("sword")).rejects.toThrow(`${PREFIX} ${searchUrl("sword", 0)} was not requested`);
+    expect(calls).toHaveLength(1);
   });
 
   it("throws a branded error for a club-restricted chapter", async () => {

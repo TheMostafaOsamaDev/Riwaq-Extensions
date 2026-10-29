@@ -18,15 +18,16 @@
 // The API rate-limits per client: `ratelimit-policy: 900;w=300` (900
 // requests per 5 minutes). One chapter is one request, so importing a long
 // novel can cross that whenever the site answers quickly; a 429 is waited
-// out (see `getJson`) instead of failing every remaining chapter.
+// out by the shared fetcher (see `get`) instead of failing every remaining
+// chapter.
 //
 // Chapter text is the archive's plain text, scrubbed of the watermarks and
 // leftovers it picked up from the sites it was gathered from (clean.ts).
 // See README.md for the endpoints, field mapping and quirks.
 import {
+  createFetcher,
   sanitizeText,
   SourceUrlError,
-  type FetchResponse,
   type NovelCard,
   type Source,
   type SourceChapter,
@@ -55,18 +56,6 @@ export const HOSTS = new Set([
 /** Cards per home row and per search page — the site's own library page
  *  size (`PER_PAGE = 24` in assets/js/libary-page.js). */
 export const PAGE_SIZE = 24;
-
-/** A request that fails outright (connection reset, timeout) is retried
- *  this many times, after TRANSPORT_RETRY_DELAY_MS × attempt. Resets during
- *  the TLS handshake show up on roughly one request in twenty. */
-export const MAX_TRANSPORT_RETRIES = 2;
-export const TRANSPORT_RETRY_DELAY_MS = 1000;
-/** A 429 is retried at most this many times per request. */
-export const MAX_RATE_LIMIT_RETRIES = 3;
-/** Ceiling on one rate-limit wait: the API's whole window is 300 s. */
-export const MAX_RATE_LIMIT_WAIT_SECONDS = 300;
-/** Used when a 429 carries no usable Retry-After / RateLimit-Reset. */
-export const DEFAULT_RATE_LIMIT_WAIT_SECONDS = 60;
 
 const NOVEL_ID_RE = /^[0-9a-f]{24}$/i;
 
@@ -164,20 +153,6 @@ export function chapterRefFromUrl(url: string): { novelId: string; number: numbe
     throw new SourceUrlError(`novelarchive: ${url} is not a Novel Archive chapter URL.`);
   }
   return { novelId, number };
-}
-
-/** Seconds to wait before retrying a 429. `Retry-After` first, then the
- *  `RateLimit-Reset` the API sends with every response (both are
- *  delta-seconds there); an HTTP-date or missing value falls back to the
- *  default. Clamped to [1, MAX_RATE_LIMIT_WAIT_SECONDS]. */
-export function rateLimitWaitSeconds(headers: Record<string, string>): number {
-  for (const name of ["retry-after", "ratelimit-reset"]) {
-    const raw = (headers[name] ?? "").trim();
-    if (/^\d+$/.test(raw)) {
-      return Math.min(Math.max(Number(raw), 1), MAX_RATE_LIMIT_WAIT_SECONDS);
-    }
-  }
-  return DEFAULT_RATE_LIMIT_WAIT_SECONDS;
 }
 
 export function genresOf(raw: unknown): string[] {
@@ -286,8 +261,6 @@ const HOME_ROWS = [
   { id: "latest-updates", endpoint: "/novels/recently-updated", title: "homeLatestUpdates" },
 ] as const;
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 export default function createSource(host: SourceHost): Source {
   const t = strings(host.locale);
 
@@ -299,34 +272,20 @@ export default function createSource(host: SourceHost): Source {
   /** Card URLs already returned for the current search query (see search). */
   let searchSeen: { query: string; urls: Set<string> } | null = null;
 
-  /** host.fetch, retried when the request itself fails (no response). */
-  async function fetchWithRetry(url: string): Promise<FetchResponse> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await host.fetch(url);
-      } catch (e) {
-        if (attempt >= MAX_TRANSPORT_RETRIES) {
-          const message = e instanceof Error ? e.message : String(e);
-          throw new Error(`novelarchive: ${url} could not be fetched: ${message}`);
-        }
-        await sleep(TRANSPORT_RETRY_DELAY_MS * (attempt + 1));
-      }
-    }
-  }
+  /** host.fetch with the shared retry policy. A dropped request (a reset
+   *  during the TLS handshake shows up on roughly one request in twenty) or
+   *  a 5xx is retried with a backoff; a 429 holds every request of this
+   *  Source back for the API's `Retry-After` / `RateLimit-Reset` (capped at
+   *  its whole 300 s window), so the importer's workers wait together. One
+   *  budget of 4 requests covers all of it. */
+  const get = createFetcher(host, { id: "novelarchive", attempts: 4 });
 
-  /** GET `${BASE_URL}/api${path}` and parse the JSON body. A failed
-   *  transport is retried briefly and a 429 is waited out; any other non-2xx
-   *  throws with the API's own `error` message when it sent one
+  /** GET `${BASE_URL}/api${path}` and parse the JSON body. A non-2xx throws
+   *  with the API's own `error` message when it sent one
    *  ({"error":"Chapter does not exist"}). */
   async function getJson(path: string): Promise<unknown> {
     const endpoint = `/api${path}`;
-    let resp = await fetchWithRetry(`${BASE_URL}${endpoint}`);
-    for (let attempt = 1; resp.status === 429 && attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
-      const wait = rateLimitWaitSeconds(resp.headers);
-      host.log("warn", `novelarchive: rate-limited on ${endpoint}; retry ${attempt} in ${wait}s`);
-      await sleep(wait * 1000);
-      resp = await fetchWithRetry(`${BASE_URL}${endpoint}`);
-    }
+    const resp = await get(`${BASE_URL}${endpoint}`);
 
     let body: unknown;
     let isJson = true;

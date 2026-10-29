@@ -90,13 +90,15 @@ the `.cc` mirror all resolve. Anything else throws `SourceUrlError`.
 5. **The API is rate-limited and sometimes slow.** Every response carries
    `ratelimit-policy: 900;w=300` — 900 requests per 5 minutes per client — and one
    chapter is one request, so a long import can cross it when the site is answering
-   quickly. A `429` is waited out for its `Retry-After` / `RateLimit-Reset` seconds
-   (clamped to 1–300 s, 60 s when neither is usable) and retried up to 3 times, with
-   a `warn` log each time, instead of failing every remaining chapter. During testing
-   the API took 3–8 s per request, which keeps the importer's 4 workers well under
-   the limit; requests also occasionally died with a TLS-handshake connection reset
-   (roughly one in twenty), so a request that fails outright is retried twice (after
-   1 s, then 2 s) before the error is reported.
+   quickly. Requests go through the shared `createFetcher` (see the repo README's
+   "Shared helpers"), with a budget of 4 requests per call: a `429` holds back every
+   request of the source — all of the importer's workers — for its `Retry-After` /
+   `RateLimit-Reset` seconds (clamped to 1–300 s, 60 s when neither is usable), with a
+   `warn` log, instead of failing every remaining chapter. During testing the API took
+   3–8 s per request, which keeps the importer's 4 workers well under the limit;
+   requests also occasionally died with a TLS-handshake connection reset (roughly one
+   in twenty), so a request that fails outright, or a `5xx`, is retried after a
+   jittered 1 s, 2 s, 4 s before the error is reported.
 
 6. **Home rows come from the API, not the server-rendered home page.** `/` does
    ship a server-rendered first paint of the hero and the rows, but it is a short,
