@@ -33,9 +33,10 @@ extension's bundle and calls into it through the `Source` interface described be
 the extension never talks to the network, a rendering engine, or the filesystem
 directly; every capability it has arrives through an injected `host` object.
 
-This repo is that publishing pipeline for one particular catalogue: two extensions today
-(`extensions/cenele`, `extensions/kolnovel`), the `@riwaq/extension-api` contract package
-they're built against, and the scripts and CI that validate, bundle and publish them.
+This repo is that publishing pipeline for one particular catalogue: the extensions under
+`extensions/` (Arabic and English sites — each manifest's `language` says which), the
+`@riwaq/extension-api` contract package they're built against, and the scripts and CI that
+validate, bundle and publish them.
 
 ## Using it
 
