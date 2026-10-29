@@ -17,7 +17,7 @@
 // promises — cenele's WordPress nonces are session-scoped and break
 // without it.
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -34,27 +34,36 @@ const JAR = join(JAR_DIR, "cookies.txt");
 // done rather than leaving it behind in the OS tmpdir on every `pnpm probe`.
 afterAll(() => rmSync(JAR_DIR, { recursive: true, force: true }));
 
+// Response headers go to a file of their own, one per request. Not
+// /dev/stderr: Node hands a child process a socket as stderr on Linux, and
+// curl cannot open a socket by that path, so every request failed with
+// `curl: (23)` before any byte of the site was read.
+let headerFileSeq = 0;
+
 async function curl(url: string, opts: { method?: string; headers?: Record<string, string>; body?: string } | undefined) {
+  const headerFile = join(JAR_DIR, `headers-${++headerFileSeq}.txt`);
   const args = [
     "-sS", "--compressed", "--max-time", "60", "-L",
     "-b", JAR, "-c", JAR,
     "-A", UA,
     "-H", "Accept-Language: ar,en;q=0.8",
-    "-D", "/dev/stderr",
+    "-D", headerFile,
     "-X", opts?.method ?? "GET",
   ];
   for (const [k, v] of Object.entries(opts?.headers ?? {})) args.push("-H", `${k}: ${v}`);
   if (opts?.body !== undefined) args.push("--data-raw", String(opts.body));
   args.push(url);
 
-  const { stdout, stderr } = await execFileAsync("curl", args, {
+  const { stdout } = await execFileAsync("curl", args, {
     encoding: "buffer",
     maxBuffer: 64 * 1024 * 1024,
   });
 
   // -D writes one header block per redirect hop; the last one is the
   // response we actually got.
-  const blocks = stderr.toString("utf8").split(/\r?\n\r?\n/).filter((b) => b.trim());
+  const dump = readFileSync(headerFile, "utf8");
+  rmSync(headerFile, { force: true });
+  const blocks = dump.split(/\r?\n\r?\n/).filter((b) => b.trim());
   const lines = (blocks.at(-1) ?? "").split(/\r?\n/);
   const headers: Record<string, string> = {};
   for (const line of lines.slice(1)) {
