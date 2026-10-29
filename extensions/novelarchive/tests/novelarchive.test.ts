@@ -22,7 +22,7 @@ import createSource, {
 import { cleanLines, fold, repairMojibake, stripWatermarks } from "../src/clean";
 import { strings } from "../src/strings";
 import { SourceUrlError, type FetchResponse, type SourceHost } from "@riwaq/extension-api";
-import { createTestHost } from "@riwaq/extension-api/testing";
+import { createTestHost, type TestHostOptions } from "@riwaq/extension-api/testing";
 
 // Read fixtures with fileURLToPath(import.meta.url) + path.join, never a
 // relative `new URL(...)`: happy-dom's patched URL resolves that against its
@@ -57,24 +57,19 @@ const SHADOW_SLAVE_ID = "69faa859a5f4c7d1b734d496";
 const LOTM_ID = "69faadd3a5f4c7d1b734d49f";
 const NOVEL_URL = `${BASE_URL}/novel?id=${SHADOW_SLAVE_ID}`;
 
-type Reply = { status?: number; body: string; headers?: Record<string, string> };
+type Logs = NonNullable<TestHostOptions["logs"]>;
 
-/** A host whose fetch answers from `route(url)` — for status codes and
- *  headers, which createTestHost (always 200) cannot express. */
-function scriptedHost(
-  route: (url: string) => Reply | Promise<Reply>,
-  options: { locale?: "en" | "ar"; calls?: string[]; logs?: string[] } = {},
-): SourceHost {
-  const base = createTestHost({ locale: options.locale ?? "en" });
+/** Every request answers `body` with `status` — an error page, a 404 body. */
+const answering = (status: number, body: string, opts: TestHostOptions = {}) =>
+  createTestHost({ responses: { [BASE_URL]: body }, status: { [BASE_URL]: status }, ...opts });
+
+/** `host` whose fetch first answers `first`, then serves its fixtures. */
+function failingOnce(host: SourceHost, first: () => FetchResponse): SourceHost & { requests: () => number } {
+  let n = 0;
   return {
-    ...base,
-    locale: options.locale ?? "en",
-    log: (level, message) => options.logs?.push(`${level}: ${message}`),
-    async fetch(url): Promise<FetchResponse> {
-      options.calls?.push(url);
-      const reply = await route(url);
-      return { status: reply.status ?? 200, text: reply.body, headers: reply.headers ?? {} };
-    },
+    ...host,
+    requests: () => n,
+    fetch: async (url, opts) => (++n === 1 ? first() : host.fetch(url, opts)),
   };
 }
 
@@ -281,22 +276,23 @@ describe("getHomeSections", () => {
   });
 
   it("keeps the rows that loaded when one endpoint fails", async () => {
-    const logs: string[] = [];
-    const host = scriptedHost(
-      (url) =>
-        url.includes("editors-choice")
-          ? { status: 500, body: "<html>Internal Server Error</html>" }
-          : { body: fixture(url.includes("trending") ? "trending.json" : "recently-updated.json") },
-      { logs },
-    );
+    const logs: Logs = [];
+    const host = createTestHost({
+      responses: {
+        "/novels/trending": fixture("trending.json"),
+        "/novels/editors-choice": "<html>Internal Server Error</html>",
+        "/novels/recently-updated": fixture("recently-updated.json"),
+      },
+      status: { "/novels/editors-choice": 500 },
+      logs,
+    });
     const sections = await createSource(host).getHomeSections();
     expect(sections.map((s) => s.id)).toEqual(["trending", "latest-updates"]);
-    expect(logs.some((l) => l.startsWith("warn: ") && l.includes("editors-choice"))).toBe(true);
+    expect(logs.some((l) => l.level === "warn" && l.message.includes("editors-choice"))).toBe(true);
   });
 
   it("throws, prefixed with the manifest id, when every row fails", async () => {
-    const host = scriptedHost(() => ({ status: 503, body: "Service Unavailable" }));
-    await expect(createSource(host).getHomeSections()).rejects.toThrow(PREFIX);
+    await expect(createSource(answering(503, "Service Unavailable")).getHomeSections()).rejects.toThrow(PREFIX);
   });
 });
 
@@ -403,9 +399,9 @@ describe("search", () => {
   });
 
   it("throws, prefixed with the manifest id, on a non-JSON or list-less response", async () => {
-    const html = scriptedHost(() => ({ body: "<!DOCTYPE html><title>Just a moment...</title>" }));
+    const html = answering(200, "<!DOCTYPE html><title>Just a moment...</title>");
     await expect(createSource(html).search("x")).rejects.toThrow(`${PREFIX}/api/novels?search=x`);
-    const shapeless = scriptedHost(() => ({ body: JSON.stringify({ results: [] }) }));
+    const shapeless = answering(200, JSON.stringify({ results: [] }));
     await expect(createSource(shapeless).search("x")).rejects.toThrow(`${PREFIX}/api/novels`);
   });
 });
@@ -493,20 +489,20 @@ describe("getNovel", () => {
   });
 
   it("throws the site's own reason on a 404, prefixed with the manifest id", async () => {
-    const host = scriptedHost(() => ({ status: 404, body: fixture("novel-not-found.json") }));
+    const host = answering(404, fixture("novel-not-found.json"));
     await expect(
       createSource(host).getNovel(`${BASE_URL}/novel?id=000000000000000000000000`),
     ).rejects.toThrow(`${PREFIX}/api/novels/000000000000000000000000 answered HTTP 404: Novel not found.`);
   });
 
   it("throws on a response that is JSON but not a novel", async () => {
-    const host = scriptedHost(() => ({ body: "{}" }));
+    const host = answering(200, "{}");
     await expect(createSource(host).getNovel(NOVEL_URL)).rejects.toThrow(`${PREFIX}/api/novels/${SHADOW_SLAVE_ID} did not return a novel.`);
   });
 
   it("rejects a URL that is not a novel URL before fetching", async () => {
-    const calls: string[] = [];
-    const host = scriptedHost(() => ({ body: "{}" }), { calls });
+    const calls: Array<{ url: string; method: string }> = [];
+    const host = answering(200, "{}", { calls });
     await expect(createSource(host).getNovel(`${BASE_URL}/library`)).rejects.toThrow(SourceUrlError);
     expect(calls).toEqual([]);
   });
@@ -671,18 +667,18 @@ describe("getChapterContent", () => {
   });
 
   it("throws the site's reason for a chapter the list names but the archive lacks", async () => {
-    const host = scriptedHost(() => ({ status: 404, body: fixture("chapter-not-found.json") }));
+    const host = answering(404, fixture("chapter-not-found.json"));
     await expect(createSource(host).getChapterContent(chapterAt(LOTM_ID, 1435))).rejects.toThrow(
       `${PREFIX}/api/novels/${LOTM_ID}/chapters/1435?prefetch=1 answered HTTP 404: Chapter does not exist.`,
     );
   });
 
   it("throws on an empty chapter body or a response without one", async () => {
-    const empty = scriptedHost(() => ({ body: JSON.stringify({ chapter: { number: 1, name: "x", content: " \n\n " } }) }));
+    const empty = answering(200, JSON.stringify({ chapter: { number: 1, name: "x", content: " \n\n " } }));
     await expect(createSource(empty).getChapterContent(chapterAt(SHADOW_SLAVE_ID, 1))).rejects.toThrow(
       `${PREFIX}chapter 1 of novel ${SHADOW_SLAVE_ID} has no text.`,
     );
-    const shapeless = scriptedHost(() => ({ body: JSON.stringify({ error: null }) }));
+    const shapeless = answering(200, JSON.stringify({ error: null }));
     await expect(createSource(shapeless).getChapterContent(chapterAt(SHADOW_SLAVE_ID, 1))).rejects.toThrow(
       `${PREFIX}/api/novels/${SHADOW_SLAVE_ID}/chapters/1?prefetch=1 did not return a chapter.`,
     );
@@ -699,15 +695,12 @@ describe("getChapterContent", () => {
 describe("network resilience", () => {
   it("waits out a 429 for the advertised reset, then retries", async () => {
     vi.useFakeTimers();
-    const logs: string[] = [];
-    let n = 0;
-    const host = scriptedHost(
-      () =>
-        ++n === 1
-          ? { status: 429, body: '{"error":"Too many requests"}', headers: { "ratelimit-reset": "7" } }
-          : { body: fixture("chapter.json") },
-      { logs },
-    );
+    const logs: Logs = [];
+    const host = failingOnce(createTestHost({ responses: { "/chapters/1": fixture("chapter.json") }, logs }), () => ({
+      status: 429,
+      text: '{"error":"Too many requests"}',
+      headers: { "ratelimit-reset": "7" },
+    }));
     const pending = createSource(host).getChapterContent({
       id: 1,
       title: "",
@@ -715,47 +708,50 @@ describe("network resilience", () => {
       lines: [],
     });
     await vi.advanceTimersByTimeAsync(6_999);
-    expect(n).toBe(1);
+    expect(host.requests()).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     await expect(pending).resolves.not.toHaveLength(0);
-    expect(n).toBe(2);
-    expect(logs.some((l) => l.startsWith("warn: ") && l.includes("in 7s"))).toBe(true);
+    expect(host.requests()).toBe(2);
+    expect(logs.some((l) => l.level === "warn" && l.message.includes("in 7s"))).toBe(true);
   });
 
   it("gives up after MAX_RATE_LIMIT_RETRIES and reports the 429", async () => {
     vi.useFakeTimers();
-    let n = 0;
-    const host = scriptedHost(() => {
-      n++;
-      return { status: 429, body: '{"error":"Too many requests"}', headers: { "retry-after": "1" } };
+    const calls: Array<{ url: string; method: string }> = [];
+    const host = createTestHost({
+      responses: { [BASE_URL]: '{"error":"Too many requests"}' },
+      status: { [BASE_URL]: 429 },
+      headers: { [BASE_URL]: { "retry-after": "1" } },
+      calls,
     });
     const pending = createSource(host).search("x");
     const assertion = expect(pending).rejects.toThrow(`${PREFIX}/api/novels?search=x&fuzzy=1&page=1&per_page=24 answered HTTP 429: Too many requests.`);
     await vi.advanceTimersByTimeAsync(MAX_RATE_LIMIT_RETRIES * 1000);
     await assertion;
-    expect(n).toBe(MAX_RATE_LIMIT_RETRIES + 1);
+    expect(calls).toHaveLength(MAX_RATE_LIMIT_RETRIES + 1);
   });
 
   it("retries a request that failed outright (connection reset)", async () => {
     vi.useFakeTimers();
-    let n = 0;
-    const host = scriptedHost(() => {
-      if (++n === 1) throw new Error("Recv failure: Connection reset by peer");
-      return { body: fixture("search-no-results.json") };
+    const host = failingOnce(createTestHost({ responses: { [BASE_URL]: fixture("search-no-results.json") } }), () => {
+      throw new Error("Recv failure: Connection reset by peer");
     });
     const pending = createSource(host).search("zzqqxxnotathing");
     await vi.advanceTimersByTimeAsync(1000);
     await expect(pending).resolves.toMatchObject({ cards: [], hasMore: false });
-    expect(n).toBe(2);
+    expect(host.requests()).toBe(2);
   });
 
   it("reports a request that keeps failing, prefixed with the manifest id", async () => {
     vi.useFakeTimers();
     let n = 0;
-    const host = scriptedHost(() => {
-      n++;
-      throw new Error("Connection reset by peer");
-    });
+    const host: SourceHost = {
+      ...createTestHost(),
+      fetch: async () => {
+        n++;
+        throw new Error("Connection reset by peer");
+      },
+    };
     const pending = createSource(host).search("x");
     const assertion = expect(pending).rejects.toThrow(/^novelarchive: .* could not be fetched: Connection reset by peer$/);
     await vi.advanceTimersByTimeAsync(10_000);

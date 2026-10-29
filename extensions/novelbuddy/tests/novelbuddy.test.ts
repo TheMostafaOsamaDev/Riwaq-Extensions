@@ -18,7 +18,7 @@ import createSource, {
 } from "../src/index";
 import { strings } from "../src/strings";
 import { parseHtml, sanitizeText, SourceUrlError, type SourceHost } from "@riwaq/extension-api";
-import { createTestHost } from "@riwaq/extension-api/testing";
+import { createTestHost, type TestHostOptions } from "@riwaq/extension-api/testing";
 
 // Fixtures are read via fileURLToPath + path.join, never `new URL(...)`:
 // under happy-dom the global URL resolves a relative `new URL(href, base)`
@@ -81,32 +81,12 @@ const chapterRows: any[] = JSON.parse(chaptersJson).data.chapters;
 const NOVEL_URL = "https://novelbuddy.me/shadows-oath";
 const CHAPTER_LIST_URL = `https://api.novelbuddy.me/titles/${novelManga.id}/chapters?cv=${novelManga.cv}`;
 
-type LogEntry = { level: string; message: string };
+type LogEntry = NonNullable<TestHostOptions["logs"]>[number];
 
-/** createTestHost with a working log() and an overridable status. */
-function host(
-  responses: Record<string, string>,
-  opts: {
-    locale?: "en" | "ar";
-    calls?: Array<{ url: string; method: string; body?: string }>;
-    logs?: LogEntry[];
-    status?: (url: string) => number;
-  } = {},
-): SourceHost {
-  const base = createTestHost({ responses, locale: opts.locale ?? "en", calls: opts.calls });
-  return {
-    ...base,
-    async fetch(url, o) {
-      const r = await base.fetch(url, o);
-      return { ...r, status: opts.status ? opts.status(url) : r.status };
-    },
-    log(level, message) {
-      opts.logs?.push({ level, message });
-    },
-  };
-}
+/** Shorthand for a fixture host answering `responses`. */
+const host = (responses: Record<string, string>, opts: TestHostOptions = {}) => createTestHost({ responses, ...opts });
 
-const novelHost = (opts: Parameters<typeof host>[1] = {}) =>
+const novelHost = (opts: TestHostOptions = {}) =>
   host({ [NOVEL_URL]: novelHtml, [CHAPTER_LIST_URL]: chaptersJson }, opts);
 
 // ── canHandle + URLs ───────────────────────────────────────────────────
@@ -248,7 +228,7 @@ describe("getHomeSections", () => {
   });
 
   it("throws, naming the status, on a non-2xx answer", async () => {
-    const source = createSource(host({ "/home": homeHtml }, { status: () => 503 }));
+    const source = createSource(host({ "/home": homeHtml }, { status: { "/home": 503 } }));
     await expect(source.getHomeSections()).rejects.toThrow(`${PREFIX}https://novelbuddy.me/home answered HTTP 503.`);
   });
 
@@ -359,7 +339,7 @@ describe("search", () => {
 
   it("throws on a non-2xx answer and on a page with no results list", async () => {
     await expect(
-      createSource(host({ "/search": searchHtml }, { status: () => 429 })).search("shadow"),
+      createSource(host({ "/search": searchHtml }, { status: { "/search": 429 } })).search("shadow"),
     ).rejects.toThrow(`${PREFIX}https://novelbuddy.me/search?q=shadow answered HTTP 429.`);
     // The home page is a real Next.js page, just not a search page.
     await expect(createSource(host({ "/search": homeHtml })).search("shadow")).rejects.toThrow(
@@ -468,7 +448,7 @@ describe("getNovel", () => {
   });
 
   it("throws, naming the page, when the novel page answers non-2xx", async () => {
-    const source = createSource(novelHost({ status: (u) => (u === NOVEL_URL ? 404 : 200) }));
+    const source = createSource(novelHost({ status: { [NOVEL_URL]: 404 } }));
     await expect(source.getNovel(NOVEL_URL)).rejects.toThrow(`${PREFIX}${NOVEL_URL} answered HTTP 404.`);
   });
 
@@ -482,7 +462,7 @@ describe("getNovel", () => {
   it("throws on a chapter-list failure instead of returning a truncated book", async () => {
     const withList = (body: string, status = 200) =>
       createSource(
-        host({ [NOVEL_URL]: novelHtml, [CHAPTER_LIST_URL]: body }, { status: (u) => (u === NOVEL_URL ? 200 : status) }),
+        host({ [NOVEL_URL]: novelHtml, [CHAPTER_LIST_URL]: body }, { status: { [CHAPTER_LIST_URL]: status } }),
       ).getNovel(NOVEL_URL);
 
     await expect(withList(chaptersJson, 500)).rejects.toThrow(
@@ -661,7 +641,7 @@ describe("getChapterContent", () => {
   });
 
   it("throws on a non-2xx answer", async () => {
-    const source = createSource(host({ [CH_URL]: chapterHtml }, { status: () => 404 }));
+    const source = createSource(host({ [CH_URL]: chapterHtml }, { status: { [CH_URL]: 404 } }));
     await expect(source.getChapterContent(chapterOf(CH_URL))).rejects.toThrow(`${PREFIX}${CH_URL} answered HTTP 404.`);
   });
 
@@ -858,14 +838,14 @@ describe("retrying a dropped request", () => {
 
   it("retries a 5xx once and reports the second answer", async () => {
     const calls: Array<{ url: string; method: string }> = [];
-    const source = createSource(host({ "/home": homeHtml }, { calls, status: () => 502 }));
+    const source = createSource(host({ "/home": homeHtml }, { calls, status: { "/home": 502 } }));
     await expect(source.getHomeSections()).rejects.toThrow(`${PREFIX}https://novelbuddy.me/home answered HTTP 502.`);
     expect(calls).toHaveLength(2);
   });
 
   it("does not retry a 4xx", async () => {
     const calls: Array<{ url: string; method: string }> = [];
-    const source = createSource(host({ [CH_URL]: chapterHtml }, { calls, status: () => 404 }));
+    const source = createSource(host({ [CH_URL]: chapterHtml }, { calls, status: { [CH_URL]: 404 } }));
     await expect(source.getChapterContent(chapterOf(CH_URL))).rejects.toThrow("HTTP 404");
     expect(calls).toHaveLength(1);
   });

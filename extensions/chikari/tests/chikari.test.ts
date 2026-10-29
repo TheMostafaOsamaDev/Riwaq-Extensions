@@ -15,8 +15,8 @@ import createSource, {
   type SeriesItem,
 } from "../src/index";
 import { strings } from "../src/strings";
-import { SourceUrlError, type FetchResponse, type SourceHost } from "@riwaq/extension-api";
-import { createTestHost } from "@riwaq/extension-api/testing";
+import { SourceUrlError } from "@riwaq/extension-api";
+import { createTestHost, type TestHostOptions } from "@riwaq/extension-api/testing";
 
 // Fixture paths via fileURLToPath + join, never `new URL(rel, import.meta.url)`:
 // happy-dom's patched URL resolves a relative URL against its fake
@@ -116,20 +116,9 @@ const NOVEL_ROUTES = {
 
 type Calls = Array<{ url: string; method: string; body?: string }>;
 
-/** A host that answers every URL with a fixed status/body. */
-function statusHost(status: number, text: string, calls: Calls = []): SourceHost {
-  return {
-    ...createTestHost(),
-    fetch: async (url): Promise<FetchResponse> => {
-      calls.push({ url, method: "GET" });
-      return { status, text, headers: {} };
-    },
-  };
-}
-
-function logHost(responses: Record<string, string>, logs: string[]): SourceHost {
-  return { ...createTestHost({ responses }), log: (level, msg) => logs.push(`${level}: ${msg}`) };
-}
+/** Every request answers `status` with `text`. */
+const statusHost = (status: number, text: string) =>
+  createTestHost({ responses: { [B]: text }, status: { [B]: status } });
 
 const CHALLENGE_BODY = JSON.stringify({ code: "challenge_required" });
 
@@ -469,11 +458,13 @@ describe("getNovel", () => {
   });
 
   it("warns, rather than failing, when fewer chapters arrive than the list claims", async () => {
-    const logs: string[] = [];
+    const logs: NonNullable<TestHostOptions["logs"]> = [];
     const empty = JSON.stringify({ ...chaptersP2, items: [] });
-    const n = await createSource(logHost({ ...NOVEL_ROUTES, [chaptersUrl(500)]: empty }, logs)).getNovel(NOVEL_URL);
+    const host = createTestHost({ responses: { ...NOVEL_ROUTES, [chaptersUrl(500)]: empty }, logs });
+    const n = await createSource(host).getNovel(NOVEL_URL);
     expect(n.volumes[0].chapters).toHaveLength(chaptersP1.items.length);
-    expect(logs.some((l) => l.startsWith("warn: chikari:") && l.includes(String(chaptersP1.total)))).toBe(true);
+    const warned = logs.filter((l) => l.level === "warn" && l.message.startsWith("chikari:"));
+    expect(warned.some((l) => l.message.includes(String(chaptersP1.total)))).toBe(true);
   });
 
   it("throws a branded 404 for a missing novel", async () => {

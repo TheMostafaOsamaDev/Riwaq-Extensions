@@ -292,9 +292,18 @@ backed entirely by fixtures you provide:
 const host = createTestHost({
   responses: { "https://example.com/novel/1": novelHtml }, // exact URL or substring match
   byteResponses: { "https://example.com/cover.jpg": coverBytes },
+  status: { "/novel/404": 404 },                        // keyed like `responses`; default 200
+  headers: { "/busy": { "retry-after": "30" } },        // keyed like `responses`; default none
+  calls,  // collects every request: { url, method, body }
+  logs,   // collects every host.log call: { level, message }
   locale: "en",
 });
 ```
+
+Keys in `status` and `headers` match the same way `responses` does, so a host name
+(`status: { "example.com": 503 }`) answers every URL on it. Only a request that has to
+behave differently the second time (fail once, then succeed) still needs a hand-made
+`fetch` override.
 
 Fixtures are **unedited captures of a page the live site actually served** — not invented
 from whole cloth, and not trimmed down to what your parser reads. A hand-invented fixture
