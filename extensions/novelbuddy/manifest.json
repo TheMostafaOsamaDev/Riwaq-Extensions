@@ -1,0 +1,14 @@
+{
+  "id": "novelbuddy",
+  "name": "NovelBuddy",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "language": "en",
+  "baseUrl": "https://novelbuddy.me",
+  "icon": "icon.png",
+  "description": {
+    "en": "Translated web novels and light novels in English, with new chapters every day.",
+    "ar": "روايات ويب وروايات خفيفة مترجمة إلى الإنجليزية، مع فصول جديدة كل يوم."
+  },
+  "author": "Riwaq"
+}
