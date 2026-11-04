@@ -13,7 +13,9 @@ import type { Locale } from "@riwaq/extension-api";
  *  - chapterFallback names a chapter the API lists without a name (the
  *    site's own reader falls back to the same "Chapter N").
  *  - meta* label the rows getNovel lifts into `meta`; ratingValue formats
- *    the rating row's value.
+ *    the rating row's value (the site rates out of 5, passed as {max}).
+ *  - status* name the site's three release statuses (the values its own
+ *    library filter knows); any other value is shown as the site wrote it.
  */
 const CATALOG = {
   en: {
@@ -25,29 +27,37 @@ const CATALOG = {
     metaChapters: "Chapters",
     metaViews: "Views",
     metaRating: "Rating",
-    ratingValue: "{score} / 5 ({count} ratings)",
+    ratingValue: "{score} / {max} ({count} ratings)",
     metaLatestRelease: "Latest release",
-    metaUpdated: "Updated",
-    metaAltNames: "Also known as",
+    metaUpdated: "Last updated",
+    metaAltTitles: "Alternative titles",
+    statusOngoing: "Ongoing",
+    statusCompleted: "Completed",
+    statusHiatus: "Hiatus",
   },
   ar: {
     homeTrending: "الأكثر رواجًا",
     homeEditorsChoice: "اختيارات المحررين",
     homeLatestUpdates: "آخر التحديثات",
-    allChapters: "جميع الفصول",
+    allChapters: "كل الفصول",
     chapterFallback: "الفصل {n}",
     metaChapters: "عدد الفصول",
     metaViews: "المشاهدات",
     metaRating: "التقييم",
-    ratingValue: "{score} / 5 ({count} تقييم)",
+    ratingValue: "{score} / {max} ({count} تقييم)",
     metaLatestRelease: "آخر إصدار",
     metaUpdated: "آخر تحديث",
-    metaAltNames: "أسماء أخرى",
+    metaAltTitles: "عناوين بديلة",
+    statusOngoing: "مستمرة",
+    statusCompleted: "مكتملة",
+    statusHiatus: "متوقفة مؤقتًا",
   },
 } satisfies Record<Locale, Record<string, string>>;
 
+export type StringKey = keyof typeof CATALOG.en;
+
 export function strings(locale: Locale) {
   const dict = CATALOG[locale] ?? CATALOG.en;
-  return (key: keyof typeof CATALOG.en, params?: Record<string, string | number>) =>
+  return (key: StringKey, params?: Record<string, string | number>) =>
     dict[key].replace(/\{(\w+)\}/g, (m, k) => (params && k in params ? String(params[k]) : m));
 }

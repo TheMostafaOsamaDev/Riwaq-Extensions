@@ -7,7 +7,8 @@ translations "archived from multiple sources". The pages are thin HTML shells th
 fill themselves from a public JSON API under `/api` (the site's own
 `assets/js/api.js` is the map of it). This extension talks only to that API: no HTML
 is parsed anywhere, and nothing needs JavaScript, a cookie handshake or a
-challenge — plain HTTP with the app's user agent gets every endpoint below. The
+challenge — plain HTTP with the app's user agent and an `Accept-Language` header (see
+quirk 7) gets every endpoint below. The
 `challenge.xewdy.systems` script the pages load is a captcha widget for the site's
 forms (ratings, downloads, requests), not a gate on reading.
 
@@ -109,6 +110,14 @@ the `.cc` mirror all resolve. Anything else throws `SourceUrlError`.
    parallel with `allSettled`, like the site: one failing row is logged at `warn`
    and left out; only all three failing throws.
 
+7. **`/api/` refuses a request without `Accept-Language`.** A Cloudflare firewall
+   rule in front of the API answers such a request `403` with its "Sorry, you have
+   been blocked" page — whatever the user agent; `Referer`, `Accept` or `Sec-Fetch-*`
+   alone do not help (checked 2026-11-04). The app's HTTP client sends no
+   `Accept-Language` of its own, so `getJson`, which every request goes through, sends
+   `Accept-Language: en-US,en;q=0.9`. A tool that adds one by default hides the rule:
+   Node's `fetch` sends `accept-language: *`, and `pnpm probe` sends its own.
+
 ## Not used: mirror sources
 
 Some novels also exist in one or more "sources" (`GET /api/novels/<id>/sources`,
@@ -136,11 +145,11 @@ import without their illustrations. Their text is complete.
 |---|---|
 | `title` | `title` (falls back to the id, never "Untitled") |
 | `author` | `author`, with the site's placeholder `"Unknown"` mapped to `""` so the host localizes the empty case |
-| `coverUrl` | `cover_url` → `novel_image` → `image_url`, made absolute; anything that is not a URL (the site's renderer also copes with inline base64) falls back to `/api/novels/<id>/cover` |
+| `coverUrl` | `cover_url` → `novel_image` → `image_url`, made absolute; anything that is not a URL (the site's renderer also copes with inline base64), or does not parse, falls back to `/api/novels/<id>/cover` |
 | `description` | `description` (plain text with blank-line paragraphs) |
 | `tags` | `genres` split on commas, de-duplicated case-insensitively, minus the site's own non-genre categories (`NON_GENRE_TAGS` in `novel-page.js`: "Browse", "Completed Novels", …) and "Unknown" |
-| `status` | `release_status` (or `ongoing`), capitalized: Ongoing / Completed / Hiatus |
-| `meta` | Also known as (`associated_names`), Chapters, Views (`views_number`), Rating (`rating` / 5 with `rating_count`, only when rated), Latest release (`latest_release` unless "Unknown" — "Every 12.6 Day(s)", "15 hours ago", …), Updated (`updated_at` date) |
+| `status` | `release_status` (or `ongoing`): the site's three values — `ongoing`, `completed`, `hiatus`, all its library filter knows — become Ongoing / Completed / Hiatus in the UI's language; any other value is shown as written, first letter capitalised; `"unknown"` is left out |
+| `meta` | Alternative titles (`associated_names`), Chapters, Views (`views_number`), Rating (`rating` / 5 with `rating_count`, only when rated), Latest release (`latest_release` unless "Unknown" — "Every 12.6 Day(s)", "15 hours ago", …), Last updated (`updated_at` date) |
 | `volumes` | one volume, "All Chapters", holding every chapter |
 
 `language` is `"en"` and `direction` `"ltr"` for every novel. Some catalogue titles
@@ -247,8 +256,11 @@ chapter`).
 
 `src/strings.ts` (`en` + `ar`) holds what this source writes itself: the three home
 row titles (the English ones are the site's own headings, which live in its markup
-and JS rather than in the API), the volume title, the `"Chapter N"` fallback, and the
-`meta` labels and rating format.
+and JS rather than in the API), the volume title, the `"Chapter N"` fallback, the
+`meta` labels and rating format, and the three status names. The shared concepts use
+the same keys and wording as the other English sources (`allChapters`,
+`chapterFallback`, `metaChapters`, `metaRating` / `ratingValue` with `{max}`,
+`metaViews`, `metaUpdated`, `metaAltTitles`, `status*`).
 
 ## Tests and fixtures
 
