@@ -97,7 +97,9 @@ returns a hollow result without calling the site.
 
 The detail and the first chapter page are fetched in parallel. The first
 page's `total` gives the number of pages, and the rest go out four at a
-time. `limit` is capped server-side at 500: `limit=1000` and `limit=5000`
+time (7 pages took 11 s that way). Once any page fails, or the detail does,
+no further page is asked for; the ones already in flight are left to land.
+`limit` is capped server-side at 500: `limit=1000` and `limit=5000`
 both return 500. The detail's `chapters_head` / `chapters_tail` (ten rows
 each) are ignored. Rows are de-duplicated by number (a chapter released
 mid-pagination can shift a row across a page boundary). A row with no
@@ -105,19 +107,30 @@ numeric `number` is skipped with a warning, since the read endpoint is
 addressed by number. If the collected count differs from `total`, that is
 logged as a warning, not thrown.
 
-**One fully-populated pseudo-volume, never lazy.** The site has no volumes:
+**Reopening costs one request.** The app calls `getNovel` for the same URL
+again straight after opening it (detail view, then importer). The source
+keeps the last novel's chapter rows (plain `{ number, title }`) with the
+detail's `chapter_count` and `last_chapter_at` they were fetched under. A
+call for that novel fetches the detail first, and only if either value
+changed does it fetch the list again; otherwise 1 request instead of
+1 + ⌈N/500⌉ (17 for an 8,000-chapter novel). The `SourceChapter` objects
+are built fresh on every call and never kept: the app's importer writes
+each chapter's text onto the ones it was given. Concurrent calls for one
+novel share a single load.
+
+**One fully-populated pseudo-volume ("All Chapters"), never lazy.** The site has no volumes:
 every row's `volume` is `""` across every novel checked, light novels
 included. The app's importer flattens `getNovel`'s volumes as returned and
 never calls `getVolumeChapters`, so lazy volumes would import nothing.
 
 | Field | From |
 |---|---|
-| `title` | `title` |
+| `title` | `title` (whitespace collapsed, like every display field below) |
 | `author` | `authors[]` with `role: "author"` (or all names if none has that role), joined; `""` when absent |
 | `coverUrl` | `cover_url` |
-| `description` | `description` (plain text with `\n\n` paragraphs) |
+| `description` | `description`: plain text with `\n\n` paragraphs. Split on newlines the way the reader splits a chapter, each paragraph's whitespace collapsed, joined by blank lines |
 | `tags` | `genres[].name` only. The separate `tags[]` is NovelUpdates-style: 35 to 100+ per novel, alphabetical, some `is_spoiler`. Far too many for chips, so it is not surfaced |
-| `status` | `releasing / completed / hiatus / cancelled / upcoming`, mapped to the site's own labels (localised) |
+| `status` | `releasing` → Ongoing; `completed / hiatus / cancelled / upcoming` → Completed / Hiatus / Cancelled / Upcoming (localised, the labels the other English extensions use). Anything else as sent, first letter capitalised |
 | `meta` | Chapters (`chapter_count`), Rating (`rating / 10 (rating_count)`, only when rated), Views, Year (when set), Last updated (`last_chapter_at` date), Alternative titles (when set) |
 
 `alt_titles`, `year` and `type` were empty/`null`/`""` on every novel
@@ -152,7 +165,7 @@ story around it. Then `isJunkLine` drops a line when it is:
 - a Ko-fi / "buy me a coffee" / Patreon plug (note `<strong>KO-FI</strong><strong>BUY ME A
   COFEE</strong>` becomes `KO-FIBUY ME A COFEE`, so these use no word
   boundaries; the hyphen in `Ko-fi` is required so the name "Kofi" survives);
-- a Discord plug (`join our/the discord`, `in the discord`, `Discord:`,
+- a Discord plug (`our discord`, `join/in the discord`, `Discord:`,
   `discord server/link/channel`), not the plain noun ("discord between the sects");
 - an "advance(d) chapters" / "Adv4nc3 Ch4pt3r" upsell;
 - a translator-notes header (`Translator's Comments`, `Translator Notes: …`, `TL notes`).
@@ -230,8 +243,4 @@ parsed fixture. The files themselves are never edited.
 PROBE_ID=chikari PROBE_QUERY="sword" NODE_OPTIONS=--no-experimental-webstorage pnpm probe
 ```
 
-All five methods it exercises pass. On Linux, `scripts/probe.ts` itself
-can't run as-is: it passes curl `-D /dev/stderr`, Node gives child
-processes a socketpair as stderr, and `open()` on a socket fails, so every
-request dies with `curl: (23)`. That is a harness issue, not an extension
-one (macOS is unaffected).
+All five methods it exercises pass.
