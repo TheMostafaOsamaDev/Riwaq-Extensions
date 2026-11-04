@@ -814,6 +814,7 @@ describe("clean.ts units", () => {
     // "Ã©" could be genuine text — no C1 control, so it is left alone.
     expect(repairMojibake("CAFÃ©")).toBe("CAFÃ©");
     expect(repairMojibake("plain text — “quoted”")).toBe("plain text — “quoted”");
+    expect(repairMojibake("Ã© without a C1 control, ð too")).toBe("Ã© without a C1 control, ð too");
   });
 
   it("leaves story text alone", () => {
@@ -853,5 +854,24 @@ describe("clean.ts units", () => {
 
   it("contentToLines keeps a lone heading rather than returning nothing", () => {
     expect(contentToLines("Chapter 5")).toEqual([{ type: "text", content: "Chapter 5" }]);
+  });
+
+  it("contentToLines collapses untidy whitespace and leaves tidy lines as they are", () => {
+    const content = "  Line\u00a0one  here \t\r\n\r\nSecond\u2003line\n\ufeffThird line.\rFourth: “quoted” — fine.";
+    expect(contentToLines(content).map((l) => l.content)).toEqual([
+      "Line one here",
+      "Second line",
+      "Third line.",
+      "Fourth: “quoted” — fine.",
+    ]);
+  });
+
+  it("still checks a line whose URL only shows once folded", () => {
+    // Fullwidth "ｗｗｗ" is no URL as written; NFKD makes it one, and the
+    // rest is promo speak. Untouched by the watermark rules, it still goes.
+    expect(cleanLine("Read more at ｗｗｗ.example.com")).toBe("");
+    // The same words without any URL are story text.
+    expect(cleanLine("Read more at the library, she said.")).toBe("Read more at the library, she said.");
+    expect(cleanLine("“Read more,” she said — and left.")).toBe("“Read more,” she said — and left.");
   });
 });

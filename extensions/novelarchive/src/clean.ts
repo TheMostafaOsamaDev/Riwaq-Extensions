@@ -24,8 +24,10 @@ const C1_CONTROL_RE = /[\u0080-\u009f]/;
 
 /** Re-decodes UTF-8 that was read as Latin-1. Only sequences containing a
  *  C1 control character (U+0080–U+009F) are touched: those never occur in
- *  real text, so "Ã©"-style pairs that could be genuine are left alone. */
+ *  real text, so "Ã©"-style pairs that could be genuine are left alone,
+ *  and a chapter without one (nearly all of them) skips the sequence pass. */
 export function repairMojibake(text: string): string {
+  if (!C1_CONTROL_RE.test(text)) return text;
   return text.replace(LATIN1_UTF8_RE, (seq) => {
     if (!C1_CONTROL_RE.test(seq)) return seq;
     const b = Array.from(seq, (ch) => ch.charCodeAt(0));
@@ -48,6 +50,10 @@ const URL_RE = /https?:\/\/|www\.[a-z0-9-]+\./i;
  *  watermark or a URL, so ordinary story text never trips it. */
 const PROMO_RE =
   /fastest|latest chapters?|update(?:s|d)? (?:fast|quickly)|please collect|collect it|free to read|pop-?up|table of contents|reading experience|read more|continue reading|for the best|updated by|published (?:on|at)|follow current|source of this|for one second/;
+/** A character NFKD could fold into another. ASCII, curly quotes and en
+ *  and em dashes — the bulk of English prose — are their own NFKD form, so
+ *  a line of only those holds a URL only if it shows one as written. */
+const NFKD_SENSITIVE_RE = /[^\x00-\x7f\u2013\u2014\u2018\u2019\u201c\u201d]/;
 
 /** One line without its watermarks and this archive's promo leftovers: a
  *  bracketed group holding a URL is cut, and what remains of a line that
@@ -56,11 +62,16 @@ const PROMO_RE =
  *  window, free to read!", "READ MORE CHAPTERS HERE-https://…"). Returns ""
  *  for a line with nothing worth keeping. */
 export function cleanLine(line: string): string {
-  const unbracketed = line.replace(BRACKET_GROUP_RE, (group) => (URL_RE.test(group) ? " " : group));
+  // A bracket group can only hold a URL when the line does.
+  const hasUrl = URL_RE.test(line);
+  const unbracketed = hasUrl ? line.replace(BRACKET_GROUP_RE, (group) => (URL_RE.test(group) ? " " : group)) : line;
   let text = stripWatermarks(unbracketed);
-  // A cut group leaves a space before the punctuation that followed it.
+  // A cut group leaves a gap, and a space before the punctuation after it.
   if (unbracketed !== line) text = sanitizeText(text).replace(/\s+([,.!?;:])/g, "$1");
   const touched = text !== line;
+  // An untouched line is promo only when it carries a URL — and without a
+  // URL as written, or a character NFKD could fold into one, it cannot.
+  if (!touched && !hasUrl && !NFKD_SENSITIVE_RE.test(line)) return line;
   if (touched && !/\p{L}/u.test(text)) return "";
   const plain = text.normalize("NFKD").toLowerCase();
   if ((touched || URL_RE.test(plain)) && PROMO_RE.test(plain)) return "";

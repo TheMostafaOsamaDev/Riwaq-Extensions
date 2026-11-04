@@ -68,6 +68,11 @@ const NOVEL_ID_RE = /^[0-9a-f]{24}$/i;
  *  nothing else to tell a heading from a paragraph by — and so does this. */
 const LEADING_HEADING_MAX_LENGTH = 80;
 
+/** Whitespace sanitizeText would change: any but single spaces between
+ *  words. Most lines have none, and skipping the call for them saves the
+ *  replace that rewrites every space — most of a chapter's split cost. */
+const UNTIDY_SPACE_RE = /[^\S ]| {2}|^ | $/;
+
 /** Site categories that ride along in `genres` but are not genres. Copied
  *  from NON_GENRE_TAGS in the site's assets/js/novel-page.js, plus
  *  "unknown" (the site's placeholder for a novel with no genres). */
@@ -258,7 +263,7 @@ export function contentToLines(content: string): SourceLine[] {
   const paragraphs = cleanLines(
     repairMojibake(content)
       .split(/\r?\n|\r/)
-      .map((line) => sanitizeText(line))
+      .map((line) => (UNTIDY_SPACE_RE.test(line) ? sanitizeText(line) : line))
       .filter((line) => line !== ""),
   );
   if (
