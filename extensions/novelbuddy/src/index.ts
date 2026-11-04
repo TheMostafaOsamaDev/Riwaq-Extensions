@@ -8,10 +8,8 @@
 // required — see the README for the evidence):
 //
 //   getHomeSections   https://novelbuddy.me/home
-//                     Row headings, row order and row membership come from
-//                     the rendered `<section><header><h2>` blocks; each
-//                     card's data comes from that same page's __NEXT_DATA__
-//                     (see parseHomeSections).
+//                     pageProps.trendingItems / popularItems / latest.items,
+//                     one row each (see HOME_ROWS).
 //   search            https://novelbuddy.me/search?q=<q>&page=<n>
 //                     pageProps.ssrItems + pageProps.ssrPagination.has_next.
 //   getNovel          https://novelbuddy.me/<slug>  (pageProps.initialManga)
@@ -19,7 +17,9 @@
 //                     for the chapter list. The novel page only inlines the
 //                     newest 50 chapters; the API call is the one the site's
 //                     own client makes, and returns every chapter in one
-//                     response (6,107 for Martial Peak) — no pagination.
+//                     response (6,107 for Martial Peak) — no pagination. The
+//                     list request is skipped when the last list fetched is
+//                     this novel's at the same `cv` (see createSource's `last`).
 //   getChapterContent https://novelbuddy.me/<slug>/<chapter-slug>
 //                     pageProps.initialChapter.content, an HTML fragment.
 //   searchChapters    no request of its own when getNovel already ran: it
@@ -29,7 +29,7 @@
 // there is NO `/novel/` prefix on the current site (`/novel/<slug>` 404s).
 // The old NovelBuddy (novelbuddy.io / novelbuddy.com) did use `/novel/<slug>`,
 // and both of those domains now 301 to novelbuddy.me, so links saved from
-// them are accepted and rewritten (see novelPath). `www.novelbuddy.me` is a
+// them are accepted and rewritten (see slugFromUrl). `www.novelbuddy.me` is a
 // 301 to ITSELF (an infinite redirect loop, verified with curl -L), so every
 // request goes to the bare `novelbuddy.me` host no matter which host the
 // caller's URL used.
@@ -53,7 +53,9 @@ import {
   type SourceSearchResult,
   type SourceSection,
 } from "@riwaq/extension-api";
-import { strings } from "./strings";
+import { strings, type StringKey } from "./strings";
+
+type T = ReturnType<typeof strings>;
 
 export const BASE_URL = "https://novelbuddy.me";
 export const API_URL = "https://api.novelbuddy.me";
@@ -76,15 +78,12 @@ const HOSTS = new Set([
  *  current site still routes `/read/<slug>[/<chapter>]` to the same title. */
 const LEGACY_PREFIXES = new Set(["novel", "read"]);
 
-/** How many novels' chapter lists `searchChapters` keeps in memory. */
-const CHAPTER_CACHE_SIZE = 4;
-
 // ── URLs ────────────────────────────────────────────────────────────────
 
-/** The novel-relative path segments of a NovelBuddy URL: `[slug]` for a
- *  novel page, `[slug, chapterSlug]` for a chapter. Throws a SourceUrlError
- *  for a URL that isn't a NovelBuddy page or has no path at all. */
-export function novelPath(url: string): string[] {
+/** The novel slug of any accepted NovelBuddy novel or chapter URL (mirror
+ *  host, `www.`, legacy `/novel/` or `/read/` prefix). Throws a
+ *  SourceUrlError for a URL that isn't a NovelBuddy page or has no path. */
+export function slugFromUrl(url: string): string {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -94,35 +93,18 @@ export function novelPath(url: string): string[] {
   if (!HOSTS.has(parsed.hostname)) {
     throw new SourceUrlError(`novelbuddy: ${url} is not a NovelBuddy URL.`);
   }
-  const segments = parsed.pathname
-    .split("/")
-    .filter(Boolean)
-    .map((s) => decodeURIComponent(s));
-  // Only strip a legacy prefix when something follows it, so a (so far
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  // Only skip a legacy prefix when something follows it, so a (so far
   // hypothetical) novel whose own slug is "novel" or "read" still resolves.
-  if (segments.length >= 2 && LEGACY_PREFIXES.has(segments[0])) segments.shift();
-  if (segments.length === 0) {
+  const slug = segments.length >= 2 && LEGACY_PREFIXES.has(segments[0]) ? segments[1] : segments[0];
+  if (!slug) {
     throw new SourceUrlError(`novelbuddy: ${url} is not a novel or chapter URL.`);
   }
-  return segments;
-}
-
-export function slugFromUrl(url: string): string {
-  return novelPath(url)[0];
+  return decodeURIComponent(slug);
 }
 
 export function novelUrl(slug: string): string {
   return `${BASE_URL}/${encodeURIComponent(slug)}`;
-}
-
-/** Rewrites any accepted chapter URL (mirror host, `www.`, legacy
- *  `/novel/` prefix) onto `https://novelbuddy.me/<slug>/<chapter-slug>`. */
-export function canonicalChapterUrl(url: string): string {
-  const [slug, chapterSlug] = novelPath(url);
-  if (!chapterSlug) {
-    throw new SourceUrlError(`novelbuddy: ${url} is a novel URL, not a chapter URL.`);
-  }
-  return `${novelUrl(slug)}/${encodeURIComponent(chapterSlug)}`;
 }
 
 export function searchUrl(query: string, page: number): string {
@@ -131,14 +113,16 @@ export function searchUrl(query: string, page: number): string {
   return `${BASE_URL}/search?${params}`;
 }
 
+/** A title's `cv` (cache version) as a string, "" when the page has none. */
+const cvOf = (cv: unknown): string => (typeof cv === "number" || typeof cv === "string" ? String(cv) : "");
+
 /** `cv` is the title's cache version. The site's own client appends it to
  *  this call; without it the CDN can serve a stale list (measured: 3,227
  *  chapters without `cv` against 3,229 with it, on the same minute). */
 export function chapterListUrl(titleId: string, cv: unknown): string {
   const base = `${API_URL}/titles/${encodeURIComponent(titleId)}/chapters`;
-  return typeof cv === "number" || (typeof cv === "string" && cv)
-    ? `${base}?cv=${encodeURIComponent(String(cv))}`
-    : base;
+  const v = cvOf(cv);
+  return v ? `${base}?cv=${encodeURIComponent(v)}` : base;
 }
 
 // ── __NEXT_DATA__ ───────────────────────────────────────────────────────
@@ -149,6 +133,15 @@ const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const named = (v: unknown): string[] =>
   Array.isArray(v) ? v.map((x) => sanitizeText(isObject(x) ? str(x.name) : "")).filter(Boolean) : [];
+
+/** `JSON.parse`, or undefined for text that isn't JSON. */
+function tryJson(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
 
 const NEXT_DATA_RE = /<script[^>]*\bid=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i;
 
@@ -167,10 +160,8 @@ export function readPageProps(resp: FetchResponse, pageUrl: string): Json {
       `novelbuddy: ${pageUrl} has no __NEXT_DATA__ payload — the site may have changed, or this was a challenge/error page served with HTTP ${resp.status}.`,
     );
   }
-  let data: unknown;
-  try {
-    data = JSON.parse(m[1]);
-  } catch {
+  const data = tryJson(m[1]);
+  if (data === undefined) {
     throw new Error(`novelbuddy: ${pageUrl} has a __NEXT_DATA__ payload that is not valid JSON.`);
   }
   const pageProps = isObject(data) && isObject(data.props) ? data.props.pageProps : undefined;
@@ -192,22 +183,10 @@ function pageError(props: Json): string {
 
 // ── cards ───────────────────────────────────────────────────────────────
 
-/** One title object as the site's listing payloads carry it (home rows,
- *  search results). Only the fields read here are typed. */
-export interface TitleItem {
-  id?: string;
-  url?: string;
-  slug?: string;
-  name?: string;
-  cover?: string;
-  latestChapters?: Array<{ name?: string }>;
-  displayChapters?: string | null;
-  genres?: Array<{ name?: string }>;
-}
-
-/** A listing entry → a card, or null if it can't name a novel. The card
- *  URL is rebuilt from the slug on the canonical host, never trusted from
- *  `url`, so a mirror-relative or absolute `url` can't leak in. */
+/** A listing entry (home rows, search results) → a card, or null if it
+ *  can't name a novel. The card URL is rebuilt from the slug on the
+ *  canonical host, never trusted from `url`, so a mirror-relative or
+ *  absolute `url` can't leak in. */
 export function cardFor(item: unknown): NovelCard | null {
   if (!isObject(item)) return null;
   const slug = str(item.slug) || str(item.url).replace(/^\/+/, "");
@@ -227,134 +206,23 @@ export function cardFor(item: unknown): NovelCard | null {
   };
 }
 
-/** Walks a pageProps object and indexes every title-shaped object in it
- *  by slug: anything with a string `name`, a string `slug`, and a `url`
- *  that is exactly `/<slug>`. That last check is what keeps chapters
- *  (`/<slug>/<chapter>`), genres (`/genres/<x>`) and authors
- *  (`/authors/<x>`) — which also carry name/slug/url — out of the index.
- *
- *  The home page repeats one title across several arrays with different
- *  amounts of detail (trendingItems ships `latestChapters: []`,
- *  popularItems ships three), so a later occurrence fills in fields an
- *  earlier one left empty rather than being dropped. */
-export function indexTitleItems(props: Json): Map<string, Json> {
-  const index = new Map<string, Json>();
-  const visit = (v: unknown, depth: number) => {
-    if (depth > 8) return;
-    if (Array.isArray(v)) {
-      for (const x of v) visit(x, depth + 1);
-      return;
-    }
-    if (!isObject(v)) return;
-    const slug = str(v.slug);
-    if (slug && str(v.name) && str(v.url) === `/${slug}`) {
-      const prev = index.get(slug);
-      if (!prev) {
-        index.set(slug, v);
-      } else {
-        const merged: Json = { ...prev };
-        for (const [k, val] of Object.entries(v)) {
-          const old = merged[k];
-          const empty = old == null || old === "" || (Array.isArray(old) && old.length === 0);
-          if (empty) merged[k] = val;
-        }
-        index.set(slug, merged);
-      }
-    }
-    for (const [k, val] of Object.entries(v)) {
-      if (k === "siteConfig") continue;
-      if (typeof val === "object" && val !== null) visit(val, depth + 1);
-    }
-  };
-  visit(props, 0);
-  return index;
-}
+const cardsFrom = (items: unknown[]): NovelCard[] =>
+  items.map(cardFor).filter((c): c is NovelCard => c !== null);
 
 // ── home ────────────────────────────────────────────────────────────────
 
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-/** The slug a home-page anchor points at, if it points at a novel page:
- *  a site-relative href with exactly one path segment. */
-function anchorSlug(a: Element): string | null {
-  const href = a.getAttribute("href") ?? "";
-  if (!href.startsWith("/") || href.startsWith("//")) return null;
-  const segments = href.split(/[?#]/)[0].split("/").filter(Boolean);
-  return segments.length === 1 ? decodeURIComponent(segments[0]) : null;
-}
-
-/** One SourceSection per `<section>` under `<main>` whose `<header>` has an
- *  `<h2>`, in page order — today "Trending", "Popular Updates" and "Latest
- *  Updates". The heading text is the site's own; the section id is a slug
- *  of it ("trending", "popular-updates", "latest-updates"), so it stays the
- *  same however many rows render on a given day.
- *
- *  Which novels a row holds, and in what order, is read from the row's own
- *  anchors; what each card says (clean title, cover, latest chapter,
- *  genres) comes from the page's __NEXT_DATA__, indexed by slug. Reading
- *  card text off the markup instead would mean un-mixing the "1", "2", …
- *  rank digits the Trending row renders inside its <h3> titles. An anchor
- *  whose slug isn't a title in the payload (`/hall-of-fame` in the XP
- *  Leaderboard, `/lists`, footer links) contributes nothing, which is what
- *  drops the two non-novel rows ("XP Leaderboard", "Latest Lists").
- *  Anchors inside the row's <header> ("See all") or an <aside> are skipped
- *  defensively: today no header link is a title slug, and the "Top read"
- *  <aside> (a re-cut of Popular Updates) is a sibling of the Latest Updates
- *  <section>, not inside it — but either moving would silently splice
- *  another row's novels into this one.
- *
- *  A page that yields no section at all is refused loudly: that's a layout
- *  change or an error page, never a real empty homepage. */
-export function parseHomeSections(html: string, props: Json, pageUrl: string): SourceSection[] {
-  const titles = indexTitleItems(props);
-  const doc = parseHtml(html);
-  const sections: SourceSection[] = [];
-  const usedIds = new Set<string>();
-
-  for (const section of Array.from(doc.querySelectorAll("main section"))) {
-    const heading = section.querySelector("header h2");
-    const title = sanitizeText(heading?.textContent);
-    if (!title) continue;
-
-    const seen = new Set<string>();
-    const cards: NovelCard[] = [];
-    for (const a of Array.from(section.querySelectorAll("a[href]"))) {
-      if (a.closest("header, aside")) continue;
-      const slug = anchorSlug(a);
-      if (!slug || seen.has(slug)) continue;
-      const item = titles.get(slug);
-      const card = item ? cardFor(item) : null;
-      if (!card) continue;
-      seen.add(slug);
-      cards.push(card);
-    }
-    if (cards.length === 0) continue;
-
-    let id = slugify(title) || "section";
-    for (let n = 2; usedIds.has(id); n++) id = `${slugify(title) || "section"}-${n}`;
-    usedIds.add(id);
-
-    const more = section.querySelector("header a.section-see")?.getAttribute("href");
-    sections.push({
-      id,
-      title,
-      cards,
-      viewMoreUrl: more ? absoluteUrl(more, BASE_URL) : undefined,
-    });
-  }
-
-  if (sections.length === 0) {
-    throw new Error(
-      `novelbuddy: found no novel rows on ${pageUrl} — the home page layout may have changed.`,
-    );
-  }
-  return sections;
-}
+/** The home page's novel rows, in page order, each read straight from one
+ *  `pageProps` array (`latest` wraps its array as `{ items, pagination }`).
+ *  `count` is how many cards the site renders — Trending shows the first 12
+ *  of the payload's 50 `trendingItems` — and `more` is the row's own "See
+ *  all" link (Latest Updates has none). The page's other `<h2>` rows, XP
+ *  Leaderboard and Latest Lists, hold no novels; the "Top read" sidebar is
+ *  a re-cut of Popular Updates. */
+const HOME_ROWS: ReadonlyArray<{ id: string; key: string; title: StringKey; count: number; more?: string }> = [
+  { id: "trending", key: "trendingItems", title: "homeTrending", count: 12, more: "/trending/manga" },
+  { id: "popular", key: "popularItems", title: "homePopularUpdates", count: 10, more: "/search?sort=views_today" },
+  { id: "latest", key: "latest", title: "homeLatestUpdates", count: 24 },
+];
 
 // ── HTML fragments → lines ──────────────────────────────────────────────
 
@@ -519,33 +387,46 @@ export function descriptionFrom(summary: unknown): string | undefined {
 
 // ── novel ───────────────────────────────────────────────────────────────
 
-/** "OnGoing" (novel page) and "ongoing" (listings) are the same status;
- *  render both as "Ongoing". Unknown values pass through capitalised. */
-export function normalizeStatus(status: unknown): string | undefined {
-  const s = sanitizeText(str(status)).toLowerCase();
+/** The site's status values (its search filter's options). The novel page
+ *  spells one "OnGoing" where listings say "ongoing", hence the lower-casing
+ *  lookup. A Map, not an object, so "constructor" is not a status. */
+const STATUS_KEYS = new Map<string, StringKey>([
+  ["ongoing", "statusOngoing"],
+  ["completed", "statusCompleted"],
+  ["hiatus", "statusHiatus"],
+  ["cancelled", "statusCancelled"],
+]);
+
+/** The novel's status in the host's locale; a value the site has not been
+ *  seen to send passes through with its first letter capitalised. */
+function statusLabel(status: unknown, t: T): string | undefined {
+  const s = sanitizeText(str(status));
+  const key = STATUS_KEYS.get(s.toLowerCase());
+  if (key) return t(key);
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : undefined;
 }
 
-/** The API's chapter list → reading-order SourceChapters. The API sends
- *  newest first; reversed here. Direction is checked rather than assumed
- *  where the rows carry numbers: if the first row's number is already the
- *  smaller one, the list is left as is. Ids are 1-based positions, not
- *  the site's `number` — that is 0 for Martial Peak's first chapter and
- *  can repeat or skip, which an id must never do. */
-export function parseChapterList(
-  body: string,
-  listUrl: string,
-  status: number,
-  fallbackTitle: (n: number) => string,
-): SourceChapter[] {
-  if (status < 200 || status >= 300) {
-    throw new Error(`novelbuddy: chapter list ${listUrl} answered HTTP ${status}.`);
+/** One chapter of a novel's list as this extension keeps it between calls:
+ *  plain strings, never a SourceChapter handed to the app (see `last` in
+ *  createSource). `title` is "" when the API sent none. */
+export interface ChapterRow {
+  title: string;
+  url: string;
+}
+
+/** The API's chapter list → rows in reading order. The API sends newest
+ *  first; reversed here. Direction is checked rather than assumed where the
+ *  rows carry numbers: if the first row's number is already the smaller
+ *  one, the list is left as is. A chapter's id is its 1-based position in
+ *  these rows, not the site's `number` — that is 0 for Martial Peak's first
+ *  chapter and can repeat or skip, which an id must never do. */
+export function parseChapterList(resp: FetchResponse, listUrl: string): ChapterRow[] {
+  if (resp.status < 200 || resp.status >= 300) {
+    throw new Error(`novelbuddy: chapter list ${listUrl} answered HTTP ${resp.status}.`);
   }
-  let json: unknown;
-  try {
-    json = JSON.parse(body);
-  } catch {
-    throw new Error(`novelbuddy: chapter list ${listUrl} did not return JSON (HTTP ${status}).`);
+  const json = tryJson(resp.text);
+  if (json === undefined) {
+    throw new Error(`novelbuddy: chapter list ${listUrl} did not return JSON (HTTP ${resp.status}).`);
   }
   const rows = isObject(json) && json.success !== false && isObject(json.data) ? json.data.chapters : undefined;
   if (!Array.isArray(rows)) {
@@ -562,15 +443,14 @@ export function parseChapterList(
   const ordered = ascending ? valid : [...valid].reverse();
 
   const seen = new Set<string>();
-  const chapters: SourceChapter[] = [];
+  const out: ChapterRow[] = [];
   for (const row of ordered) {
     const url = absoluteUrl(str(row.url), BASE_URL);
     if (seen.has(url)) continue;
     seen.add(url);
-    const n = chapters.length + 1;
-    chapters.push({ id: n, title: sanitizeText(str(row.name)) || fallbackTitle(n), url, lines: [] });
+    out.push({ title: sanitizeText(str(row.name)), url });
   }
-  return chapters;
+  return out;
 }
 
 /** A novel page's `pageProps.initialManga` plus its chapter list → a
@@ -582,12 +462,10 @@ export function parseChapterList(
  *  - `originalTitle` is the site's alt name when it differs from the title
  *    (Korean `그림자 서약` for Shadow's Oath; Shadow Slave's alt name is
  *    just "Shadow Slave" again, so it gets none).
- *  - `meta` rows are only emitted for values the page actually has. */
-export function buildNovel(
-  manga: Json,
-  chapters: SourceChapter[],
-  t: ReturnType<typeof strings>,
-): SourceNovel {
+ *  - `meta` rows are only emitted for values the page actually has; the
+ *    rating only with its count (`ratingsCount`), on the site's 5-point
+ *    scale. */
+export function buildNovel(manga: Json, chapters: SourceChapter[], t: T): SourceNovel {
   const title = sanitizeText(str(manga.name));
   const alt = sanitizeText(str(manga.displayAltName) || str(manga.altName));
   const cover = str(manga.cover);
@@ -606,12 +484,9 @@ export function buildNovel(
   if (type) meta.push({ label: t("metaType"), value: type });
   meta.push({ label: t("metaChapters"), value: String(chapters.length) });
   const rating = sanitizeText(str(manga.displayRating));
-  if (rating) {
-    const count = manga.ratingsCount;
-    meta.push({
-      label: t("metaRating"),
-      value: typeof count === "number" && count > 0 ? `${rating} (${count})` : rating,
-    });
+  const count = manga.ratingsCount;
+  if (rating && typeof count === "number" && count > 0) {
+    meta.push({ label: t("metaRating"), value: t("ratingValue", { score: rating, max: 5, count }) });
   }
   const views = sanitizeText(str(manga.displayViews));
   if (views) meta.push({ label: t("metaViews"), value: views });
@@ -635,7 +510,7 @@ export function buildNovel(
     coverUrl: cover ? absoluteUrl(cover, BASE_URL) : undefined,
     description: descriptionFrom(manga.summary),
     tags,
-    status: normalizeStatus(manga.status),
+    status: statusLabel(manga.status, t),
     meta,
     volumes: [{ id: 1, title: t("allChapters"), chapters, chapterCount: chapters.length }],
   };
@@ -643,18 +518,6 @@ export function buildNovel(
 
 export default function createSource(host: SourceHost): Source {
   const t = strings(host.locale);
-  const fallbackTitle = (n: number) => t("chapterFallback", { n });
-
-  /** Chapter lists by slug, most recent last, for searchChapters. Closure
-   *  state, not module state: two Source instances never share it. */
-  const chapterCache = new Map<string, SourceChapter[]>();
-  const remember = (slug: string, chapters: SourceChapter[]) => {
-    chapterCache.delete(slug);
-    chapterCache.set(slug, chapters);
-    while (chapterCache.size > CHAPTER_CACHE_SIZE) {
-      chapterCache.delete(chapterCache.keys().next().value as string);
-    }
-  };
 
   /** host.fetch with the shared retry policy: a request that throws or
    *  answers 5xx is retried with a backoff. The site is slow and flaky under
@@ -664,10 +527,23 @@ export default function createSource(host: SourceHost): Source {
    *  site's real answer and is not retried. */
   const get = createFetcher(host, { id: "novelbuddy" });
 
+  /** The last chapter list this Source fetched, as plain rows — never the
+   *  SourceChapter objects handed to the app. The importer writes each
+   *  chapter's text onto those objects, so caching them would pin every
+   *  imported chapter's text in memory (~100 MB for a 6,000-chapter novel).
+   *  Every getNovel/searchChapters call builds fresh chapters from the rows.
+   *
+   *  Keyed by slug and the title's `cv` (cache version, from the novel
+   *  page). getNovel still fetches the page — fresh metadata and the current
+   *  `cv` — but skips the ~800 KB list while `cv` hasn't moved. The entry
+   *  holds the promise, so concurrent calls for one list share one request;
+   *  a failed request is dropped so the next call tries again. Closure
+   *  state, not module state: two Source instances never share it. */
+  let last: { slug: string; cv: string; rows: Promise<ChapterRow[]> } | null = null;
+
   async function loadNovelPage(slug: string): Promise<Json> {
     const pageUrl = novelUrl(slug);
-    const resp = await get(pageUrl);
-    const props = readPageProps(resp, pageUrl);
+    const props = readPageProps(await get(pageUrl), pageUrl);
     const manga = props.initialManga;
     if (!isObject(manga) || !sanitizeText(str(manga.name))) {
       const why = pageError(props);
@@ -678,26 +554,44 @@ export default function createSource(host: SourceHost): Source {
     return { ...manga, id: str(manga.id) || str(props.mangaHsid) };
   }
 
-  async function loadChapters(slug: string, manga: Json): Promise<SourceChapter[]> {
+  async function fetchChapterRows(slug: string, manga: Json): Promise<ChapterRow[]> {
     const titleId = str(manga.id);
     if (!/^[A-Za-z0-9]+$/.test(titleId)) {
       throw new Error(`novelbuddy: ${novelUrl(slug)} carried no usable title id (got "${titleId}").`);
     }
     const listUrl = chapterListUrl(titleId, manga.cv);
-    const resp = await get(listUrl);
-    const chapters = parseChapterList(resp.text, listUrl, resp.status, fallbackTitle);
+    const rows = parseChapterList(await get(listUrl), listUrl);
 
-    const stats = isObject(manga.stats) ? manga.stats : {};
-    const expected = stats.chaptersCount;
-    if (typeof expected === "number" && expected !== chapters.length) {
+    const expected = isObject(manga.stats) ? manga.stats.chaptersCount : undefined;
+    if (typeof expected === "number" && expected !== rows.length) {
       host.log(
         "warn",
-        `novelbuddy: ${novelUrl(slug)} reports ${expected} chapters but the chapter list returned ${chapters.length}.`,
+        `novelbuddy: ${novelUrl(slug)} reports ${expected} chapters but the chapter list returned ${rows.length}.`,
       );
     }
-    remember(slug, chapters);
-    return chapters;
+    return rows;
   }
+
+  /** The novel's chapter rows: `last`'s when slug and `cv` match, else a
+   *  new request that becomes `last`. */
+  function chapterRows(slug: string, manga: Json): Promise<ChapterRow[]> {
+    const cv = cvOf(manga.cv);
+    if (cv && last?.slug === slug && last.cv === cv) return last.rows;
+    const entry = { slug, cv, rows: fetchChapterRows(slug, manga) };
+    entry.rows.catch(() => {
+      if (last === entry) last = null;
+    });
+    last = entry;
+    return entry.rows;
+  }
+
+  const chaptersFrom = (rows: ChapterRow[]): SourceChapter[] =>
+    rows.map((row, i) => ({
+      id: i + 1,
+      title: row.title || t("chapterFallback", { n: i + 1 }),
+      url: row.url,
+      lines: [],
+    }));
 
   return {
     canHandle(url: string): boolean {
@@ -711,64 +605,71 @@ export default function createSource(host: SourceHost): Source {
     async getHomeSections(): Promise<SourceSection[]> {
       const pageUrl = `${BASE_URL}/home`;
       host.log("info", "getHomeSections");
-      const resp = await get(pageUrl);
-      const props = readPageProps(resp, pageUrl);
-      return parseHomeSections(resp.text, props, pageUrl);
+      const props = readPageProps(await get(pageUrl), pageUrl);
+      const sections: SourceSection[] = [];
+      for (const row of HOME_ROWS) {
+        const v = props[row.key];
+        const items = Array.isArray(v) ? v : isObject(v) && Array.isArray(v.items) ? v.items : [];
+        const cards = cardsFrom(items).slice(0, row.count);
+        if (cards.length === 0) continue;
+        sections.push({
+          id: row.id,
+          title: t(row.title),
+          cards,
+          viewMoreUrl: row.more ? `${BASE_URL}${row.more}` : undefined,
+        });
+      }
+      // No row at all is a layout change or an error page, never a real
+      // empty homepage.
+      if (sections.length === 0) {
+        throw new Error(`novelbuddy: found no novel rows on ${pageUrl} — the home page layout may have changed.`);
+      }
+      return sections;
     },
 
     async search(query: string, page = 1): Promise<SourceSearchResult> {
       const trimmed = query.trim();
-      const pageNo = Number.isInteger(page) && page >= 1 ? page : 1;
-      if (!trimmed) return { cards: [], hasMore: false, query: trimmed, page: pageNo };
+      const p = Number.isInteger(page) && page > 0 ? page : 1;
+      if (!trimmed) return { cards: [], hasMore: false, query: trimmed, page: p };
 
-      const url = searchUrl(trimmed, pageNo);
-      host.log("info", `search(${trimmed}) page ${pageNo} -> ${url}`);
-      const resp = await get(url);
-      const props = readPageProps(resp, url);
-      const items = props.ssrItems;
-      if (!Array.isArray(items)) {
+      const url = searchUrl(trimmed, p);
+      host.log("info", `search(${trimmed}) page ${p} -> ${url}`);
+      const props = readPageProps(await get(url), url);
+      if (!Array.isArray(props.ssrItems)) {
         throw new Error(`novelbuddy: search page ${url} carried no results list (pageProps.ssrItems).`);
       }
-      const cards = items.map(cardFor).filter((c): c is NovelCard => c !== null);
-      const pagination = isObject(props.ssrPagination) ? props.ssrPagination : {};
-      const hasMore =
-        typeof pagination.has_next === "boolean"
-          ? pagination.has_next
-          : typeof pagination.total_pages === "number" && pageNo < pagination.total_pages;
-      return { cards, hasMore: hasMore && cards.length > 0, query: trimmed, page: pageNo };
+      const cards = cardsFrom(props.ssrItems);
+      const hasNext = isObject(props.ssrPagination) && props.ssrPagination.has_next === true;
+      return { cards, hasMore: hasNext && cards.length > 0, query: trimmed, page: p };
     },
 
     async getNovel(url: string): Promise<SourceNovel> {
       const slug = slugFromUrl(url);
       host.log("info", `getNovel(${novelUrl(slug)})`);
       const manga = await loadNovelPage(slug);
-      const chapters = await loadChapters(slug, manga);
-      return buildNovel(manga, chapters, t);
+      return buildNovel(manga, chaptersFrom(await chapterRows(slug, manga)), t);
     },
 
     /** In-novel chapter search. The site has no chapter-search endpoint,
-     *  but getNovel already holds the whole list (one API response), so
-     *  this filters that list by case-insensitive substring of the title.
-     *  If getNovel hasn't run for this novel in this session (or its list
-     *  was evicted), the list is fetched again the same way. */
+     *  but getNovel already fetched the whole list (one API response), so
+     *  this filters it by case-insensitive substring of the title. For a
+     *  novel other than the last one getNovel opened, the page and list
+     *  are fetched again the same way. */
     async searchChapters(url: string, query: string): Promise<SourceChapter[]> {
       const needle = sanitizeText(query).toLowerCase();
       if (!needle) return [];
       const slug = slugFromUrl(url);
       host.log("info", `searchChapters(${novelUrl(slug)}, ${needle})`);
-      let chapters = chapterCache.get(slug);
-      if (!chapters) chapters = await loadChapters(slug, await loadNovelPage(slug));
-      return chapters
-        .filter((c) => c.title.toLowerCase().includes(needle))
-        .map((c) => ({ ...c, lines: [] }));
+      const rows = await (last?.slug === slug ? last.rows : chapterRows(slug, await loadNovelPage(slug)));
+      return chaptersFrom(rows).filter((c) => c.title.toLowerCase().includes(needle));
     },
 
     async getChapterContent(chapter: SourceChapter): Promise<SourceLine[]> {
-      const url = canonicalChapterUrl(chapter.url);
+      // Chapter URLs only ever come from parseChapterList, on BASE_URL.
+      const { url } = chapter;
       // debug, not info: one call per chapter of an import.
       host.log("debug", `getChapterContent(${url})`);
-      const resp = await get(url);
-      const props = readPageProps(resp, url);
+      const props = readPageProps(await get(url), url);
       const data = props.initialChapter;
       const content = isObject(data) ? data.content : undefined;
       if (typeof content !== "string") {
