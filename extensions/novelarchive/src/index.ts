@@ -56,6 +56,11 @@ export const HOSTS = new Set([
   "www.novelarchive.cc",
 ]);
 
+/** Sent on every request. The site's firewall answers a request to /api/
+ *  that carries no Accept-Language with a 403 block page ("Sorry, you have
+ *  been blocked"), and the app's HTTP client sends none of its own. */
+const REQUEST_HEADERS = { "Accept-Language": "en-US,en;q=0.9" };
+
 /** Cards per home row and per search page — the site's own library page
  *  size (`PER_PAGE = 24` in assets/js/libary-page.js). */
 export const PAGE_SIZE = 24;
@@ -313,12 +318,13 @@ export default function createSource(host: SourceHost): Source {
    *  budget of 4 requests covers all of it. */
   const get = createFetcher(host, { id: "novelarchive", attempts: 4 });
 
-  /** GET `${BASE_URL}/api${path}` and parse the JSON body. A non-2xx throws
-   *  with the API's own `error` message when it sent one
+  /** GET `${BASE_URL}/api${path}` and parse the JSON body. Every request
+   *  this source makes goes through here, with REQUEST_HEADERS. A non-2xx
+   *  throws with the API's own `error` message when it sent one
    *  ({"error":"Chapter does not exist"}). */
   async function getJson(path: string): Promise<unknown> {
     const endpoint = `/api${path}`;
-    const resp = await get(`${BASE_URL}${endpoint}`);
+    const resp = await get(`${BASE_URL}${endpoint}`, { headers: REQUEST_HEADERS });
     const body = tryJson(resp.text);
     if (resp.status < 200 || resp.status >= 300) {
       const siteError = isRecord(body) && typeof body.error === "string" ? `: ${body.error}` : "";

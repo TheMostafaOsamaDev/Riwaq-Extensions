@@ -739,6 +739,60 @@ describe("getChapterContent", () => {
   });
 });
 
+describe("request headers", () => {
+  /** `host` that records the headers every request carried. */
+  function recordingHeaders(host: SourceHost) {
+    const sent: Array<{ url: string; headers: Record<string, string> | undefined }> = [];
+    const recording: SourceHost = {
+      ...host,
+      fetch: (url, opts) => {
+        sent.push({ url, headers: opts?.headers });
+        return host.fetch(url, opts);
+      },
+    };
+    return { host: recording, sent };
+  }
+
+  it("sends Accept-Language on every request, which the site's firewall requires", async () => {
+    const { host, sent } = recordingHeaders(
+      createTestHost({
+        responses: {
+          "/api/novels/trending?limit=24": fixture("trending.json"),
+          "/api/novels/editors-choice?limit=24": fixture("editors-choice.json"),
+          "/api/novels/recently-updated?limit=24": fixture("recently-updated.json"),
+          "search=shadow%20slave&fuzzy=1&page=1&": fixture("search-page1.json"),
+          "search=shadow%20slave&fuzzy=1&page=2&": fixture("search-page2.json"),
+          [`/api/novels/${SHADOW_SLAVE_ID}/chapters/1?prefetch=1`]: fixture("chapter.json"),
+          [`${BASE_URL}/api/novels/${SHADOW_SLAVE_ID}`]: fixture("novel.json"),
+        },
+      }),
+    );
+    await createSource(host).getHomeSections();
+    const source = createSource(host);
+    await source.search("shadow slave", 1);
+    await source.search("shadow slave", 2);
+    await source.getNovel(NOVEL_URL);
+    await createSource(host).searchChapters!(NOVEL_URL, "nightmare");
+    await source.getChapterContent({ id: 1, title: "", url: `${BASE_URL}/reader?novel=${SHADOW_SLAVE_ID}&chapter=1`, lines: [] });
+
+    expect(sent).toHaveLength(8);
+    for (const request of sent) expect(request.headers).toEqual({ "Accept-Language": "en-US,en;q=0.9" });
+  });
+
+  it("sends it again on a retry", async () => {
+    const { host, sent } = recordingHeaders(
+      failingOnce(createTestHost({ responses: { [BASE_URL]: fixture("search-no-results.json") } }), () => ({
+        status: 503,
+        text: "Service Unavailable",
+        headers: {},
+      })),
+    );
+    await settled(() => createSource(host).search("zzqqxxnotathing"));
+    expect(sent).toHaveLength(2);
+    for (const request of sent) expect(request.headers?.["Accept-Language"]).toBe("en-US,en;q=0.9");
+  });
+});
+
 describe("network resilience", () => {
   // The retry policy itself is the shared fetcher's (packages/extension-api
   // fetch.test.ts); these pin how this source configures and reports it.

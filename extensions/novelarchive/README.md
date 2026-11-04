@@ -7,7 +7,8 @@ translations "archived from multiple sources". The pages are thin HTML shells th
 fill themselves from a public JSON API under `/api` (the site's own
 `assets/js/api.js` is the map of it). This extension talks only to that API: no HTML
 is parsed anywhere, and nothing needs JavaScript, a cookie handshake or a
-challenge — plain HTTP with the app's user agent gets every endpoint below. The
+challenge — plain HTTP with the app's user agent and an `Accept-Language` header (see
+quirk 7) gets every endpoint below. The
 `challenge.xewdy.systems` script the pages load is a captcha widget for the site's
 forms (ratings, downloads, requests), not a gate on reading.
 
@@ -108,6 +109,14 @@ the `.cc` mirror all resolve. Anything else throws `SourceUrlError`.
    one-chapter MTL titles — that is what the site picks. The three rows load in
    parallel with `allSettled`, like the site: one failing row is logged at `warn`
    and left out; only all three failing throws.
+
+7. **`/api/` refuses a request without `Accept-Language`.** A Cloudflare firewall
+   rule in front of the API answers such a request `403` with its "Sorry, you have
+   been blocked" page — whatever the user agent; `Referer`, `Accept` or `Sec-Fetch-*`
+   alone do not help (checked 2026-11-04). The app's HTTP client sends no
+   `Accept-Language` of its own, so `getJson`, which every request goes through, sends
+   `Accept-Language: en-US,en;q=0.9`. A tool that adds one by default hides the rule:
+   Node's `fetch` sends `accept-language: *`, and `pnpm probe` sends its own.
 
 ## Not used: mirror sources
 
