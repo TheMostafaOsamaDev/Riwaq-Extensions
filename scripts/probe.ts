@@ -46,7 +46,10 @@ async function curl(url: string, opts: { method?: string; headers?: Record<strin
     "-sS", "--compressed", "--max-time", "60", "-L",
     "-b", JAR, "-c", JAR,
     "-A", UA,
-    "-H", "Accept-Language: ar,en;q=0.8",
+    // Deliberately nothing else: the app's client (src-tauri/src/sources.rs)
+    // sends the same User-Agent and cookies and no Accept-Language, so a
+    // header added here could make a site answer the probe that refuses the
+    // app. novelarchive.st's API does exactly that — 403 without one.
     "-D", headerFile,
     "-X", opts?.method ?? "GET",
   ];
