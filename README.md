@@ -33,9 +33,10 @@ extension's bundle and calls into it through the `Source` interface described be
 the extension never talks to the network, a rendering engine, or the filesystem
 directly; every capability it has arrives through an injected `host` object.
 
-This repo is that publishing pipeline for one particular catalogue: two extensions today
-(`extensions/cenele`, `extensions/kolnovel`), the `@riwaq/extension-api` contract package
-they're built against, and the scripts and CI that validate, bundle and publish them.
+This repo is that publishing pipeline for one particular catalogue: the extensions under
+`extensions/` (Arabic and English sites — each manifest's `language` says which), the
+`@riwaq/extension-api` contract package they're built against, and the scripts and CI that
+validate, bundle and publish them.
 
 ## Using it
 
@@ -208,13 +209,11 @@ plus one call-out below the table for a convention it does *not* enforce.
 | `description` | object | yes | a locale map; **must include an `en` key** — a description without `en` is rejected outright | `{ "en": "…", "ar": "…" }` |
 | `author` | string | yes | non-empty | `"Riwaq"` |
 
-**128×128 is a convention, not something `validateManifest` checks.** The rule above is
-real: `icon` must literally be the string `"icon.png"`. The *pixel dimensions* of that
-file are never read — a 512×512 (or any other size) `icon.png` passes `pnpm validate` and
-`pnpm build` without complaint. 128×128 is what every extension in this repo actually
-ships, what `pnpm new-extension` generates, and what its own test asserts by decoding the
-`IHDR` chunk — so treat it as the size to use, just don't expect the tooling to catch it
-if you don't.
+**The icon's 128×128 size is checked by `pnpm validate`, not by `validateManifest`.**
+The manifest rule above is only that `icon` is literally the string `"icon.png"`;
+`scripts/validate.ts` then reads that file's PNG `IHDR` chunk and fails any extension
+whose icon is not a 128×128 PNG. `pnpm build` alone does not read the pixels — CI runs
+`pnpm validate` first. 128×128 is also what `pnpm new-extension` generates.
 
 A real one, `extensions/cenele/manifest.json`:
 
@@ -281,6 +280,48 @@ interface SourceHost {
   to bundle per-extension, so the host owns the one shared instance — never parse PDF
   bytes yourself. See `extensions/kolnovel/src/index.ts` for a full PDF-fallback flow.
 
+### Shared helpers
+
+`@riwaq/extension-api` also bundles a few helpers for problems more than one site has.
+Use them rather than writing your own, so every extension behaves the same way.
+
+- **`createFetcher(host, { id, … })`** (`src/fetch.ts`) — `host.fetch` with one retry
+  policy. Build it once per `Source` (in `createSource`'s closure): the app's importer
+  calls `getChapterContent` from 4 workers on one instance, and they share its state.
+  - One budget, `attempts` (default 3), covers every retry of a call. A POST/PUT/DELETE
+    is never sent twice.
+  - A thrown request or a `5xx` is retried after `retryDelayMs` (default 1 s), doubled
+    each time, with ±50% jitter. One that keeps throwing throws
+    `<id>: <url> could not be fetched: …`; a `5xx` that outlasts the budget is returned,
+    so your own code reports the status.
+  - `on429: "wait"` (default): a `429` holds back **every** caller of that fetcher until
+    its `Retry-After` (or `RateLimit-Reset`; `defaultWaitMs`, 60 s, when neither is
+    usable; capped at `maxWaitMs`, 300 s), then retries.
+  - `on429: "challenge"`: for a site whose `429` is a human-verification check a plain
+    client can't pass. The `429` comes straight back, and every call until its
+    `Retry-After` (or `defaultWaitMs`) throws at once without a request.
+
+  Extensions run in the app's webview, so `setTimeout` is there to back off with.
+- **Chapter-text cleanup** (`src/clean.ts`) for text copied from aggregator sites:
+  - `stripWatermarks(line)` cuts aggregator watermarks out of one line and returns the
+    rest (`""` when nothing readable is left). It folds look-alike letters to ASCII
+    (NFKD, a confusables table, and a capped wildcard for anything else), allows digit
+    swaps (`Nove1Fire`) and one character of noise between letters (`f(r)eewebn(o)vel`),
+    and only counts a known name (`WATERMARK_BRANDS`) when it has a TLD, is disguised,
+    or is wrapped in decoration (`❖ Novelight ❖`) — never a plain mention. A domain goes
+    with the sentence it sits in; a decorated name goes with its lead-in and promo
+    aside; a bracket group holding one goes whole. Lines of plain ASCII and punctuation
+    skip the per-character fold.
+  - `findCreditLines(lines)` finds translation-team credit lines: `[Translator - Night]`
+    anywhere, `Editor: Henyee Translations` / `TL: Hanguk` / a bare `Translator:` label
+    and its name line only near a chapter's edges, and never a speaker line
+    (`Ed: [Hey, wait!]`).
+  - `isLeadingHeading(line, { title, numbered })` — is a body's first line just the
+    chapter heading again ("Chapter 12…", or the title in other punctuation)?
+
+  What only one site does (promo lines, publisher notices, donation plugs) stays in that
+  extension.
+
 ## Testing
 
 Every extension gets fixture-driven parser tests: save real HTML from the live site into
@@ -292,9 +333,18 @@ backed entirely by fixtures you provide:
 const host = createTestHost({
   responses: { "https://example.com/novel/1": novelHtml }, // exact URL or substring match
   byteResponses: { "https://example.com/cover.jpg": coverBytes },
+  status: { "/novel/404": 404 },                        // keyed like `responses`; default 200
+  headers: { "/busy": { "retry-after": "30" } },        // keyed like `responses`; default none
+  calls,  // collects every request: { url, method, body }
+  logs,   // collects every host.log call: { level, message }
   locale: "en",
 });
 ```
+
+Keys in `status` and `headers` match the same way `responses` does, so a host name
+(`status: { "example.com": 503 }`) answers every URL on it. Only a request that has to
+behave differently the second time (fail once, then succeed) still needs a hand-made
+`fetch` override.
 
 Fixtures are **unedited captures of a page the live site actually served** — not invented
 from whole cloth, and not trimmed down to what your parser reads. A hand-invented fixture
@@ -416,7 +466,7 @@ Three things about it are easy to mistake for bugs:
   `extensions/<id>/`: `scripts/build.ts` bundles, so `packages/extension-api` is inlined
   verbatim into every published bundle. A change under `packages/`, or to
   `scripts/build.ts` itself, therefore requires a version bump on **every** extension.
-- **Icon is a 128×128 PNG named exactly `icon.png`.** Only the filename is validated (see [Manifest reference](#manifest-reference)) — 128×128 is convention, matching what `pnpm new-extension` generates.
+- **Icon is a 128×128 PNG named exactly `icon.png`.** `pnpm validate` checks both (see [Manifest reference](#manifest-reference)); `pnpm new-extension` generates one.
 - **Keep bundles small.** `scripts/build.ts` refuses to bundle anything over 512 KB
   minified. Going over almost always means a heavy dependency slipped in that belongs on
   `host` instead — `pdf.js` is the canonical example: PDF parsing is `host.pdf`, never

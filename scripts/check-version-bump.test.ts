@@ -127,7 +127,7 @@ describe("decideVersionBumps", () => {
 
 // scripts/build.ts bundles (`bundle: true`), so packages/extension-api is
 // inlined verbatim into every published bundle — `grep -c '^import'
-// dist/*/index.js` returns 0 for all four. That makes "which extensions
+// dist/*/index.js` returns 0 for every one. That makes "which extensions
 // changed?" a wider question than "which extensions/ directories were
 // touched?", and getting it wrong means publish.yml republishing changed
 // bundles under an already-published (id, version) pair.
