@@ -136,11 +136,11 @@ import without their illustrations. Their text is complete.
 |---|---|
 | `title` | `title` (falls back to the id, never "Untitled") |
 | `author` | `author`, with the site's placeholder `"Unknown"` mapped to `""` so the host localizes the empty case |
-| `coverUrl` | `cover_url` → `novel_image` → `image_url`, made absolute; anything that is not a URL (the site's renderer also copes with inline base64) falls back to `/api/novels/<id>/cover` |
+| `coverUrl` | `cover_url` → `novel_image` → `image_url`, made absolute; anything that is not a URL (the site's renderer also copes with inline base64), or does not parse, falls back to `/api/novels/<id>/cover` |
 | `description` | `description` (plain text with blank-line paragraphs) |
 | `tags` | `genres` split on commas, de-duplicated case-insensitively, minus the site's own non-genre categories (`NON_GENRE_TAGS` in `novel-page.js`: "Browse", "Completed Novels", …) and "Unknown" |
-| `status` | `release_status` (or `ongoing`), capitalized: Ongoing / Completed / Hiatus |
-| `meta` | Also known as (`associated_names`), Chapters, Views (`views_number`), Rating (`rating` / 5 with `rating_count`, only when rated), Latest release (`latest_release` unless "Unknown" — "Every 12.6 Day(s)", "15 hours ago", …), Updated (`updated_at` date) |
+| `status` | `release_status` (or `ongoing`): the site's three values — `ongoing`, `completed`, `hiatus`, all its library filter knows — become Ongoing / Completed / Hiatus in the UI's language; any other value is shown as written, first letter capitalised; `"unknown"` is left out |
+| `meta` | Alternative titles (`associated_names`), Chapters, Views (`views_number`), Rating (`rating` / 5 with `rating_count`, only when rated), Latest release (`latest_release` unless "Unknown" — "Every 12.6 Day(s)", "15 hours ago", …), Last updated (`updated_at` date) |
 | `volumes` | one volume, "All Chapters", holding every chapter |
 
 `language` is `"en"` and `direction` `"ltr"` for every novel. Some catalogue titles
@@ -247,8 +247,11 @@ chapter`).
 
 `src/strings.ts` (`en` + `ar`) holds what this source writes itself: the three home
 row titles (the English ones are the site's own headings, which live in its markup
-and JS rather than in the API), the volume title, the `"Chapter N"` fallback, and the
-`meta` labels and rating format.
+and JS rather than in the API), the volume title, the `"Chapter N"` fallback, the
+`meta` labels and rating format, and the three status names. The shared concepts use
+the same keys and wording as the other English sources (`allChapters`,
+`chapterFallback`, `metaChapters`, `metaRating` / `ratingValue` with `{max}`,
+`metaViews`, `metaUpdated`, `metaAltTitles`, `status*`).
 
 ## Tests and fixtures
 

@@ -131,13 +131,26 @@ describe("strings", () => {
       "ratingValue",
       "metaLatestRelease",
       "metaUpdated",
-      "metaAltNames",
+      "metaAltTitles",
+      "statusOngoing",
+      "statusCompleted",
+      "statusHiatus",
     ] as const) {
       expect(en(key)).not.toBe("");
       expect(ar(key)).not.toBe("");
     }
     expect(en("chapterFallback", { n: 7 })).toBe("Chapter 7");
     expect(ar("chapterFallback", { n: 7 })).toBe("الفصل 7");
+  });
+
+  it("uses the wording shared by the English sources", () => {
+    const en = strings("en");
+    const ar = strings("ar");
+    expect([en("allChapters"), ar("allChapters")]).toEqual(["All Chapters", "كل الفصول"]);
+    expect([en("metaUpdated"), ar("metaUpdated")]).toEqual(["Last updated", "آخر تحديث"]);
+    expect([en("metaAltTitles"), ar("metaAltTitles")]).toEqual(["Alternative titles", "عناوين بديلة"]);
+    expect(en("ratingValue", { score: "4.3", max: 5, count: 28 })).toBe("4.3 / 5 (28 ratings)");
+    expect(ar("ratingValue", { score: "4.3", max: 5, count: 28 })).toBe("4.3 / 5 (28 تقييم)");
   });
 });
 
@@ -225,6 +238,10 @@ describe("cards and fields", () => {
     expect(coverUrlFor({ id, cover_url: "https://cdn.example/c.jpg" })).toBe("https://cdn.example/c.jpg");
     expect(coverUrlFor({ id, cover_url: "", image_url: "//cdn.example/c.jpg" })).toBe("https://cdn.example/c.jpg");
     expect(coverUrlFor({ id, cover_url: "iVBORw0KGgo=" })).toBe(`${BASE_URL}/api/novels/${id}/cover`);
+    // Something URL-shaped that does not parse falls back as well.
+    expect(coverUrlFor({ id, cover_url: "//" })).toBe(`${BASE_URL}/api/novels/${id}/cover`);
+    expect(coverUrlFor({ id, cover_url: "https://[cdn" })).toBe(`${BASE_URL}/api/novels/${id}/cover`);
+    expect(coverUrlFor({ id })).toBe(`${BASE_URL}/api/novels/${id}/cover`);
   });
 
   it("numbers chapters by position and falls back to total_chapters placeholders", () => {
@@ -265,7 +282,9 @@ describe("getHomeSections", () => {
     const files = ["trending.json", "editors-choice.json", "recently-updated.json"];
     sections.forEach((section, i) => {
       const rows = json(files[i]).novels as NovelRow[];
-      expect(section.cards).toEqual(rows.slice(0, PAGE_SIZE).map(cardFor));
+      // The API honours ?limit=, so nothing is trimmed client-side.
+      expect(rows.length).toBeLessThanOrEqual(PAGE_SIZE);
+      expect(section.cards).toEqual(rows.map(cardFor));
       expect(section.cards.length).toBeGreaterThan(0);
     });
   });
@@ -394,10 +413,12 @@ describe("search", () => {
   });
 
   it("reads a nonsensical page argument as page 1", async () => {
-    const calls: Array<{ url: string; method: string }> = [];
-    const result = await createSource(searchHost(calls)).search("shadow slave", 0);
-    expect(result.page).toBe(1);
-    expect(calls[0].url).toContain("&page=1&");
+    for (const bad of [0, -2, 2.5, Number.NaN]) {
+      const calls: Array<{ url: string; method: string }> = [];
+      const result = await createSource(searchHost(calls)).search("shadow slave", bad);
+      expect(result.page).toBe(1);
+      expect(calls[0].url).toContain("&page=1&");
+    }
   });
 
   it("throws, prefixed with the manifest id, on a non-JSON or list-less response", async () => {
@@ -438,12 +459,12 @@ describe("getNovel", () => {
     const row = json("novel-lotm.json").novel;
     const novel = await createSource(novelHost()).getNovel(`${BASE_URL}/novel?id=${LOTM_ID}`);
     const meta = Object.fromEntries(novel.meta.map((m) => [m.label, m.value]));
-    expect(meta["Also known as"]).toBe(row.associated_names.join(" · "));
+    expect(meta["Alternative titles"]).toBe(row.associated_names.join(" · "));
     expect(meta["Chapters"]).toBe(String(row.chapter_names.length));
     expect(meta["Views"]).toBe(row.views_number.toLocaleString("en-US"));
     expect(meta["Rating"]).toBe(`${row.rating.toFixed(1)} / 5 (${row.rating_count} ratings)`);
     expect(meta["Latest release"]).toBe(row.latest_release);
-    expect(meta["Updated"]).toBe(row.updated_at.slice(0, 10));
+    expect(meta["Last updated"]).toBe(row.updated_at.slice(0, 10));
     expect(novel.status).toBe("Completed");
   });
 
@@ -476,11 +497,33 @@ describe("getNovel", () => {
     });
   });
 
-  it("titles the volume and meta rows in Arabic for an Arabic UI", async () => {
+  it("titles the volume, meta rows and status in Arabic for an Arabic UI", async () => {
     const t = strings("ar");
     const novel = await createSource(novelHost("ar")).getNovel(`${BASE_URL}/novel?id=${LOTM_ID}`);
     expect(novel.volumes[0].title).toBe(t("allChapters"));
-    expect(novel.meta.map((m) => m.label)).toContain(t("metaChapters"));
+    expect(novel.meta.map((m) => m.label)).toEqual(
+      expect.arrayContaining([t("metaAltTitles"), t("metaChapters"), t("metaRating"), t("metaUpdated")]),
+    );
+    expect(novel.status).toBe(t("statusCompleted"));
+  });
+
+  it("names the site's release statuses, and shows any other one as written", async () => {
+    const row = json("novel.json").novel;
+    const statusFor = async (fields: Record<string, unknown>, locale: "en" | "ar" = "en") => {
+      const host = answering(200, JSON.stringify({ novel: { ...row, ...fields } }), { locale });
+      return (await createSource(host).getNovel(NOVEL_URL)).status;
+    };
+    expect(await statusFor({ release_status: "ongoing" })).toBe("Ongoing");
+    expect(await statusFor({ release_status: "Completed" })).toBe("Completed");
+    expect(await statusFor({ release_status: "hiatus" })).toBe("Hiatus");
+    expect(await statusFor({ release_status: "hiatus" }, "ar")).toBe("متوقفة مؤقتًا");
+    expect(await statusFor({ release_status: "ongoing" }, "ar")).toBe("مستمرة");
+    // `ongoing` stands in when release_status is missing, as on the site.
+    expect(await statusFor({ release_status: undefined, ongoing: "completed" }, "ar")).toBe("مكتملة");
+    expect(await statusFor({ release_status: "season break" })).toBe("Season break");
+    expect(await statusFor({ release_status: "constructor" })).toBe("Constructor");
+    expect(await statusFor({ release_status: "unknown", ongoing: "unknown" })).toBeUndefined();
+    expect(await statusFor({ release_status: "", ongoing: "" })).toBeUndefined();
   });
 
   it("accepts a reader or mirror URL for the same novel", async () => {

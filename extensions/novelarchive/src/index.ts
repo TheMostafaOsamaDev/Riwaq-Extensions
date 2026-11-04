@@ -26,6 +26,7 @@
 // rules in @riwaq/extension-api, plus this archive's own in clean.ts).
 // See README.md for the endpoints, field mapping and quirks.
 import {
+  absoluteUrl,
   createFetcher,
   isLeadingHeading,
   sanitizeText,
@@ -41,7 +42,7 @@ import {
   type SourceSection,
 } from "@riwaq/extension-api";
 import { cleanLines, repairMojibake } from "./clean";
-import { strings } from "./strings";
+import { strings, type StringKey } from "./strings";
 
 export const BASE_URL = "https://novelarchive.st";
 
@@ -119,6 +120,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** The parsed body, or undefined when it is not JSON (JSON.parse never
+ *  returns undefined itself). */
+function tryJson(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 /** The value when it is a string, else "" — the API is unvalidated JSON. */
 const str = (value: unknown): string => (typeof value === "string" ? value : "");
 
@@ -180,23 +191,29 @@ function authorOf(row: NovelRow): string {
 
 /** Absolute cover URL. The API gives a site-relative
  *  `/api/novels/<id>/cover?w=640&q=72&format=webp` for every novel; an
- *  absolute URL is kept as is, and anything else (the site's renderer also
- *  copes with inline base64) falls back to the plain cover endpoint. */
+ *  absolute or scheme-relative URL resolves as usual, and anything else
+ *  (the site's renderer also copes with inline base64) falls back to the
+ *  plain cover endpoint. */
 export function coverUrlFor(row: NovelRow): string {
   const raw = [row.cover_url, row.novel_image, row.image_url]
     .find((v): v is string => typeof v === "string" && v.trim() !== "")
     ?.trim();
-  if (raw && /^https?:\/\//i.test(raw)) return raw;
-  if (raw?.startsWith("//")) return `https:${raw}`;
-  if (raw?.startsWith("/")) return `${BASE_URL}${raw}`;
+  if (raw && /^(?:https?:\/)?\//i.test(raw)) {
+    try {
+      return absoluteUrl(raw, BASE_URL);
+    } catch {
+      // Not a parseable URL ("//", "https://[x"): use the endpoint below.
+    }
+  }
   return `${BASE_URL}/api/novels/${row.id}/cover`;
 }
 
-function statusOf(row: NovelRow): string | undefined {
-  const raw = sanitizeText(str(row.release_status) || str(row.ongoing));
-  if (!raw || raw.toLowerCase() === "unknown") return undefined;
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
-}
+/** The site's release statuses (the values its library filter knows). */
+const STATUS_KEYS = new Map<string, StringKey>([
+  ["ongoing", "statusOngoing"],
+  ["completed", "statusCompleted"],
+  ["hiatus", "statusHiatus"],
+]);
 
 export function cardFor(row: NovelRow): NovelCard {
   const genres = genresOf(row.genres);
@@ -266,6 +283,15 @@ const HOME_ROWS = [
 export default function createSource(host: SourceHost): Source {
   const t = strings(host.locale);
 
+  /** `release_status` (or `ongoing`) in the UI's language; a value the site
+   *  does not otherwise use shows as written, first letter capitalised. */
+  function statusOf(row: NovelRow): string | undefined {
+    const raw = sanitizeText(str(row.release_status) || str(row.ongoing));
+    if (!raw || raw.toLowerCase() === "unknown") return undefined;
+    const key = STATUS_KEYS.get(raw.toLowerCase());
+    return key ? t(key) : raw.charAt(0).toUpperCase() + raw.slice(1);
+  }
+
   /** The last novel getNovel/searchChapters fetched, so a chapter search
    *  right after opening a novel does not refetch its (up to ~100 KB)
    *  chapter list. Per instance, never module scope. */
@@ -288,19 +314,12 @@ export default function createSource(host: SourceHost): Source {
   async function getJson(path: string): Promise<unknown> {
     const endpoint = `/api${path}`;
     const resp = await get(`${BASE_URL}${endpoint}`);
-
-    let body: unknown;
-    let isJson = true;
-    try {
-      body = JSON.parse(resp.text);
-    } catch {
-      isJson = false;
-    }
+    const body = tryJson(resp.text);
     if (resp.status < 200 || resp.status >= 300) {
-      const siteError = isJson && isRecord(body) && typeof body.error === "string" ? `: ${body.error}` : "";
+      const siteError = isRecord(body) && typeof body.error === "string" ? `: ${body.error}` : "";
       throw new Error(`novelarchive: ${endpoint} answered HTTP ${resp.status}${siteError}.`);
     }
-    if (!isJson) {
+    if (body === undefined) {
       throw new Error(`novelarchive: ${endpoint} did not return JSON (status ${resp.status}).`);
     }
     return body;
@@ -342,51 +361,48 @@ export default function createSource(host: SourceHost): Source {
         HOME_ROWS.map((row) => getNovelList(`${row.endpoint}?limit=${PAGE_SIZE}`)),
       );
       const sections: SourceSection[] = [];
-      const errors: unknown[] = [];
+      let firstError: unknown;
       settled.forEach((result, i) => {
         const row = HOME_ROWS[i];
         if (result.status === "rejected") {
-          errors.push(result.reason);
+          firstError ??= result.reason;
           const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
           host.log("warn", `novelarchive: home row "${row.id}" failed: ${message}`);
           return;
         }
         if (result.value.rows.length === 0) return;
-        sections.push({
-          id: row.id,
-          title: t(row.title),
-          cards: result.value.rows.slice(0, PAGE_SIZE).map(cardFor),
-        });
+        // The API honours `limit`, so the row is already PAGE_SIZE at most.
+        sections.push({ id: row.id, title: t(row.title), cards: result.value.rows.map(cardFor) });
       });
-      if (sections.length === 0 && errors.length > 0) throw errors[0];
+      if (sections.length === 0 && firstError !== undefined) throw firstError;
       return sections;
     },
 
     async search(query: string, page = 1): Promise<SourceSearchResult> {
       const trimmed = query.trim();
-      const pageNo = Number.isInteger(page) && page > 0 ? page : 1;
+      const p = Number.isInteger(page) && page > 0 ? page : 1;
       if (!trimmed) {
-        return { cards: [], hasMore: false, query: trimmed, page: pageNo };
+        return { cards: [], hasMore: false, query: trimmed, page: p };
       }
-      host.log("info", `search(${trimmed}) page ${pageNo}`);
+      host.log("info", `search(${trimmed}) page ${p}`);
       // The same request the site's library page makes for a typed search
       // (NA.api.novels.browse with fuzzy on and its 24-per-page size). The
       // server ranks by relevance — an exact title match comes first.
       const { body, rows } = await getNovelList(
-        `/novels?search=${encodeURIComponent(trimmed)}&fuzzy=1&page=${pageNo}&per_page=${PAGE_SIZE}`,
+        `/novels?search=${encodeURIComponent(trimmed)}&fuzzy=1&page=${p}&per_page=${PAGE_SIZE}`,
       );
       const pagination = isRecord(body.pagination) ? body.pagination : {};
       // A page past the end is not an empty page here: the API clamps it to
       // its last page and serves that again. Returning those cards would
       // repeat the previous page, so a clamped page reads as the end.
-      if (typeof pagination.page === "number" && pagination.page !== pageNo) {
-        return { cards: [], hasMore: false, query: trimmed, page: pageNo };
+      if (typeof pagination.page === "number" && pagination.page !== p) {
+        return { cards: [], hasMore: false, query: trimmed, page: p };
       }
       // The API builds each page's match set on its own (page 1 of "shadow"
       // reports 172 matches, page 2 reports 196), so a novel near a page
       // boundary can come back on two pages. Drop what earlier pages of the
       // same query already returned; page 1 starts afresh.
-      if (pageNo === 1 || searchSeen?.query !== trimmed) {
+      if (p === 1 || searchSeen?.query !== trimmed) {
         searchSeen = { query: trimmed, urls: new Set() };
       }
       const cards: NovelCard[] = [];
@@ -399,7 +415,7 @@ export default function createSource(host: SourceHost): Source {
         cards,
         hasMore: pagination.has_next === true,
         query: trimmed,
-        page: pageNo,
+        page: p,
       };
     },
 
@@ -413,7 +429,7 @@ export default function createSource(host: SourceHost): Source {
       const altNames = (Array.isArray(row.associated_names) ? row.associated_names : [])
         .map((name) => sanitizeText(str(name)))
         .filter((name) => name !== "");
-      if (altNames.length > 0) meta.push({ label: t("metaAltNames"), value: altNames.join(" · ") });
+      if (altNames.length > 0) meta.push({ label: t("metaAltTitles"), value: altNames.join(" · ") });
       meta.push({ label: t("metaChapters"), value: String(chapters.length) });
       const views = typeof row.views_number === "number" ? row.views_number : Number.parseInt(String(row.views ?? ""), 10);
       if (Number.isFinite(views) && views > 0) {
@@ -422,7 +438,7 @@ export default function createSource(host: SourceHost): Source {
       if (typeof row.rating === "number" && row.rating > 0 && typeof row.rating_count === "number" && row.rating_count > 0) {
         meta.push({
           label: t("metaRating"),
-          value: t("ratingValue", { score: row.rating.toFixed(1), count: row.rating_count }),
+          value: t("ratingValue", { score: row.rating.toFixed(1), max: 5, count: row.rating_count }),
         });
       }
       const latestRelease = sanitizeText(str(row.latest_release));
