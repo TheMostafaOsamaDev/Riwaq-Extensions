@@ -1,0 +1,14 @@
+{
+  "id": "chikari",
+  "name": "chikari.moe",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "language": "en",
+  "baseUrl": "https://chikari.moe",
+  "icon": "icon.png",
+  "description": {
+    "en": "English web novels from chikari.moe (novels only — its manga, manhwa and manhua are not included).",
+    "ar": "روايات ويب باللغة الإنجليزية من موقع chikari.moe (الروايات فقط، دون المانغا والمانهوا والمانها)."
+  },
+  "author": "Riwaq"
+}
