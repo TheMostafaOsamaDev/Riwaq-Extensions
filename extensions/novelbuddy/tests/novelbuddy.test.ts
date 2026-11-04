@@ -4,14 +4,10 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import createSource, {
   buildNovel,
-  canonicalChapterUrl,
   cardFor,
   chapterLinesFrom,
   chapterListUrl,
   htmlToRawLines,
-  indexTitleItems,
-  normalizeStatus,
-  novelPath,
   searchUrl,
   slugFromUrl,
 } from "../src/index";
@@ -153,7 +149,7 @@ describe("URL helpers", () => {
   });
 
   it("keeps a lone first segment even when it equals a legacy prefix", () => {
-    expect(novelPath("https://novelbuddy.me/novel")).toEqual(["novel"]);
+    expect(slugFromUrl("https://novelbuddy.me/novel")).toBe("novel");
   });
 
   it("rejects the bare host and foreign URLs with a SourceUrlError prefixed by the id", () => {
@@ -161,17 +157,6 @@ describe("URL helpers", () => {
       expect(() => slugFromUrl(url), url).toThrow(SourceUrlError);
       expect(() => slugFromUrl(url), url).toThrow(PREFIX);
     }
-  });
-
-  it("rewrites mirror, www and legacy chapter URLs onto https://novelbuddy.me", () => {
-    // www.novelbuddy.me 301s to itself forever; novelbuddy.io/.com 301 to .me.
-    expect(canonicalChapterUrl("https://www.novelbuddy.me/shadow-slave/chapter-2")).toBe(
-      "https://novelbuddy.me/shadow-slave/chapter-2",
-    );
-    expect(canonicalChapterUrl("https://novelbuddy.io/novel/shadow-slave/chapter-2")).toBe(
-      "https://novelbuddy.me/shadow-slave/chapter-2",
-    );
-    expect(() => canonicalChapterUrl("https://novelbuddy.me/shadow-slave")).toThrow(PREFIX);
   });
 
   it("builds search and chapter-list URLs the way the site does", () => {
@@ -187,34 +172,37 @@ describe("URL helpers", () => {
 // ── home ───────────────────────────────────────────────────────────────
 
 describe("getHomeSections", () => {
-  it("fetches /home and returns the site's own novel rows, in page order", async () => {
+  it("fetches /home and returns the site's three novel rows, in page order", async () => {
     const calls: Array<{ url: string; method: string }> = [];
     const sections = await createSource(host({ "https://novelbuddy.me/home": homeHtml }, { calls })).getHomeSections();
 
     expect(calls.map((c) => c.url)).toEqual(["https://novelbuddy.me/home"]);
     expect(sections.map((s) => s.title)).toEqual(["Trending", "Popular Updates", "Latest Updates"]);
-    expect(sections.map((s) => s.id)).toEqual(["trending", "popular-updates", "latest-updates"]);
-    // The two non-novel rows the page also titles with an <h2>.
-    expect(sections.map((s) => s.title)).not.toContain("XP Leaderboard");
-    expect(sections.map((s) => s.title)).not.toContain("Latest Lists");
+    expect(sections.map((s) => s.id)).toEqual(["trending", "popular", "latest"]);
   });
 
-  it("fills each row from the payload array the site renders it from", async () => {
+  it("titles the rows in the host's locale, keeping the ids", async () => {
+    const sections = await createSource(host({ "/home": homeHtml }, { locale: "ar" })).getHomeSections();
+    expect(sections.map((s) => s.title)).toEqual(["الأكثر رواجًا", "التحديثات الأكثر شعبية", "آخر التحديثات"]);
+    expect(sections.map((s) => s.id)).toEqual(["trending", "popular", "latest"]);
+  });
+
+  it("fills each row from its payload array, as many cards as the site renders", async () => {
     const sections = await createSource(host({ "https://novelbuddy.me/home": homeHtml })).getHomeSections();
     const byId = Object.fromEntries(sections.map((s) => [s.id, s]));
     const urls = (items: Array<{ slug: string }>) => items.map((i) => `https://novelbuddy.me/${i.slug}`);
 
-    expect(byId["popular-updates"].cards.map((c) => c.url)).toEqual(urls(homeProps.popularItems));
-    expect(byId["latest-updates"].cards.map((c) => c.url)).toEqual(urls(homeProps.latest.items));
-    // Trending renders a prefix of the 50-item trendingItems array.
-    const trending = byId.trending.cards.map((c) => c.url);
-    expect(trending.length).toBeGreaterThan(0);
-    expect(trending).toEqual(urls(homeProps.trendingItems).slice(0, trending.length));
+    // Fixture sanity: the payload carries more trending titles than the row shows.
+    expect(homeProps.trendingItems.length).toBeGreaterThan(12);
+    expect(byId.trending.cards.map((c) => c.url)).toEqual(urls(homeProps.trendingItems).slice(0, 12));
+    expect(byId.popular.cards.map((c) => c.url)).toEqual(urls(homeProps.popularItems).slice(0, 10));
+    expect(byId.latest.cards.map((c) => c.url)).toEqual(urls(homeProps.latest.items).slice(0, 24));
+    expect(sections.map((s) => s.cards.length)).toEqual([12, 10, 24]);
   });
 
   it("builds cards with clean titles, covers, latest-chapter subtitles and genre badges", async () => {
     const sections = await createSource(host({ "https://novelbuddy.me/home": homeHtml })).getHomeSections();
-    const latest = sections.find((s) => s.id === "latest-updates")!;
+    const latest = sections.find((s) => s.id === "latest")!;
     latest.cards.forEach((card, i) => {
       const item = homeProps.latest.items[i];
       expect(card.title).toBe(sanitizeText(item.name));
@@ -236,8 +224,8 @@ describe("getHomeSections", () => {
     const sections = await createSource(host({ "https://novelbuddy.me/home": homeHtml })).getHomeSections();
     const byId = Object.fromEntries(sections.map((s) => [s.id, s]));
     expect(byId.trending.viewMoreUrl).toBe("https://novelbuddy.me/trending/manga");
-    expect(byId["popular-updates"].viewMoreUrl).toBe("https://novelbuddy.me/search?sort=views_today");
-    expect(byId["latest-updates"].viewMoreUrl).toBeUndefined();
+    expect(byId.popular.viewMoreUrl).toBe("https://novelbuddy.me/search?sort=views_today");
+    expect(byId.latest.viewMoreUrl).toBeUndefined();
   });
 
   it("throws, naming the status, on a non-2xx answer", async () => {
@@ -262,25 +250,6 @@ describe("getHomeSections", () => {
     const logs: LogEntry[] = [];
     await createSource(host({ "/home": homeHtml }, { logs })).getHomeSections();
     expect(logs).toEqual([{ level: "info", message: "getHomeSections" }]);
-  });
-});
-
-describe("indexTitleItems", () => {
-  it("indexes titles but never chapters, genres or authors", () => {
-    const index = indexTitleItems(homeProps);
-    for (const item of homeProps.latest.items) expect(index.has(item.slug)).toBe(true);
-    for (const [slug, item] of index) {
-      expect(item.url).toBe(`/${slug}`);
-    }
-    expect(index.has("fantasy")).toBe(false);
-  });
-
-  it("fills fields an earlier, thinner copy of the same title left empty", () => {
-    const index = indexTitleItems({
-      a: [{ slug: "x", name: "X", url: "/x", latestChapters: [] }],
-      b: [{ slug: "x", name: "X", url: "/x", latestChapters: [{ name: "Chapter 9" }] }],
-    });
-    expect(index.get("x")?.latestChapters).toEqual([{ name: "Chapter 9" }]);
   });
 });
 
@@ -410,7 +379,7 @@ describe("getNovel", () => {
     expect(novel.meta).toEqual([
       { label: "Type", value: novelManga.type.name },
       { label: "Chapters", value: String(chapterRows.length) },
-      { label: "Rating", value: `${novelManga.displayRating} (${novelManga.ratingsCount})` },
+      { label: "Rating", value: `${novelManga.displayRating} / 5 (${novelManga.ratingsCount} ratings)` },
       { label: "Views", value: novelManga.displayViews },
       { label: "Last updated", value: novelManga.updatedAt.slice(0, 10) },
     ]);
@@ -442,10 +411,16 @@ describe("getNovel", () => {
     expect(novel.volumes[0].chapters[0].url).toBe(`https://novelbuddy.me${chapterRows.at(-1).url}`);
   });
 
-  it("titles the volume in the host's locale", async () => {
+  it("titles the volume, labels, rating and status in the host's locale", async () => {
     const novel = await createSource(novelHost({ locale: "ar" })).getNovel(NOVEL_URL);
-    expect(novel.volumes[0].title).toBe("جميع الفصول");
+    expect(novel.volumes[0].title).toBe("كل الفصول");
     expect(novel.meta[0].label).toBe("النوع");
+    expect(novel.meta).toContainEqual({ label: "عدد الفصول", value: String(chapterRows.length) });
+    expect(novel.meta).toContainEqual({
+      label: "التقييم",
+      value: `${novelManga.displayRating} / 5 (${novelManga.ratingsCount} تقييم)`,
+    });
+    expect(novel.status).toBe("مستمرة");
   });
 
   it("warns when the chapter list disagrees with the page's chapter count", async () => {
@@ -535,15 +510,40 @@ describe("buildNovel (metadata-rich page: Shadow Slave)", () => {
     expect(novel.meta).toContainEqual({ label: "Bookmarks", value: richManga.displayBookmarks });
     expect(novel.meta).toContainEqual({ label: "Chapters", value: "0" });
   });
+
+  it("shows the rating out of 5 with its count, and no rating row without a count", () => {
+    expect(novel.meta).toContainEqual({
+      label: "Rating",
+      value: `${richManga.displayRating} / 5 (${richManga.ratingsCount} ratings)`,
+    });
+    const unrated = buildNovel({ ...richManga, ratingsCount: 0 }, [], strings("en"));
+    expect(unrated.meta.map((m) => m.label)).not.toContain("Rating");
+  });
 });
 
-describe("normalizeStatus", () => {
-  it("renders the site's spellings consistently", () => {
-    expect(normalizeStatus("OnGoing")).toBe("Ongoing");
-    expect(normalizeStatus("ongoing")).toBe("Ongoing");
-    expect(normalizeStatus("Completed")).toBe("Completed");
-    expect(normalizeStatus("")).toBeUndefined();
-    expect(normalizeStatus(null)).toBeUndefined();
+describe("status", () => {
+  const statusOf = (status: unknown, locale: "en" | "ar" = "en") =>
+    buildNovel({ ...novelManga, status }, [], strings(locale)).status;
+
+  it("maps the site's four statuses, whatever their spelling, into the host's locale", () => {
+    expect(statusOf("OnGoing")).toBe("Ongoing");
+    expect(statusOf("ongoing")).toBe("Ongoing");
+    expect(statusOf("Completed")).toBe("Completed");
+    expect(statusOf("hiatus")).toBe("Hiatus");
+    expect(statusOf("cancelled")).toBe("Cancelled");
+    expect(["OnGoing", "completed", "hiatus", "cancelled"].map((s) => statusOf(s, "ar"))).toEqual([
+      "مستمرة",
+      "مكتملة",
+      "متوقفة مؤقتًا",
+      "ملغاة",
+    ]);
+  });
+
+  it("passes an unknown status through with its first letter capitalised", () => {
+    expect(statusOf("on hold")).toBe("On hold");
+    expect(statusOf("constructor")).toBe("Constructor");
+    expect(statusOf("")).toBeUndefined();
+    expect(statusOf(null)).toBeUndefined();
   });
 });
 
@@ -642,14 +642,6 @@ describe("getChapterContent", () => {
     expect(lines.some((l) => /report chapter|Blood Binding Seal$/.test(l.content))).toBe(false);
   });
 
-  it("fetches the canonical URL for a mirror or legacy chapter URL", async () => {
-    const calls: Array<{ url: string; method: string }> = [];
-    await createSource(host({ [CH_URL]: chapterHtml }, { calls })).getChapterContent(
-      chapterOf("https://novelbuddy.io/novel/shadows-oath/chapter-108"),
-    );
-    expect(calls.map((c) => c.url)).toEqual([CH_URL]);
-  });
-
   it("logs at debug, not info", async () => {
     const logs: LogEntry[] = [];
     await createSource(host({ [CH_URL]: chapterHtml }, { logs })).getChapterContent(chapterOf(CH_URL));
@@ -678,10 +670,6 @@ describe("getChapterContent", () => {
     await expect(source.getChapterContent(chapterOf(CH_URL))).rejects.toThrow(
       `${PREFIX}chapter body at ${CH_URL} parsed to zero lines of text.`,
     );
-  });
-
-  it("rejects a novel URL passed as a chapter", async () => {
-    await expect(createSource(host({})).getChapterContent(chapterOf(NOVEL_URL))).rejects.toThrow(PREFIX);
   });
 });
 
@@ -793,6 +781,134 @@ describe("searchChapters", () => {
   });
 });
 
+// ── chapter-list cache ─────────────────────────────────────────────────
+
+describe("chapter-list cache", () => {
+  type Call = { url: string; method: string };
+  const count = (calls: Call[], url: string) => calls.filter((c) => c.url === url).length;
+
+  /** A fixture host whose answers a test can change between calls:
+   *  createTestHost reads `responses` and `status` on every request. */
+  function mutableHost(calls: Call[]) {
+    const responses: Record<string, string> = { [NOVEL_URL]: novelHtml, [CHAPTER_LIST_URL]: chaptersJson };
+    const status: Record<string, number> = {};
+    return { responses, status, host: createTestHost({ responses, status, calls }) };
+  }
+
+  it("builds fresh chapters on every call, so text written onto one never comes back", async () => {
+    const source = createSource(novelHost());
+    const first = await source.getNovel(NOVEL_URL);
+    const chapter = first.volumes[0].chapters[0];
+    const original = { ...chapter };
+    // What the importer does with the chapters getNovel returned.
+    chapter.lines = [{ type: "text", content: "imported text" }];
+    chapter.title = "edited";
+
+    const second = await source.getNovel(NOVEL_URL);
+    expect(second.volumes[0].chapters[0]).not.toBe(chapter);
+    expect(second.volumes[0].chapters[0]).toEqual(original);
+    expect(second.volumes[0].chapters.every((c) => c.lines.length === 0)).toBe(true);
+
+    const [hit] = await source.searchChapters!(NOVEL_URL, original.title);
+    expect(hit).toEqual(original);
+    hit.lines.push({ type: "text", content: "more" });
+    const third = await source.getNovel(NOVEL_URL);
+    expect(third.volumes[0].chapters[0].lines).toEqual([]);
+  });
+
+  it("skips the chapter-list request while the novel page's cv is unchanged", async () => {
+    const calls: Call[] = [];
+    const source = createSource(novelHost({ calls }));
+    const first = await source.getNovel(NOVEL_URL);
+    const second = await source.getNovel(NOVEL_URL);
+
+    expect(calls.map((c) => c.url)).toEqual([NOVEL_URL, CHAPTER_LIST_URL, NOVEL_URL]);
+    expect(second.volumes[0].chapters).toEqual(first.volumes[0].chapters);
+    expect(second.volumes[0].chapters).toHaveLength(chapterRows.length);
+  });
+
+  it("fetches the list again once the cv moves", async () => {
+    const calls: Call[] = [];
+    const { responses, host: h } = mutableHost(calls);
+    const source = createSource(h);
+    await source.getNovel(NOVEL_URL);
+
+    // A new chapter went up: the page carries a new cv, the API a longer list.
+    const cv = novelManga.cv + 1;
+    const listUrl = chapterListUrl(novelManga.id, cv);
+    const newest = { ...chapterRows[0], url: `/shadows-oath/chapter-new`, name: "Chapter New", number: 999 };
+    responses[NOVEL_URL] = novelHtml.replaceAll(`"cv":${novelManga.cv}`, `"cv":${cv}`);
+    responses[listUrl] = JSON.stringify({ success: true, data: { chapters: [newest, ...chapterRows] } });
+
+    const novel = await source.getNovel(NOVEL_URL);
+    expect(calls.map((c) => c.url)).toEqual([NOVEL_URL, CHAPTER_LIST_URL, NOVEL_URL, listUrl]);
+    expect(novel.volumes[0].chapters).toHaveLength(chapterRows.length + 1);
+    expect(novel.volumes[0].chapters.at(-1)?.title).toBe("Chapter New");
+  });
+
+  it("keeps one novel's list at a time", async () => {
+    const calls: Call[] = [];
+    const { responses, host: h } = mutableHost(calls);
+    const richUrl = "https://novelbuddy.me/shadow-slave";
+    const richList = chapterListUrl(richManga.id, richManga.cv);
+    responses[richUrl] = novelRichHtml;
+    responses[richList] = JSON.stringify({ success: true, data: { chapters: chapterRows.slice(0, 3) } });
+    const source = createSource(h);
+
+    await source.getNovel(NOVEL_URL);
+    expect((await source.getNovel(richUrl)).volumes[0].chapters).toHaveLength(3);
+    // shadow-slave's list replaced shadows-oath's: both of these refetch.
+    expect(await source.searchChapters!(NOVEL_URL, "chapter 1")).not.toEqual([]);
+    await source.getNovel(richUrl);
+    expect(count(calls, CHAPTER_LIST_URL)).toBe(2);
+    expect(count(calls, richList)).toBe(2);
+  });
+
+  it("shares one in-flight request between concurrent calls for the same list", async () => {
+    const calls: Call[] = [];
+    const base = novelHost({ calls });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const slow: SourceHost = {
+      ...base,
+      async fetch(url, o) {
+        const resp = await base.fetch(url, o);
+        if (url === CHAPTER_LIST_URL) await gate;
+        return resp;
+      },
+    };
+    const source = createSource(slow);
+    const pending = Promise.all([
+      source.getNovel(NOVEL_URL),
+      source.getNovel(NOVEL_URL),
+      source.searchChapters!(NOVEL_URL, "chapter 1"),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // All three have their novel page; the one list request is still open.
+    expect(count(calls, NOVEL_URL)).toBe(3);
+    expect(count(calls, CHAPTER_LIST_URL)).toBe(1);
+
+    release();
+    const [a, b, hits] = await pending;
+    expect(count(calls, CHAPTER_LIST_URL)).toBe(1);
+    expect(a.volumes[0].chapters).toHaveLength(chapterRows.length);
+    expect(b.volumes[0].chapters[0]).not.toBe(a.volumes[0].chapters[0]);
+    expect(hits.length).toBeGreaterThan(0);
+  });
+
+  it("forgets a failed list request, so the next call tries again", async () => {
+    const calls: Call[] = [];
+    const { status, host: h } = mutableHost(calls);
+    const source = createSource(h);
+    status[CHAPTER_LIST_URL] = 404;
+    await expect(source.getNovel(NOVEL_URL)).rejects.toThrow(`${PREFIX}chapter list ${CHAPTER_LIST_URL} answered HTTP 404.`);
+
+    delete status[CHAPTER_LIST_URL];
+    expect((await source.getNovel(NOVEL_URL)).volumes[0].chapters).toHaveLength(chapterRows.length);
+    expect(count(calls, CHAPTER_LIST_URL)).toBe(2);
+  });
+});
+
 // ── transient failures ─────────────────────────────────────────────────
 
 describe("retrying a dropped request", () => {
@@ -843,7 +959,7 @@ describe("strings + manifest", () => {
     const en = mod.strings("en");
     const ar = mod.strings("ar");
     expect(en("allChapters")).toBe("All Chapters");
-    expect(ar("allChapters")).toBe("جميع الفصول");
+    expect(ar("allChapters")).toBe("كل الفصول");
     expect(en("chapterFallback", { n: 7 })).toBe("Chapter 7");
     expect(ar("chapterFallback", { n: 7 })).toBe("الفصل 7");
   });

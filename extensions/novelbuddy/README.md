@@ -20,9 +20,9 @@ Cloudflare challenge (checked with the app's exact user agent through
 | Method              | Supported | Notes |
 |---------------------|-----------|-------|
 | `canHandle`         | ✓ | `novelbuddy.me`, `novelbuddy.io`, `novelbuddy.com`, each with or without `www.` |
-| `getHomeSections`   | ✓ | the site's own rows: Trending, Popular Updates, Latest Updates |
+| `getHomeSections`   | ✓ | the site's three novel rows: Trending, Popular Updates, Latest Updates (headings localised) |
 | `search`            | ✓ | real server-side pagination, 24 per page, `hasMore` from the site |
-| `getNovel`          | ✓ | one fully-populated volume holding every chapter (6,107 for Martial Peak) |
+| `getNovel`          | ✓ | one fully-populated volume holding every chapter (6,107 for Martial Peak); the list request is skipped while the title's `cv` is unchanged |
 | `getChapterContent` | ✓ | three body shapes handled; site furniture stripped — see below |
 | `searchChapters`    | ✓ | local filter over the list `getNovel` already fetched |
 | `getVolumeChapters` | n/a | nothing is lazy: one API response carries the whole list |
@@ -31,10 +31,10 @@ Cloudflare challenge (checked with the app's exact user agent through
 
 | Request | Used by | What is read |
 |---|---|---|
-| `GET https://novelbuddy.me/home` | `getHomeSections` | `<main> <section> <header> <h2>` headings + anchors, and `__NEXT_DATA__` title objects |
+| `GET https://novelbuddy.me/home` | `getHomeSections` | `pageProps.trendingItems`, `pageProps.popularItems`, `pageProps.latest.items` |
 | `GET https://novelbuddy.me/search?q=<q>[&page=<n>]` | `search` | `pageProps.ssrItems`, `pageProps.ssrPagination.has_next` |
 | `GET https://novelbuddy.me/<slug>` | `getNovel`, `searchChapters` | `pageProps.initialManga` (metadata, title id, `cv`) |
-| `GET https://api.novelbuddy.me/titles/<id>/chapters?cv=<cv>` | `getNovel`, `searchChapters` | `data.chapters[]` — every chapter, newest first |
+| `GET https://api.novelbuddy.me/titles/<id>/chapters?cv=<cv>` | `getNovel`, `searchChapters` | `data.chapters[]` — every chapter, newest first; not re-requested while `cv` holds (see `getNovel`) |
 | `GET https://novelbuddy.me/<slug>/<chapter-slug>` | `getChapterContent` | `pageProps.initialChapter.content` (an HTML fragment) |
 
 `/_next/data/<buildId>/…json` routes exist too, but `buildId` changes on
@@ -49,7 +49,7 @@ same JSON for one request and never go stale.
    the old NovelBuddy on `novelbuddy.io` / `novelbuddy.com` used, and both of
    those domains now `301` to `novelbuddy.me` keeping the path. Meanwhile
    `https://www.novelbuddy.me/<anything>` answers `301` to **itself**
-   (`curl -L` gives up after its redirect cap). So `novelPath()` accepts all
+   (`curl -L` gives up after its redirect cap). So `slugFromUrl()` accepts all
    six hosts, drops a leading `novel/` (or `read/`, which the current site
    also routes) when something follows it, and every request is rebuilt on
    the bare `https://novelbuddy.me` host — a library entry saved from any
@@ -147,49 +147,59 @@ handing the reader a blank chapter.
 ## `getHomeSections`
 
 `/home` renders five `<section>`s with an `<h2>`: Trending, Popular Updates,
-XP Leaderboard, Latest Updates, Latest Lists. `parseHomeSections` takes
-**the headings, the row order and which novels each row holds** from the
-markup, and **what each card says** from the page's `__NEXT_DATA__`:
+XP Leaderboard, Latest Updates, Latest Lists. Only three hold novels, and the
+page's `__NEXT_DATA__` carries each of those as an array of its own, so
+`HOME_ROWS` reads them straight from `pageProps` — no markup is parsed:
 
-- `indexTitleItems` walks `pageProps` and indexes every object with a
-  string `name`, a string `slug` and `url === "/<slug>"`. That last check
-  keeps chapters (`/<slug>/<chapter>`), genres (`/genres/x`) and authors
-  (`/authors/x`) out. A title repeated across arrays (`trendingItems` ships
-  `latestChapters: []`, `popularItems` ships three) is merged so the richer
-  copy's fields win.
-- Each row's cards come from its anchors whose href is a single path
-  segment and whose slug is in that index, de-duplicated, skipping anchors
-  in the row's `<header>` ("See all") or any `<aside>`. XP Leaderboard and
-  Latest Lists contain no title slugs and drop out on their own.
-- Reading card text from the markup instead would mean un-mixing the rank
-  digits the Trending row prints inside its `<h3>` ("1Shadow Slave").
-- `id` is the slugified heading (`trending`, `popular-updates`,
-  `latest-updates`); `viewMoreUrl` is the row's own `a.section-see`
-  (`/trending/manga`, `/search?sort=views_today`; Latest Updates has none).
-- Card: `title ← name`, `coverUrl ← cover` (absolute,
-  `rs.novelbuddy.me/covers/…`, fetchable without a referer), `subtitle ←`
-  newest chapter's name (else `displayChapters`), `badges ←` first three
-  genres. The card URL is rebuilt from the slug on the canonical host.
+| id | `pageProps` field | heading (`en`) | cards | `viewMoreUrl` |
+|---|---|---|---|---|
+| `trending` | `trendingItems` (50 items) | Trending | first 12, as the site shows | `/trending/manga` |
+| `popular` | `popularItems` | Popular Updates | 10 | `/search?sort=views_today` |
+| `latest` | `latest.items` | Latest Updates | 24 | none (the site has no "See all") |
 
-Trending renders the first 12 of the payload's 50 `trendingItems`; the row
-returns those 12, as the site shows them. The "Top read" sidebar is a re-cut
-of Popular Updates and the hero carousel has no heading, so neither becomes
-a row. A page with no row at all throws.
+The headings are the site's own English text, restated in `src/strings.ts`
+(they live in the page markup, not in the arrays) and translated for `ar`.
+XP Leaderboard and Latest Lists hold no novels; the "Top read" sidebar is a
+re-cut of Popular Updates and the hero carousel has no heading, so none of
+them becomes a row.
+
+Card: `title ← name`, `coverUrl ← cover` (absolute,
+`rs.novelbuddy.me/covers/…`, fetchable without a referer), `subtitle ←` the
+newest chapter's name (else `displayChapters`, e.g. "3,229 chapters"),
+`badges ←` first three genres. The card URL is rebuilt from the slug on the
+canonical host. `trendingItems` ships no genres and an empty
+`latestChapters`, so Trending cards carry the chapter count and no badges.
+A page with no row at all throws.
 
 ## `search`
 
 `/search?q=<query>&page=<n>` (page omitted for page 1) is server-rendered:
 `ssrItems` holds 24 title objects and `ssrPagination` holds `page`,
-`total_pages` and `has_next`. `hasMore` is `has_next` (falling back to
-`page < total_pages`). Asking past the end returns `ssrItems: []` with
+`total_pages` and `has_next`. `hasMore` is `has_next === true` (every
+response carries it). Asking past the end returns `ssrItems: []` with
 `has_next: false`. Checked live: page 1 and page 2 of "martial" share no
 card. An empty or blank query returns `{ cards: [], hasMore: false }`
 without a request.
 
 ## `getNovel`
 
-Two requests: the novel page, then the chapter list (quirks 2–4). Field
-mapping from `initialManga`:
+Two requests: the novel page, then the chapter list (quirks 2–4) — the
+second only when needed. The app calls `getNovel` more than once for the
+same novel (the detail view, then the importer), so the last list fetched is
+kept as plain `{ title, url }` rows keyed by slug **and** `cv`: the novel page
+is always fetched (fresh metadata, current `cv`), but while its `cv` matches
+the kept rows the ~800 KB list request is skipped. A new chapter moves `cv`,
+so the list is fetched again. Concurrent calls for the same list share one
+in-flight request, and a failed request is not kept.
+
+The rows are all that is kept. Every call builds **fresh** `SourceChapter`
+objects from them, because the importer writes each chapter's text onto the
+objects `getNovel` returned (`sourceChapter.lines = …`) and extensions share
+the app's JS context — caching those objects would pin every imported
+chapter's text in memory (~100 MB for a 6,000-chapter novel). One entry per
+`Source` instance, closure state, never module state.
+
+Field mapping from `initialManga`:
 
 | `SourceNovel` | from |
 |---|---|
@@ -199,8 +209,8 @@ mapping from `initialManga`:
 | `coverUrl` | `cover` |
 | `description` | `summary` — HTML (`<p>…<br />…</p>`) on some novels, plain text on others — flattened to paragraphs joined by blank lines |
 | `tags` | `genres[].name` then `tags[].name`, case-insensitive duplicates dropped (Shadow Slave: 4 genres + 20 tags → 21) |
-| `status` | `status` normalised: the novel page says `OnGoing`, listings say `ongoing`; both become `Ongoing` |
-| `meta` | Type (`type.name`), Chapters (the list's length), Rating (`displayRating (ratingsCount)`), Views, Bookmarks, Released (`releaseDate`), Last updated (`updatedAt`, date part) — each only when present |
+| `status` | `status` in the host's locale: `ongoing`, `completed`, `hiatus`, `cancelled` (the site's search-filter values; the novel page spells the first `OnGoing`) → Ongoing / Completed / Hiatus / Cancelled; anything else passes through with its first letter capitalised |
+| `meta` | Type (`type.name`), Chapters (the list's length), Rating (`ratingValue`: `4.8 / 5 (37 ratings)`, only when `ratingsCount` > 0), Views, Bookmarks, Released (`releaseDate`), Last updated (`updatedAt`, date part) — each only when present |
 | `volumes` | one volume, "All Chapters", every chapter, `chapterCount` set |
 
 `stats.chaptersCount` is compared with the list's length and a mismatch is
@@ -213,11 +223,11 @@ Shadow Slave fixture can be tested without its 810 KB chapter list.
 
 ## `searchChapters`
 
-The site has no in-novel chapter search, but `getNovel` already holds the
-whole list. `searchChapters` filters it by case-insensitive substring of
-the title. Lists are cached per `Source` instance (closure state, never
-module state) for the last 4 novels; on a miss it fetches the page and the
-list again the same way `getNovel` does. An empty query returns `[]`.
+The site has no in-novel chapter search, but `getNovel` already fetched the
+whole list. `searchChapters` filters it by case-insensitive substring of the
+title, using the rows `getNovel` kept (see above) when they are this novel's,
+with no request at all. For any other novel it fetches the page and the list
+the same way `getNovel` does. An empty query returns `[]`.
 
 ## Errors
 
@@ -238,9 +248,12 @@ Logging: `info` for `getHomeSections`, `search`, `getNovel`,
 ## i18n
 
 `src/strings.ts` carries `en` and `ar` for what this extension synthesises:
-the volume title (`allChapters`), a fallback chapter title
-(`chapterFallback`, never seen needed), and the `meta` row labels. Home row
-headings and statuses are the site's own English text.
+the three home row headings (`homeTrending`, `homePopularUpdates`,
+`homeLatestUpdates` — the site's own English headings, translated), the
+volume title (`allChapters`), a fallback chapter title (`chapterFallback`,
+never seen needed), the `meta` row labels with the rating format
+(`ratingValue`), and the four statuses (`statusOngoing`, `statusCompleted`,
+`statusHiatus`, `statusCancelled`).
 
 ## Fixtures
 
