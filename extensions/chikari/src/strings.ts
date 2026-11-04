@@ -12,8 +12,12 @@ import type { Locale } from "@riwaq/extension-api";
  *  a sixth row the novel feed has not been seen to send — see index.ts's
  *  HOME_ROWS.
  *
- *  status* — the site's own labels for its `status` values (`releasing`,
- *  `completed`, ...), again taken verbatim from its client bundle.
+ *  status* — the labels shared with the other English extensions, for the
+ *  site's `status` values: `releasing` is statusOngoing, the rest map by
+ *  name (and match the site's own labels).
+ *
+ *  allChapters — getNovel's single pseudo-volume (the site has no volumes;
+ *  every chapter row's `volume` field is "").
  *
  *  chapterFallback — a chapter whose `title` is empty. The site renders the
  *  same "Chapter <n>" fallback itself.
@@ -21,8 +25,7 @@ import type { Locale } from "@riwaq/extension-api";
  *  cardLatest — the card subtitle naming the newest chapter, matching the
  *  site's own "Ch. <n>" card label.
  *
- *  volumeFallback — getNovel's single pseudo-volume (the site has no
- *  volumes; every chapter row's `volume` field is ""). */
+ *  ratingValue — the site rates out of 10, passed as {max}. */
 const CATALOG = {
   en: {
     homeTrending: "Trending",
@@ -31,17 +34,17 @@ const CATALOG = {
     homeBingeable: "Complete & Bingeable",
     homeRecentlyUpdated: "Recently Updated",
     homeRecentlyAdded: "Recently Added",
-    statusReleasing: "Releasing",
+    statusOngoing: "Ongoing",
     statusCompleted: "Completed",
     statusHiatus: "Hiatus",
     statusCancelled: "Cancelled",
     statusUpcoming: "Upcoming",
-    volumeFallback: "Chapters",
+    allChapters: "All Chapters",
     chapterFallback: "Chapter {n}",
     cardLatest: "Ch. {n}",
     metaChapters: "Chapters",
     metaRating: "Rating",
-    metaRatingValue: "{score} / 10 ({count} ratings)",
+    ratingValue: "{score} / {max} ({count} ratings)",
     metaViews: "Views",
     metaUpdated: "Last updated",
     metaYear: "Year",
@@ -54,17 +57,17 @@ const CATALOG = {
     homeBingeable: "مكتملة وجاهزة للقراءة المتواصلة",
     homeRecentlyUpdated: "المحدّثة مؤخرًا",
     homeRecentlyAdded: "المضافة حديثًا",
-    statusReleasing: "مستمرة",
+    statusOngoing: "مستمرة",
     statusCompleted: "مكتملة",
     statusHiatus: "متوقفة مؤقتًا",
     statusCancelled: "ملغاة",
     statusUpcoming: "قادمة",
-    volumeFallback: "الفصول",
+    allChapters: "كل الفصول",
     chapterFallback: "الفصل {n}",
     cardLatest: "الفصل {n}",
     metaChapters: "عدد الفصول",
     metaRating: "التقييم",
-    metaRatingValue: "{score} / 10 ({count} تقييم)",
+    ratingValue: "{score} / {max} ({count} تقييم)",
     metaViews: "المشاهدات",
     metaUpdated: "آخر تحديث",
     metaYear: "السنة",

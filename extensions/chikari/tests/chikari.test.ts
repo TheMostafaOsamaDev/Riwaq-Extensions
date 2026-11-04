@@ -15,7 +15,7 @@ import createSource, {
   type SeriesItem,
 } from "../src/index";
 import { strings } from "../src/strings";
-import { SourceUrlError } from "@riwaq/extension-api";
+import { SourceUrlError, type Locale, type SourceHost } from "@riwaq/extension-api";
 import { createTestHost, type TestHostOptions } from "@riwaq/extension-api/testing";
 
 // Fixture paths via fileURLToPath + join, never `new URL(rel, import.meta.url)`:
@@ -156,6 +156,31 @@ describe("strings", () => {
     }
     expect(en("chapterFallback", { n: 7 })).toBe("Chapter 7");
     expect(ar("chapterFallback", { n: 7 })).toBe("الفصل 7");
+  });
+
+  it("uses the keys and wording shared with the other English extensions", () => {
+    const en = strings("en");
+    const ar = strings("ar");
+    const shared = {
+      allChapters: ["All Chapters", "كل الفصول"],
+      metaChapters: ["Chapters", "عدد الفصول"],
+      metaRating: ["Rating", "التقييم"],
+      metaViews: ["Views", "المشاهدات"],
+      metaUpdated: ["Last updated", "آخر تحديث"],
+      metaAltTitles: ["Alternative titles", "عناوين بديلة"],
+      statusOngoing: ["Ongoing", "مستمرة"],
+      statusCompleted: ["Completed", "مكتملة"],
+      statusHiatus: ["Hiatus", "متوقفة مؤقتًا"],
+      statusCancelled: ["Cancelled", "ملغاة"],
+      statusUpcoming: ["Upcoming", "قادمة"],
+    } as const;
+    for (const [key, [enText, arText]] of Object.entries(shared)) {
+      expect(en(key as keyof typeof shared), key).toBe(enText);
+      expect(ar(key as keyof typeof shared), key).toBe(arText);
+    }
+    const rating = { score: 6.9, max: 10, count: 14 };
+    expect(en("ratingValue", rating)).toBe("6.9 / 10 (14 ratings)");
+    expect(ar("ratingValue", rating)).toBe("6.9 / 10 (14 تقييم)");
   });
 });
 
@@ -347,8 +372,10 @@ describe("search", () => {
     const calls: Calls = [];
     const source = createSource(searchHost(calls));
     expect((await source.search("sword")).page).toBe(1);
-    expect((await source.search("sword", 0)).page).toBe(1);
-    expect(calls.map((c) => c.url)).toEqual([searchUrl("sword", 0), searchUrl("sword", 0)]);
+    for (const bad of [0, -2, 2.5, NaN]) {
+      expect((await source.search("sword", bad)).page, String(bad)).toBe(1);
+    }
+    expect(calls.map((c) => c.url)).toEqual(Array(5).fill(searchUrl("sword", 0)));
   });
 
   it("returns an empty, final page when nothing matches", async () => {
@@ -415,7 +442,7 @@ describe("getNovel", () => {
     expect(n.tags).toEqual(novel.genres!.map((g) => g.name));
     // The long NovelUpdates-style tag list is deliberately not surfaced.
     expect(n.tags).not.toContain(novel.tags[0].name);
-    expect(n.status).toBe("Releasing");
+    expect(n.status).toBe("Ongoing");
     expect(n.meta).toEqual([
       { label: "Chapters", value: String(novel.chapter_count) },
       { label: "Rating", value: `${novel.rating} / 10 (${novel.rating_count} ratings)` },
@@ -427,14 +454,15 @@ describe("getNovel", () => {
   it("localises synthesised labels for Arabic", async () => {
     const n = await createSource(createTestHost({ responses: NOVEL_ROUTES, locale: "ar" })).getNovel(NOVEL_URL);
     const ar = strings("ar");
-    expect(n.status).toBe(ar("statusReleasing"));
+    expect(n.status).toBe(ar("statusOngoing"));
     expect(n.meta[0].label).toBe(ar("metaChapters"));
-    expect(n.volumes[0].title).toBe(ar("volumeFallback"));
+    expect(n.volumes[0].title).toBe(ar("allChapters"));
   });
 
   it("returns every chapter, in order, in one populated volume", async () => {
     const n = await createSource(createTestHost({ responses: NOVEL_ROUTES })).getNovel(NOVEL_URL);
     expect(n.volumes).toHaveLength(1);
+    expect(n.volumes[0].title).toBe("All Chapters");
     const chapters = n.volumes[0].chapters;
     expect(chapters).toHaveLength(chaptersP1.total);
     expect(chapters).toHaveLength(allRows.length);
@@ -490,6 +518,172 @@ describe("getNovel", () => {
     await expect(
       createSource(createTestHost({ responses: { ...NOVEL_ROUTES, [chaptersUrl(0)]: "{}" } })).getNovel(NOVEL_URL),
     ).rejects.toThrow(`${PREFIX} /api/novels/${SLUG}/chapters?order=asc&limit=500&offset=0 returned an unexpected shape`);
+  });
+});
+
+describe("getNovel display text and status", () => {
+  const novelWith = (detail: object, rows = chaptersP1, locale: Locale = "en") =>
+    createSource(
+      createTestHost({
+        responses: {
+          ...NOVEL_ROUTES,
+          [NOVEL_API]: JSON.stringify({ ...novel, ...detail }),
+          [chaptersUrl(0)]: JSON.stringify(rows),
+        },
+        locale,
+      }),
+    ).getNovel(NOVEL_URL);
+
+  it("collapses stray whitespace in display text, keeping the description's paragraphs", async () => {
+    const rows = structuredClone(chaptersP1);
+    rows.items[0].title = " Prologue \n (1) ";
+    const n = await novelWith(
+      {
+        title: "  Swordmaster's\n  Youngest Son ",
+        alt_titles: ["  Geomga-ui\tMaknae  ", "", 3],
+        authors: [{ name: " Emperor \n Penguin ", role: "author" }],
+        genres: [{ name: "Martial \n Arts" }, { name: "  " }],
+        description: "  First  paragraph,\n\n\n  second   one.\nThird line. ",
+      },
+      rows,
+    );
+    expect(n.title).toBe("Swordmaster's Youngest Son");
+    expect(n.meta[0]).toEqual({ label: "Alternative titles", value: "Geomga-ui Maknae" });
+    expect(n.author).toBe("Emperor Penguin");
+    expect(n.tags).toEqual(["Martial Arts"]);
+    expect(n.description).toBe("First paragraph,\n\nsecond one.\n\nThird line.");
+    expect(n.volumes[0].chapters[0].title).toBe("Prologue (1)");
+  });
+
+  it("maps the site's status values to the shared labels, and passes others through capitalised", async () => {
+    const statusOf = async (status: unknown, locale: Locale = "en") => (await novelWith({ status }, chaptersP1, locale)).status;
+    expect(await statusOf("releasing")).toBe("Ongoing");
+    expect(await statusOf("completed")).toBe("Completed");
+    expect(await statusOf("hiatus")).toBe("Hiatus");
+    expect(await statusOf("cancelled")).toBe("Cancelled");
+    expect(await statusOf("upcoming")).toBe("Upcoming");
+    expect(await statusOf("releasing", "ar")).toBe("مستمرة");
+    expect(await statusOf("completed", "ar")).toBe("مكتملة");
+    expect(await statusOf("dropped")).toBe("Dropped");
+    expect(await statusOf("")).toBeUndefined();
+    expect(await statusOf(undefined)).toBeUndefined();
+  });
+});
+
+describe("getNovel chapter-list requests", () => {
+  const listOffsets = (calls: Calls) =>
+    calls.filter((c) => c.url.includes("/chapters?")).map((c) => Number(new URL(c.url).searchParams.get("offset")));
+
+  /** A novel whose list claims `pages` pages of 500: page 0 is the real first
+   *  page with its `total` raised, every later page the real second page. */
+  function longNovel(pages: number): Record<string, string> {
+    const total = pages * CHAPTER_PAGE_SIZE;
+    const routes: Record<string, string> = {
+      [NOVEL_API]: JSON.stringify({ ...novel, chapter_count: total }),
+      [chaptersUrl(0)]: JSON.stringify({ ...chaptersP1, total }),
+    };
+    for (let i = 1; i < pages; i++) routes[chaptersUrl(i * CHAPTER_PAGE_SIZE)] = chaptersP2Json;
+    return routes;
+  }
+
+  it("asks for no further page once one has failed", async () => {
+    const calls: Calls = [];
+    // Offset 500 fails at once; the four pages already in flight (500 to
+    // 2000) can't be recalled, but 2500 to 4500 must never be asked for.
+    const responses = { ...longNovel(10), [chaptersUrl(500)]: "{}" };
+    await expect(createSource(createTestHost({ responses, calls })).getNovel(NOVEL_URL)).rejects.toThrow(
+      `${PREFIX} /api/novels/${SLUG}/chapters?order=asc&limit=500&offset=500 returned an unexpected shape`,
+    );
+    expect(listOffsets(calls)).toEqual([0, 500, 1000, 1500, 2000]);
+  });
+
+  it("asks for no further page once the detail request has failed", async () => {
+    const calls: Calls = [];
+    const base = createTestHost({ responses: { ...longNovel(10), [NOVEL_API]: "[]" }, calls });
+    // The first list page lands only after the detail has already failed.
+    const host: SourceHost = {
+      ...base,
+      async fetch(url, opts) {
+        if (url.includes("/chapters?")) await new Promise((r) => setTimeout(r, 20));
+        return base.fetch(url, opts);
+      },
+    };
+    await expect(createSource(host).getNovel(NOVEL_URL)).rejects.toThrow(
+      `${PREFIX} /api/novels/${SLUG} returned an unexpected shape (no novel object)`,
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    expect(listOffsets(calls)).toEqual([0]);
+  });
+
+  it("reopening a novel whose list hasn't changed costs only the detail request", async () => {
+    const calls: Calls = [];
+    const source = createSource(createTestHost({ responses: NOVEL_ROUTES, calls }));
+    const first = await source.getNovel(NOVEL_URL);
+    calls.length = 0;
+    const again = await source.getNovel(`${NOVEL_URL}/400`);
+    expect(calls.map((c) => c.url)).toEqual([NOVEL_API]);
+    expect(again).toEqual(first);
+    expect(again.volumes[0].chapters).toHaveLength(chaptersP1.total);
+  });
+
+  it("fetches the list again when the chapter count or the newest chapter's time changes", async () => {
+    const calls: Calls = [];
+    const responses: Record<string, string> = { ...NOVEL_ROUTES };
+    const source = createSource(createTestHost({ responses, calls }));
+    await source.getNovel(NOVEL_URL);
+    for (const change of [{ chapter_count: novel.chapter_count! + 1 }, { last_chapter_at: "2026-10-30T00:00:00+00:00" }]) {
+      responses[NOVEL_API] = JSON.stringify({ ...novel, ...change });
+      calls.length = 0;
+      await source.getNovel(NOVEL_URL);
+      expect(calls.map((c) => c.url), JSON.stringify(change)).toEqual([NOVEL_API, chaptersUrl(0), chaptersUrl(500)]);
+    }
+  });
+
+  it("keeps only the last novel's list", async () => {
+    const calls: Calls = [];
+    const other = "lord-of-the-mysteries";
+    const otherApi = `${B}/api/novels/${other}`;
+    const responses = {
+      ...NOVEL_ROUTES,
+      [otherApi]: JSON.stringify({ ...novel, slug: other }),
+      [`${otherApi}/chapters?order=asc&limit=500&offset=0`]: chapterSearchJson,
+    };
+    const source = createSource(createTestHost({ responses, calls }));
+    await source.getNovel(NOVEL_URL);
+    await source.getNovel(`${B}/novels/${other}`);
+    calls.length = 0;
+    await source.getNovel(NOVEL_URL);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("hands out fresh chapter objects on every call", async () => {
+    const source = createSource(createTestHost({ responses: NOVEL_ROUTES }));
+    const first = await source.getNovel(NOVEL_URL);
+    // The importer writes each chapter's text onto the objects it was given.
+    first.volumes[0].chapters[0].lines.push({ type: "text", content: "imported text" });
+    const again = await source.getNovel(NOVEL_URL);
+    expect(again.volumes[0].chapters[0].lines).toEqual([]);
+    expect(again.volumes[0].chapters[0]).not.toBe(first.volumes[0].chapters[0]);
+  });
+
+  it("concurrent calls for one novel share one set of requests", async () => {
+    const calls: Calls = [];
+    const source = createSource(createTestHost({ responses: NOVEL_ROUTES, calls }));
+    const [a, b] = await Promise.all([source.getNovel(NOVEL_URL), source.getNovel(NOVEL_URL)]);
+    expect(calls).toHaveLength(3);
+    expect(a).toEqual(b);
+    expect(a.volumes[0].chapters[0]).not.toBe(b.volumes[0].chapters[0]);
+  });
+
+  it("does not keep the list of a load that failed", async () => {
+    const calls: Calls = [];
+    const responses: Record<string, string> = { ...NOVEL_ROUTES, [chaptersUrl(500)]: "{}" };
+    const source = createSource(createTestHost({ responses, calls }));
+    await expect(source.getNovel(NOVEL_URL)).rejects.toThrow(PREFIX);
+    responses[chaptersUrl(500)] = chaptersP2Json;
+    calls.length = 0;
+    expect((await source.getNovel(NOVEL_URL)).volumes[0].chapters).toHaveLength(chaptersP1.total);
+    expect(calls).toHaveLength(3);
   });
 });
 
