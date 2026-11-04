@@ -565,6 +565,10 @@ describe("getNovel display text and status", () => {
     expect(await statusOf("releasing", "ar")).toBe("مستمرة");
     expect(await statusOf("completed", "ar")).toBe("مكتملة");
     expect(await statusOf("dropped")).toBe("Dropped");
+    // A plain-object lookup would find Object.prototype's own `constructor`
+    // and `toString` here instead of falling through.
+    expect(await statusOf("constructor")).toBe("Constructor");
+    expect(await statusOf("toString")).toBe("ToString");
     expect(await statusOf("")).toBeUndefined();
     expect(await statusOf(undefined)).toBeUndefined();
   });

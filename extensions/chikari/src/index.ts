@@ -62,23 +62,23 @@ const MAX_CHAPTER_PAGES = 500;
  *  slug `/api/home` returns. `sort` is the site's own "view all" link for
  *  the row. Rows with a slug missing here are skipped — the site's client
  *  does exactly the same with slugs its table doesn't list. */
-const HOME_ROWS: Record<string, { title: StringKey; sort: string }> = {
-  trending: { title: "homeTrending", sort: "trending" },
-  popular: { title: "homePopular", sort: "popular" },
-  "top-rated": { title: "homeTopRated", sort: "top_rated" },
-  bingeable: { title: "homeBingeable", sort: "bingeable" },
-  "recently-updated": { title: "homeRecentlyUpdated", sort: "updated" },
-  "recently-added": { title: "homeRecentlyAdded", sort: "added" },
-};
+const HOME_ROWS = new Map<string, { title: StringKey; sort: string }>([
+  ["trending", { title: "homeTrending", sort: "trending" }],
+  ["popular", { title: "homePopular", sort: "popular" }],
+  ["top-rated", { title: "homeTopRated", sort: "top_rated" }],
+  ["bingeable", { title: "homeBingeable", sort: "bingeable" }],
+  ["recently-updated", { title: "homeRecentlyUpdated", sort: "updated" }],
+  ["recently-added", { title: "homeRecentlyAdded", sort: "added" }],
+]);
 
 /** The site's `status` values. Anything else is shown as sent, capitalised. */
-const STATUS_LABELS: Record<string, StringKey> = {
-  releasing: "statusOngoing",
-  completed: "statusCompleted",
-  hiatus: "statusHiatus",
-  cancelled: "statusCancelled",
-  upcoming: "statusUpcoming",
-};
+const STATUS_LABELS = new Map<string, StringKey>([
+  ["releasing", "statusOngoing"],
+  ["completed", "statusCompleted"],
+  ["hiatus", "statusHiatus"],
+  ["cancelled", "statusCancelled"],
+  ["upcoming", "statusUpcoming"],
+]);
 
 // ── response shapes (only the fields this extension reads) ─────────────────
 
@@ -384,7 +384,7 @@ function descriptionFrom(text: string | null | undefined): string | undefined {
 
 function statusFrom(status: string | undefined, t: Translate): string | undefined {
   const raw = sanitizeText(status);
-  const key = STATUS_LABELS[raw.toLowerCase()];
+  const key = STATUS_LABELS.get(raw.toLowerCase());
   return key ? t(key) : raw ? raw[0].toUpperCase() + raw.slice(1) : undefined;
 }
 
@@ -545,7 +545,7 @@ export default function createSource(host: SourceHost): Source {
       const sections: SourceSection[] = [];
       for (const row of data.rows as unknown[]) {
         if (!isObject(row) || typeof row.slug !== "string" || !Array.isArray(row.items)) continue;
-        const known = HOME_ROWS[row.slug];
+        const known = HOME_ROWS.get(row.slug);
         if (!known) continue;
         const cards = (row.items as SeriesItem[]).filter(isNovel).map((item) => cardFor(item, t));
         if (cards.length === 0) continue;
