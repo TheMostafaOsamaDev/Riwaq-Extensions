@@ -6,6 +6,9 @@
 //   chapters-t2.html POST /manga/one-piece/ajax/chapters/?t=2
 //   chapter.html     GET  /manga/one-piece/1197/
 //   search.html      GET  /?s=one&post_type=wp-manga&paged=1
+// and on 2026-11-06:
+//   series-adult.html GET /manga/tengoku-daimakyou-2/ (an adult series: an "18+"
+//                     `.manga-title-badges.adult` beside .post-title, body.adult-content)
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -26,6 +29,7 @@ const chaptersT1 = read("chapters-t1.html");
 const chaptersT2 = read("chapters-t2.html");
 const chapterHtml = read("chapter.html");
 const searchHtml = read("search.html");
+const adultSeriesHtml = read("series-adult.html");
 
 const SERIES = "https://3asq.online/manga/one-piece/";
 const AJAX1 = `${SERIES}ajax/chapters/?t=1`;
@@ -68,6 +72,51 @@ describe("3asq", () => {
         expect(c.contentType).toBe("manga");
       }
     }
+  });
+
+  it("a card with the theme's adult badge is flagged nsfw, and only that card", async () => {
+    const sections = await createSource(createTestHost({ responses })).getHomeSections();
+    const rows = [...parseHtml(homeHtml).querySelectorAll(".page-item-detail")];
+    const adult = new Set(
+      rows
+        .filter((r) => r.querySelector(".manga-title-badges.adult") !== null)
+        .map((r) => [...r.querySelectorAll(".post-title a")].at(-1)!.getAttribute("href")),
+    );
+    expect(adult.size).toBeGreaterThan(0);
+    expect(adult.size).toBeLessThan(rows.length);
+    for (const c of sections[0].cards) {
+      if (adult.has(c.url)) expect(c.nsfw).toBe(true);
+      else expect(c).not.toHaveProperty("nsfw");
+    }
+  });
+
+  it("an adult series is flagged nsfw; One Piece is not", async () => {
+    const adultUrl = "https://3asq.online/manga/tengoku-daimakyou-2/";
+    const oneLi = `<li class="wp-manga-chapter"><a href="${adultUrl}86/">86</a></li>`;
+    const adultHost = createTestHost({
+      responses: { [`${adultUrl}ajax/chapters/`]: oneLi, [adultUrl]: adultSeriesHtml },
+    });
+    const adult = await createSource(adultHost).getNovel(adultUrl);
+    expect(adult.title).toBe("Tengoku Daimakyou");
+    expect(adult.nsfw).toBe(true);
+    const onePiece = await createSource(createTestHost({ responses })).getNovel(SERIES);
+    expect(onePiece).not.toHaveProperty("nsfw");
+  });
+
+  it("the series badge or the theme's adult-content body class marks a series nsfw", async () => {
+    const page = (body: string, badges: string) =>
+      `<html><body class="${body}"><div class="post-title">${badges}<h1>T</h1></div></body></html>`;
+    const novel = async (html: string) =>
+      createSource(
+        createTestHost({
+          responses: { [AJAX1]: `<li class="wp-manga-chapter"><a href="${SERIES}1/">1</a></li>`, [SERIES]: html },
+        }),
+      ).getNovel(SERIES);
+    const adultBadge = '<span class="manga-title-badges custom adult badge-round"><span class="text">18+</span></span>';
+    const hotBadge = '<span class="manga-title-badges hot badge-round"><span class="text">Hot</span></span>';
+    expect((await novel(page("single-wp-manga", adultBadge))).nsfw).toBe(true);
+    expect((await novel(page("single-wp-manga adult-content", hotBadge))).nsfw).toBe(true);
+    expect(await novel(page("single-wp-manga", hotBadge))).not.toHaveProperty("nsfw");
   });
 
   it("getNovel builds lazy volumes from the chapter pager", async () => {

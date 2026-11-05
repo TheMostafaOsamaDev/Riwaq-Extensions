@@ -8,6 +8,8 @@
 //     first, with a pager whose highest `data-page` is the page count. Each
 //     ajax page is one lazy volume, so a long series opens fast.
 //   - A chapter page lists its images under `.reading-content`.
+//   - An adult series carries an "18+" `.manga-title-badges.adult` on its
+//     cards and beside its `.post-title`; those set `nsfw`.
 import {
   absoluteUrl,
   parseHtml,
@@ -38,6 +40,9 @@ export interface MadaraConfig {
 const CHAPTERS_PER_PAGE = 50;
 
 const COVER_ATTRS = ["data-src", "data-lazy-src", "src"];
+
+/** The theme's "18+" title badge, on a card and beside a series' `.post-title`. */
+const ADULT_BADGE = ".manga-title-badges.adult";
 
 /** First non-empty, trimmed value among the attributes, in order. */
 function firstAttr(el: Element | null | undefined, attrs: string[]): string | undefined {
@@ -75,12 +80,14 @@ export function createMadaraSource(host: SourceHost, config: MadaraConfig): Sour
       const title = sanitizeText(link?.textContent);
       if (!href || !title) continue;
       const cover = firstAttr(row.querySelector(coverSelector), COVER_ATTRS);
-      cards.push({
+      const card: NovelCard = {
         url: abs(href),
         title,
         coverUrl: cover ? abs(cover) : undefined,
         contentType: "manga",
-      });
+      };
+      if (row.querySelector(ADULT_BADGE)) card.nsfw = true;
+      cards.push(card);
     }
     return cards;
   }
@@ -222,6 +229,8 @@ export function createMadaraSource(host: SourceHost, config: MadaraConfig): Sour
         meta: [],
         volumes,
         contentType: "manga",
+        // The theme also tags an adult series' page with `body.adult-content`.
+        ...(doc.querySelector(`.post-title ${ADULT_BADGE}, body.adult-content`) ? { nsfw: true } : {}),
       };
     },
 

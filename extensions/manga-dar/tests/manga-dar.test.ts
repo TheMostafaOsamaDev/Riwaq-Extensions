@@ -158,6 +158,26 @@ describe("manga-dar", () => {
     expect(novel.description).not.toMatch(/<|&\w+;|&#\d+;/);
   });
 
+  it("an adult series is flagged nsfw from its +18 badge or age gate; others are not", async () => {
+    // Berserk carries both: the "+18 للبالغين" age rating and the mdgAgeGate dialog.
+    expect(series).toMatch(/\+18 للبالغين/);
+    expect(series).toMatch(/x-data="mdgAgeGate"/);
+    const berserk = await createSource(createTestHost({ responses })).getNovel(SERIES);
+    expect(berserk.nsfw).toBe(true);
+
+    // A non-adult series page (a-strange-but-effective-villainess-life, checked
+    // live 2026-11-06) has neither the age-rating row nor the dialog.
+    const url = `${SITE}/manga/x/`;
+    const chaptersScript = `<script type="application/json" id="mdg-manga-chapters-json">{"rows":[[1,"1","${url}1/",0,1]]}</script>`;
+    const row = (label: string, value: string) =>
+      `<div><span class="text-sm">${label}</span><span class="text-sm">${value}</span></div>`;
+    const novel = (body: string) =>
+      createSource(createTestHost({ responses: { [url]: `<h1>X</h1>${body}${chaptersScript}` } })).getNovel(url);
+    expect(await novel(row("الحالة", "مستمر"))).not.toHaveProperty("nsfw");
+    expect((await novel(row("التقييم العمري", "\u200e+18 للبالغين"))).nsfw).toBe(true);
+    expect((await novel('<div x-data="mdgAgeGate" role="alertdialog"></div>')).nsfw).toBe(true);
+  });
+
   it("a series page without the chapters script is a manga-dar error", async () => {
     const source = createSource(createTestHost({ responses: { "/manga/x/": "<html><body><h1>x</h1></body></html>" } }));
     await expect(source.getNovel(`${SITE}/manga/x/`)).rejects.toThrow("manga-dar: ");

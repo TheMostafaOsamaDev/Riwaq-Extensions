@@ -12,6 +12,9 @@
 //   - A series is `/manga/<slug>/`. Every chapter is in
 //     `<script id="mdg-manga-chapters-json">{"rows":[[id,"387.1",url,unixTs,num],...]}`,
 //     newest first; they are returned oldest first.
+//   - An adult series page shows the age rating "+18 للبالغين" and an
+//     `x-data="mdgAgeGate"` warning dialog; that sets `nsfw`. Tiles and search
+//     JSON carry no flag.
 //   - A chapter is `/manga/<slug>/<n>/`. Each `.reader-page img` carries a 1x1
 //     GIF in `src` and the real address in `data-mds`: base64 of a signed site
 //     URL `/?mdrs=1&c=<chapterId>&i=<idx>&exp=<unix seconds>&pnonce=…&sig=…`
@@ -212,8 +215,14 @@ export default function createSource(host: SourceHost): Source {
       // The site lists newest first; chapters are returned oldest first.
       chapters.reverse();
 
-      const statusLabel = [...doc.querySelectorAll("span")].find((s) => sanitizeText(s.textContent) === "الحالة");
-      const status = sanitizeText(statusLabel?.nextElementSibling?.textContent);
+      const labelled = (label: string) =>
+        [...doc.querySelectorAll("span")].find((s) => sanitizeText(s.textContent) === label)?.nextElementSibling;
+      const status = sanitizeText(labelled("الحالة")?.textContent);
+      // Only the series list and search lack the flag; the series page shows
+      // "+18 للبالغين" as its age rating and opens the mdgAgeGate dialog.
+      const adult =
+        /\+\s*18/.test(labelled("التقييم العمري")?.textContent ?? "") ||
+        doc.querySelector('[x-data="mdgAgeGate"]') !== null;
       const author = sanitizeText(doc.querySelector('a[href*="/people/author/"]')?.textContent);
       const cover = doc.querySelector('meta[property="og:image"]')?.getAttribute("content");
       const description = htmlToText(doc.querySelector('[x-ref="synContent"]')?.innerHTML);
@@ -232,6 +241,7 @@ export default function createSource(host: SourceHost): Source {
         meta: [],
         volumes: [{ id: 1, title: t.part(1), chapters }],
         contentType: "manga",
+        ...(adult ? { nsfw: true } : {}),
       };
     },
 
