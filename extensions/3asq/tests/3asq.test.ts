@@ -89,7 +89,7 @@ describe("3asq", () => {
     expect(novel.tags.length).toBeGreaterThan(0);
 
     const newest = novel.volumes[pages - 1];
-    expect(newest.chapters.map((c) => c.url)).toEqual(chapterLinks(chaptersT1));
+    expect(newest.chapters.map((c) => c.url)).toEqual(chapterLinks(chaptersT1).reverse());
     expect(newest.key).toBe("1");
     for (const v of novel.volumes.slice(0, -1)) expect(v.chapters).toEqual([]);
     expect(novel.volumes[0].key).toBe(String(pages));
@@ -108,7 +108,7 @@ describe("3asq", () => {
       key: "2",
       chapters: [],
     });
-    expect(chapters.map((c) => c.url)).toEqual(chapterLinks(chaptersT2));
+    expect(chapters.map((c) => c.url)).toEqual(chapterLinks(chaptersT2).reverse());
     expect(calls).toEqual([{ url: AJAX2, method: "POST", body: undefined }]);
   });
 
@@ -124,6 +124,21 @@ describe("3asq", () => {
     expect(decimal?.number).toBe(1155.5);
     expect(chapters.every((c) => c.number === parseChapterNumber(c.url.split("/").filter(Boolean).pop()!))).toBe(true);
     expect(new Set(chapters.map((c) => c.id)).size).toBe(chapters.length);
+  });
+
+  it("a premium chapter is parsed with a lock", async () => {
+    const li = (cls: string, n: number) =>
+      `<li class="wp-manga-chapter ${cls}"><a href="${SERIES}${n}/">${n}</a></li>`;
+    const host = createTestHost({ responses: { [AJAX1]: li("", 2) + li("premium", 1) } });
+    const chapters = await createSource(host).getVolumeChapters!(SERIES, {
+      id: 1,
+      title: "p",
+      key: "1",
+      chapters: [],
+    });
+    expect(chapters.map((c) => c.number)).toEqual([1, 2]);
+    expect(chapters[0].lock).toEqual({ reason: "locked", openUrl: `${SERIES}1/` });
+    expect(chapters[1].lock).toBeUndefined();
   });
 
   it("getChapterPages lists the reading images in order", async () => {

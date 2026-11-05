@@ -134,7 +134,8 @@ export function createMadaraSource(host: SourceHost, config: MadaraConfig): Sour
 
   async function chapterList(seriesUrl: string, page: number): Promise<{ html: string; chapters: SourceChapter[] }> {
     const resp = await request(ajaxUrl(seriesUrl, page), ajaxInit);
-    return { html: resp.text, chapters: parseChapters(resp.text) };
+    // The site lists newest first; volumes run oldest first, so chapters do too.
+    return { html: resp.text, chapters: parseChapters(resp.text).reverse() };
   }
 
   async function getChapterPages(chapter: SourceChapter) {
