@@ -40,6 +40,7 @@ import type { ExtensionManifest } from "./manifest";
 const REPO_ROOT = join(fileURLToPath(import.meta.url), "..", "..");
 const DEFAULT_EXTENSIONS_DIR = join(REPO_ROOT, "extensions");
 const DEFAULT_DIST_DIR = join(REPO_ROOT, "dist");
+const MANGA_THEMES_DIR = join(REPO_ROOT, "packages/manga-themes/src");
 const EXTENSION_API_ENTRY = join(REPO_ROOT, "packages/extension-api/src/index.ts");
 
 /** A bundle over this size almost certainly means a heavy dependency
@@ -193,7 +194,13 @@ async function bundleOne(
       minify: true,
       legalComments: "none",
       outfile: join(distDir, id, "index.js"),
-      alias: { "@riwaq/extension-api": EXTENSION_API_ENTRY },
+      // Subpaths (`@riwaq/manga-themes/<file>`) resolve through esbuild's
+      // alias prefix matching against the directory; the bare specifier
+      // needs the barrel file.
+      alias: {
+        "@riwaq/extension-api": EXTENSION_API_ENTRY,
+        "@riwaq/manga-themes": MANGA_THEMES_DIR,
+      },
       write: false,
     });
     contents = result.outputFiles[0].contents;

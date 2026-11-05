@@ -112,6 +112,29 @@ async function withTempDirs<T>(
   }
 }
 
+describe("runBuild with @riwaq/manga-themes", () => {
+  it("bundles an extension that imports @riwaq/manga-themes", async () => {
+    await withTempDirs(async ({ extensionsDir, distDir }) => {
+      writeFixtureExtension(extensionsDir, "fixture-manga", {
+        sourceBody: `import { parseChapterNumber } from "@riwaq/manga-themes";
+import { mangaStrings } from "@riwaq/manga-themes/strings";
+
+export default function createSource() {
+  return { n: parseChapterNumber("Chapter 7.5"), s: mangaStrings("en").latest };
+}
+`,
+      });
+      await runBuild({ extensionsDir, distDir });
+      const bundlePath = join(distDir, "fixture-manga", "index.js");
+      expect(readFileSync(bundlePath, "utf8")).not.toMatch(/@riwaq\//);
+      expect(importDefaultAndCall(bundlePath)).toEqual({
+        type: "function",
+        result: { n: 7.5, s: "Latest updates" },
+      });
+    });
+  });
+});
+
 describe("runBuild (end-to-end against real fixtures)", () => {
   let tmpRoot: string;
   let extensionsDir: string;

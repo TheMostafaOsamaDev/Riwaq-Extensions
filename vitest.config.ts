@@ -66,6 +66,9 @@ export default defineConfig({
       // own exact-match entry pointing at testing.ts, since the package's
       // `./testing` export condition (for real consumers outside vitest)
       // isn't something this alias map understands.
+      // Prefix match onto the src directory: the bare specifier resolves to
+      // its index.ts, `@riwaq/manga-themes/<file>` to <file>.ts.
+      "@riwaq/manga-themes": new URL("./packages/manga-themes/src", import.meta.url).pathname,
       "@riwaq/extension-api/testing": new URL("./packages/extension-api/src/testing.ts", import.meta.url)
         .pathname,
       "@riwaq/extension-api": new URL("./packages/extension-api/src/index.ts", import.meta.url).pathname,
