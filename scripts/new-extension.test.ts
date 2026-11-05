@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { API_VERSION, loadManifest } from "./manifest";
+import { loadManifest } from "./manifest";
 import { runBuild } from "./build";
 import { scaffoldExtension } from "./new-extension";
 
@@ -54,7 +54,8 @@ describe("scaffoldExtension", () => {
       fillInManifestPlaceholders(dir);
       const manifest = loadManifest(dir);
       expect(manifest.id).toBe("my-site");
-      expect(manifest.apiVersion).toBe(API_VERSION);
+      expect(manifest.apiVersion).toBe(1);
+      expect(manifest.contentTypes).toEqual(["novel"]);
       expect(manifest.icon).toBe("icon.png");
       expect(manifest.description.en.length).toBeGreaterThan(0);
     });

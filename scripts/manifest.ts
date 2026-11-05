@@ -167,7 +167,7 @@ export function validateManifest(raw: unknown, source: string): ExtensionManifes
     if (
       !Array.isArray(list) ||
       list.length === 0 ||
-      !list.every((t): t is ContentType => CONTENT_TYPES.includes(t as ContentType)) ||
+      !list.every((t) => CONTENT_TYPES.includes(t as ContentType)) ||
       new Set(list).size !== list.length
     ) {
       fail(

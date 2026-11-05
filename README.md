@@ -101,6 +101,9 @@ implemented`, a starter `src/strings.ts`, and a test file already using
 `createTestHost`. Run `pnpm typecheck && pnpm test` right now and both pass — the
 scaffold compiles, and its stub test file exercises every "not implemented" method.
 
+A new extension starts at `"apiVersion": 1` and is a novel extension. A manga extension
+sets `"apiVersion": 2` and `"contentTypes": ["manga"]` in its manifest itself.
+
 `pnpm validate` and `pnpm build` deliberately do **not** pass yet: the manifest's
 `name`, `author` and `description` still carry literal `"TODO: ..."` placeholders, and
 `scripts/manifest.ts` refuses any manifest field that still contains one. Without that
