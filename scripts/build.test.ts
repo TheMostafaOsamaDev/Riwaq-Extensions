@@ -192,6 +192,34 @@ describe("runBuild (end-to-end against real fixtures)", () => {
   });
 });
 
+describe("index fields for contract v2", () => {
+  it("index entries carry contentTypes and requestsPerSecond", async () => {
+    await withTempDirs(async ({ extensionsDir, distDir }) => {
+      writeFixtureExtension(extensionsDir, "fixture-manga", {
+        manifestOverrides: { contentTypes: ["manga"], requestsPerSecond: 1 },
+      });
+      writeFixtureExtension(extensionsDir, "fixture-novel", {
+        manifestOverrides: { apiVersion: 1 },
+      });
+      const { index } = await runBuild({ extensionsDir, distDir });
+      const manga = index.extensions.find((e) => e.id === "fixture-manga")!;
+      expect(manga.contentTypes).toEqual(["manga"]);
+      expect(manga.requestsPerSecond).toBe(1);
+      const novel = index.extensions.find((e) => e.id === "fixture-novel")!;
+      expect(novel.contentTypes).toEqual(["novel"]);
+      expect("requestsPerSecond" in novel).toBe(false);
+    });
+  });
+
+  it("the index's top-level apiVersion is 2", async () => {
+    await withTempDirs(async ({ extensionsDir, distDir }) => {
+      writeFixtureExtension(extensionsDir, "fixture-a");
+      const { index } = await runBuild({ extensionsDir, distDir });
+      expect(index.apiVersion).toBe(2);
+    });
+  });
+});
+
 describe("runBuild with zero extensions present", () => {
   it("writes an empty, well-formed catalogue instead of failing", async () => {
     await withTempDirs(async ({ extensionsDir, distDir }) => {
@@ -292,6 +320,7 @@ describe("assertNoDuplicateIds", () => {
       version: "1.0.0",
       apiVersion: API_VERSION,
       language: "en",
+      contentTypes: ["novel"],
       baseUrl: "https://example.com",
       icon: "icon.png",
       description: { en: "fixture" },

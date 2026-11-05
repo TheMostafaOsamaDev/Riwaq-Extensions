@@ -24,6 +24,7 @@ import {
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadManifest, API_VERSION } from "./manifest";
+import type { ContentType } from "../packages/extension-api/src/index";
 import type { ExtensionManifest } from "./manifest";
 
 // Deliberately not `fileURLToPath(new URL("..", import.meta.url))`: under
@@ -57,6 +58,9 @@ export interface RepoIndexEntry {
   baseUrl: string;
   description: Record<string, string>;
   author: string;
+  contentTypes: ContentType[];
+  /** Present only when the manifest sets it. */
+  requestsPerSecond?: number;
   /** Relative to index.min.json itself, e.g. "cenele/index.js" — never a
    *  leading slash or an absolute URL, so a fork or mirror of this repo
    *  works without editing any URL. */
@@ -230,6 +234,10 @@ async function bundleOne(
     baseUrl: manifest.baseUrl,
     description: manifest.description,
     author: manifest.author,
+    contentTypes: manifest.contentTypes,
+    ...(manifest.requestsPerSecond !== undefined && {
+      requestsPerSecond: manifest.requestsPerSecond,
+    }),
     code: `${id}/index.js`,
     icon: `${id}/icon.png`,
     sha256,

@@ -36,7 +36,7 @@ function omit(obj: Record<string, unknown>, key: string): Record<string, unknown
 describe("validateManifest", () => {
   it("accepts a fully valid manifest", () => {
     const raw = validRawManifest();
-    expect(validateManifest(raw, "cenele")).toEqual(raw);
+    expect(validateManifest(raw, "cenele")).toEqual({ ...raw, contentTypes: ["novel"] });
   });
 
   it("rejects a missing id", () => {
@@ -73,10 +73,53 @@ describe("validateManifest", () => {
     );
   });
 
-  it("rejects an apiVersion that is not the integer 1", () => {
-    expect(() => validateManifest(validRawManifest({ apiVersion: 2 }), "cenele")).toThrow(
-      /"apiVersion"/,
-    );
+  it("accepts apiVersion 1 and 2", () => {
+    expect(validateManifest(validRawManifest({ apiVersion: 1 }), "cenele").apiVersion).toBe(1);
+    expect(validateManifest(validRawManifest({ apiVersion: 2 }), "cenele").apiVersion).toBe(2);
+  });
+
+  it("rejects apiVersion 3 and 0", () => {
+    for (const apiVersion of [3, 0]) {
+      expect(() => validateManifest(validRawManifest({ apiVersion }), "cenele")).toThrow(
+        /"apiVersion"/,
+      );
+    }
+  });
+
+  it("defaults contentTypes to novel", () => {
+    expect(validateManifest(validRawManifest(), "cenele").contentTypes).toEqual(["novel"]);
+  });
+
+  it("accepts a manga extension on apiVersion 2", () => {
+    const m = validateManifest(validRawManifest({ contentTypes: ["manga"] }), "cenele");
+    expect(m.contentTypes).toEqual(["manga"]);
+  });
+
+  it("rejects a manga extension on apiVersion 1", () => {
+    expect(() =>
+      validateManifest(validRawManifest({ apiVersion: 1, contentTypes: ["manga"] }), "cenele"),
+    ).toThrow(/"apiVersion"/);
+  });
+
+  it("rejects an empty or unknown contentTypes", () => {
+    for (const contentTypes of [[], ["comic"], ["novel", "novel"], "novel"]) {
+      expect(() => validateManifest(validRawManifest({ contentTypes }), "cenele")).toThrow(
+        /"contentTypes"/,
+      );
+    }
+  });
+
+  it("accepts requestsPerSecond in (0, 10] and rejects 0, -1, 11 and \"1\"", () => {
+    for (const requestsPerSecond of [0.5, 1, 10]) {
+      expect(
+        validateManifest(validRawManifest({ requestsPerSecond }), "cenele").requestsPerSecond,
+      ).toBe(requestsPerSecond);
+    }
+    for (const requestsPerSecond of [0, -1, 11, "1"]) {
+      expect(() => validateManifest(validRawManifest({ requestsPerSecond }), "cenele")).toThrow(
+        /"requestsPerSecond"/,
+      );
+    }
   });
 
   it("rejects an apiVersion given as a numeric string", () => {
