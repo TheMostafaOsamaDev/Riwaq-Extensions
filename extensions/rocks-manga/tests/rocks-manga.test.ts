@@ -93,6 +93,28 @@ describe("rocks-manga", () => {
     expect(sections[0].cards[0].title).toBe("Juujika no Rokunin");
   });
 
+  it("cards carry nsfw from the flight data's per-item isNsfw", async () => {
+    const text = flight(browse);
+    const items = JSON.parse(
+      text.slice(text.indexOf('"cards":[') + 8).replace(/^(\[(?:[^[\]]|\[[^\]]*\])*\]).*$/s, "$1"),
+    ) as Array<{ slug: string; isNsfw: boolean }>;
+    expect(items.length).toBeGreaterThan(0);
+    const [home] = await createSource(createTestHost({ responses })).getHomeSections();
+    for (const card of home.cards) {
+      const item = items.find((i) => card.url === `${SITE}/manga/${i.slug}`)!;
+      expect(card.nsfw).toBe(item.isNsfw);
+    }
+    const html = page(
+      `{"cards":[{"slug":"a","title":"A","isNsfw":false},{"slug":"b","title":"B","isNsfw":true}]}`,
+    ).replace(
+      "</body>",
+      `<div class="unit"><a class="poster" href="/manga/a"></a><div class="info"><a href="/manga/a">A</a></div></div>` +
+        `<div class="unit"><a class="poster" href="/manga/b"></a><div class="info"><a href="/manga/b">B</a></div></div></body>`,
+    );
+    const r = await createSource(createTestHost({ responses: { "/browse?": html } })).search("x", 1);
+    expect(r.cards.map((c) => [c.title, c.nsfw])).toEqual([["A", false], ["B", true]]);
+  });
+
   it("search builds the browse URL and reads hasMore from rel=next", async () => {
     const calls: Array<{ url: string; method: string; body?: string }> = [];
     const source = createSource(createTestHost({ responses, calls }));

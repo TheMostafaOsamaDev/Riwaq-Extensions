@@ -111,18 +111,33 @@ export default function createSource(host: SourceHost): Source {
   const absolute = (path: string, origin: string) => (/^https?:\/\//.test(path) ? path : origin + path);
 
   async function browse(url: string): Promise<{ cards: NovelCard[]; hasMore: boolean }> {
-    const doc = parseHtml((await request(url)).text);
+    const html = (await request(url)).text;
+    const doc = parseHtml(html);
+    // Per-item `isNsfw` rides in the flight data's `cards` list, keyed by slug.
+    const nsfwBySlug = new Map<string, boolean>();
+    const flight = flightText(html);
+    const at = flight.indexOf('"cards":[');
+    const listed = at < 0 ? undefined : jsonAt(flight, at + '"cards":'.length);
+    if (Array.isArray(listed)) {
+      for (const item of listed as Array<{ slug?: unknown; isNsfw?: unknown }>) {
+        if (item && typeof item.slug === "string" && typeof item.isNsfw === "boolean") {
+          nsfwBySlug.set(item.slug, item.isNsfw);
+        }
+      }
+    }
     const cards: NovelCard[] = [];
     for (const unit of doc.querySelectorAll(".unit")) {
       const href = unit.querySelector("a.poster")?.getAttribute("href") ?? "";
       const title = sanitizeText(unit.querySelector(".info > a")?.textContent);
       if (!href || !title) continue;
       const cover = unit.querySelector("img")?.getAttribute("src");
+      const nsfw = nsfwBySlug.get(slugOf(absolute(href, BASE_URL)));
       cards.push({
         url: absolute(href, BASE_URL),
         title,
         coverUrl: cover ? absolute(cover, API_URL) : undefined,
         contentType: "manga",
+        ...(nsfw === undefined ? {} : { nsfw }),
       });
     }
     return { cards, hasMore: doc.querySelector("a.page-link[rel=next]") !== null };
