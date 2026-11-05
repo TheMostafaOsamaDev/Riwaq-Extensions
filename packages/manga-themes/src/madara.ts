@@ -5,8 +5,16 @@
 //     and `.c-tabs-item__content` rows).
 //   - A series page only shows its newest few chapters. The whole list comes
 //     from `POST <series>/ajax/chapters/?t=<n>`, 50 chapters per page, newest
-//     first, with a pager whose highest `data-page` is the page count. Each
-//     ajax page is one lazy volume, so a long series opens fast.
+//     first, with a pager whose highest `data-page` is the page count P (on the
+//     last page itself, the current page).
+//   - Volumes are lazy and counted from the OLDEST chapter: volume k is
+//     chapters 50(k-1)+1 … 50k from the oldest, whatever the site has added
+//     since, so a release never moves a chapter between volumes (the ajax
+//     pages, counted from the newest, all shift by one). The total is
+//     50(P-1) + the length of page P, so getNovel reads page 1 (for P and the
+//     newest volume) and page P. A volume spans one or two ajax pages; which
+//     ones depends on the current length of page P, so expanding a volume
+//     reads page P again first.
 //   - A chapter page lists its images under `.reading-content`.
 //   - An adult series carries an "18+" `.manga-title-badges.adult` on its
 //     cards and beside its `.post-title`; those set `nsfw`.
@@ -102,9 +110,10 @@ export function createMadaraSource(host: SourceHost, config: MadaraConfig): Sour
     );
   }
 
-  function parseChapters(html: string): SourceChapter[] {
+  /** One ajax page's chapters, newest first, as the site lists them. */
+  function parseChapters(doc: Document): SourceChapter[] {
     const chapters: SourceChapter[] = [];
-    for (const li of parseHtml(html).querySelectorAll("li.wp-manga-chapter")) {
+    for (const li of doc.querySelectorAll("li.wp-manga-chapter")) {
       const a = li.querySelector("a");
       const href = a?.getAttribute("href");
       if (!href) continue;
@@ -126,10 +135,80 @@ export function createMadaraSource(host: SourceHost, config: MadaraConfig): Sour
   const ajaxInit: FetchOptions = { method: "POST", headers: { "X-Requested-With": "XMLHttpRequest" } };
   const withSlash = (url: string) => (url.split(/[?#]/)[0].endsWith("/") ? url.split(/[?#]/)[0] : url.split(/[?#]/)[0] + "/");
 
-  async function chapterList(seriesUrl: string, page: number): Promise<{ html: string; chapters: SourceChapter[] }> {
-    const resp = await request(ajaxUrl(seriesUrl, page), ajaxInit);
+  /** One ajax page: its chapters newest first, and the highest page its pager names. */
+  interface ChapterPage {
+    chapters: SourceChapter[];
+    lastPage: number;
+  }
+  type Pages = Map<number, ChapterPage>;
+
+  async function chapterPage(seriesUrl: string, page: number): Promise<ChapterPage> {
+    const doc = parseHtml((await request(ajaxUrl(seriesUrl, page), ajaxInit)).text);
+    const named = [...doc.querySelectorAll("[data-page]")]
+      .map((el) => Number(el.getAttribute("data-page")))
+      .filter((n) => Number.isInteger(n) && n > 0);
+    return { chapters: parseChapters(doc), lastPage: Math.max(page, ...named) };
+  }
+
+  async function pagesInto(seriesUrl: string, pages: Pages, wanted: number[]): Promise<void> {
+    const missing = wanted.filter((p) => !pages.has(p));
+    const fetched = await Promise.all(missing.map((p) => chapterPage(seriesUrl, p)));
+    missing.forEach((p, i) => pages.set(p, fetched[i]));
+  }
+
+  /** The page count each series had when last read; a hint only, since every
+   *  50th release adds a page. It saves reading page 1 to find page P. */
+  const lastPageHint = new Map<string, number>();
+
+  /** The chapter total, from page P read now. `pages` gathers what was read. */
+  async function chapterTotal(seriesUrl: string, pages: Pages): Promise<number> {
+    let last = pages.get(1)?.lastPage ?? lastPageHint.get(seriesUrl);
+    // A stale hint costs one hop: page P's pager names the new last page.
+    for (let hop = 0; hop < 4; hop++) {
+      if (last === undefined) {
+        await pagesInto(seriesUrl, pages, [1]);
+        last = pages.get(1)!.lastPage;
+      }
+      await pagesInto(seriesUrl, pages, [last]);
+      const page = pages.get(last)!;
+      if (page.lastPage > last) {
+        last = page.lastPage;
+        continue;
+      }
+      if (page.chapters.length === 0 && last > 1 && !pages.has(1)) {
+        // The hint is past the end (chapters were removed): ask page 1.
+        last = undefined;
+        continue;
+      }
+      lastPageHint.set(seriesUrl, last);
+      return CHAPTERS_PER_PAGE * (last - 1) + page.chapters.length;
+    }
+    throw new Error(`${id}: ${seriesUrl} has a chapter pager that keeps moving`);
+  }
+
+  /** Chapters k·50-49 … k·50 counted from the oldest (fewer in the newest
+   *  volume), oldest first, from the one or two ajax pages that hold them. */
+  async function volumeChapters(seriesUrl: string, k: number, total: number, pages: Pages): Promise<SourceChapter[]> {
+    // Positions counted from the newest, 1-based, as the pages list them.
+    const newestEnd = total - CHAPTERS_PER_PAGE * (k - 1);
+    if (newestEnd < 1) return [];
+    const newestStart = Math.max(1, newestEnd - CHAPTERS_PER_PAGE + 1);
+    const first = Math.ceil(newestStart / CHAPTERS_PER_PAGE);
+    const lastPage = Math.ceil(newestEnd / CHAPTERS_PER_PAGE);
+    const wanted = first === lastPage ? [first] : [first, lastPage];
+    await pagesInto(seriesUrl, pages, wanted);
+    const pageCount = Math.ceil(total / CHAPTERS_PER_PAGE);
+    for (const p of wanted) {
+      const n = pages.get(p)!.chapters.length;
+      // Every page but the last is full; anything else breaks the arithmetic.
+      if (p < pageCount && n !== CHAPTERS_PER_PAGE) {
+        throw new Error(`${id}: ${seriesUrl} chapter page ${p} lists ${n} chapters, not ${CHAPTERS_PER_PAGE}`);
+      }
+    }
+    const newestFirst = wanted.flatMap((p) => pages.get(p)!.chapters);
+    const offset = CHAPTERS_PER_PAGE * (first - 1);
     // The site lists newest first; volumes run oldest first, so chapters do too.
-    return { html: resp.text, chapters: parseChapters(resp.text).reverse() };
+    return newestFirst.slice(newestStart - offset - 1, newestEnd - offset).reverse();
   }
 
   async function getChapterPages(chapter: SourceChapter) {
@@ -186,29 +265,26 @@ export function createMadaraSource(host: SourceHost, config: MadaraConfig): Sour
 
     async getNovel(url): Promise<SourceNovel> {
       const seriesUrl = withSlash(url);
-      const [series, first] = await Promise.all([request(seriesUrl), chapterList(seriesUrl, 1)]);
+      const [series, first] = await Promise.all([request(seriesUrl), chapterPage(seriesUrl, 1)]);
       const doc = parseHtml(series.text);
       const title = sanitizeText(doc.querySelector(".post-title h1")?.textContent);
       if (!title) throw new Error(`${id}: ${seriesUrl} is not a series page`);
       const cover = firstAttr(doc.querySelector(".summary_image img"), COVER_ATTRS);
 
-      const pager = [...parseHtml(first.html).querySelectorAll("[data-page]")].map((el) =>
-        Number(el.getAttribute("data-page")),
-      );
-      const pageCount = Math.max(1, ...pager.filter(Number.isFinite));
-
-      // One volume per ajax page, oldest first: volume i holds page
-      // pageCount - i + 1, so the last volume is the newest chapters.
+      const pages: Pages = new Map([[1, first]]);
+      const total = await chapterTotal(seriesUrl, pages);
+      const count = Math.max(1, Math.ceil(total / CHAPTERS_PER_PAGE));
+      // Volume k is the k-th fifty from the oldest; only the newest is filled,
+      // from page 1 (it is the newest `total - 50(count-1)` chapters).
+      const newest = await volumeChapters(seriesUrl, count, total, pages);
       const volumes: SourceVolume[] = [];
-      for (let i = 1; i <= pageCount; i++) {
-        const page = pageCount - i + 1;
-        const newest = page === 1;
+      for (let k = 1; k <= count; k++) {
         volumes.push({
-          id: i,
-          title: t.part(i),
-          key: String(page),
-          chapters: newest ? first.chapters : [],
-          chapterCount: newest ? first.chapters.length : page === pageCount ? undefined : CHAPTERS_PER_PAGE,
+          id: k,
+          title: t.part(k),
+          key: String(k),
+          chapters: k === count ? newest : [],
+          chapterCount: k === count ? total - CHAPTERS_PER_PAGE * (count - 1) : CHAPTERS_PER_PAGE,
         });
       }
 
@@ -235,11 +311,14 @@ export function createMadaraSource(host: SourceHost, config: MadaraConfig): Sour
     },
 
     async getVolumeChapters(novelUrl, volume): Promise<SourceChapter[]> {
-      const page = Number(volume.key);
-      if (!Number.isInteger(page) || page < 1) {
-        throw new Error(`${id}: volume "${volume.title}" has no page key`);
+      const k = /^\d+$/.test(volume.key ?? "") ? Number(volume.key) : NaN;
+      if (!Number.isSafeInteger(k) || k < 1) {
+        throw new Error(`${id}: volume "${volume.title}" has no part key`);
       }
-      return (await chapterList(withSlash(novelUrl), page)).chapters;
+      const seriesUrl = withSlash(novelUrl);
+      const pages: Pages = new Map();
+      const total = await chapterTotal(seriesUrl, pages);
+      return volumeChapters(seriesUrl, k, total, pages);
     },
 
     getChapterPages,
