@@ -102,7 +102,8 @@ export default function createSource(host: SourceHost): Source {
       const number = parseChapterNumber(numberAttr) ?? parseChapterNumber(label);
       if (number === undefined && !hasUrl) continue;
 
-      const url = hasUrl ? abs(rawHref, seriesUrl) : seriesUrl;
+      // A locked chapter has no page of its own; the fragment keeps its url unique.
+      const url = hasUrl ? abs(rawHref, seriesUrl) : `${seriesUrl}#chapter-${number}`;
       let id = chapterIdFromUrl(hasUrl ? url : `${seriesUrl}#${number}`);
       const siteId = Number(link?.getAttribute("data-bs-whatever"));
       if (locked && Number.isInteger(siteId) && siteId > 0 && siteId < 2 ** 31) id = siteId;
@@ -175,8 +176,9 @@ export default function createSource(host: SourceHost): Source {
 
     async getNovel(url): Promise<SourceNovel> {
       const seriesUrl = url.split(/[?#]/)[0];
-      let doc = parseHtml((await request(seriesUrl)).text);
-      const title = sanitizeText(doc.querySelector("div.author-info-title h1")?.textContent);
+      const firstDoc = parseHtml((await request(seriesUrl)).text);
+      let doc = firstDoc;
+      const title = sanitizeText(firstDoc.querySelector("div.author-info-title h1")?.textContent);
       if (!title) throw new Error(`${ID}: ${url} is not a series page`);
 
       const chapters: SourceChapter[] = [];
@@ -194,15 +196,15 @@ export default function createSource(host: SourceHost): Source {
       chapters.reverse();
 
       const infoValue = (label: string) => {
-        for (const row of doc.querySelectorAll(".full-list-info")) {
+        for (const row of firstDoc.querySelectorAll(".full-list-info")) {
           const [head, value] = row.querySelectorAll("small");
           if (head && value && sanitizeText(head.textContent).startsWith(label)) return sanitizeText(value.textContent);
         }
         return "";
       };
       const artist = infoValue("الرسام");
-      const cover = doc.querySelector("div.text-right img")?.getAttribute("src");
-      const description = htmlToText(doc.querySelector("div.review-content")?.innerHTML);
+      const cover = firstDoc.querySelector("div.text-right img")?.getAttribute("src");
+      const description = htmlToText(firstDoc.querySelector("div.review-content")?.innerHTML);
       return {
         title,
         author: artist && artist !== "غير معروف" ? artist : "",
@@ -210,7 +212,7 @@ export default function createSource(host: SourceHost): Source {
         direction: "rtl",
         coverUrl: cover ? abs(cover, seriesUrl) : undefined,
         description: description || undefined,
-        tags: [...doc.querySelectorAll("div.review-author-info a")].map((a) => sanitizeText(a.textContent)).filter(Boolean),
+        tags: [...firstDoc.querySelectorAll("div.review-author-info a")].map((a) => sanitizeText(a.textContent)).filter(Boolean),
         status: infoValue("الحالة") || undefined,
         meta: [],
         volumes: [{ id: 1, title: t.part(1), chapters }],

@@ -157,9 +157,11 @@ describe("team-x", () => {
     expect(locked[0]).toMatchObject({
       id: siteId,
       number: Number(lockedCards[0].getAttribute("data-number")),
-      url: LOCKED_SERIES,
+      url: `${LOCKED_SERIES}#chapter-${Number(lockedCards[0].getAttribute("data-number"))}`,
       lock: { reason: "points", openUrl: LOCKED_SERIES },
     });
+    for (const c of locked) expect(c.lock!.openUrl).toBe(LOCKED_SERIES);
+    expect(new Set(chapters.map((c) => c.url)).size).toBe(chapters.length);
     // The free ones keep real chapter URLs.
     const free = chapters.filter((c) => !c.lock);
     expect(free.length).toBeGreaterThan(0);
