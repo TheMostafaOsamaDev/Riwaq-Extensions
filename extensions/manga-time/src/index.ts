@@ -9,7 +9,9 @@
 //   - A series is `content.getSeriesBySlug {slug}`; its chapters are
 //     `content.getChapters {seriesId, limit: -1}`, all of them at once.
 //   - Pages are `content.getChapterPages {seriesSlug, chapterNumber}`, which
-//     takes an integer: a decimal chapter can't be opened through it.
+//     takes an integer: a decimal chapter can't be opened through it. The
+//     number is read from the chapter URL (`…/chapter/<n>`), since a chapter
+//     the app restores from its snapshot has no `number`.
 //   - Site URLs are `<site>/<type>/<slug>` (type: manga | manhwa | manhua) and
 //     `<site>/<type>/<slug>/chapter/<n>`. Chapter ids are 24-hex ObjectIds, so
 //     ours come from the URL.
@@ -138,9 +140,17 @@ export default function createSource(host: SourceHost): Source {
     }
   }
 
+  /** The `<n>` of `…/chapter/<n>`, else `chapter.number`. The URL comes first:
+   *  a chapter the app restores from its snapshot carries no `number`. */
+  function chapterNumberOf(chapter: SourceChapter): number | undefined {
+    const segment = /\/chapter\/([^/?#]+)/.exec(chapter.url)?.[1]?.trim();
+    const n = segment ? Number(segment) : NaN;
+    return Number.isFinite(n) ? n : chapter.number;
+  }
+
   async function getChapterPages(chapter: SourceChapter) {
     if (chapter.lock) throw lockedError(ID, chapter);
-    const number = chapter.number;
+    const number = chapterNumberOf(chapter);
     if (typeof number !== "number" || !Number.isInteger(number)) {
       throw new Error(`${ID}: decimal chapter numbers aren't supported by the site's reader`);
     }

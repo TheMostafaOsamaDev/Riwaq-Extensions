@@ -172,6 +172,28 @@ describe("manga-time", () => {
     expect(calls).toEqual([]);
   });
 
+  it("a chapter restored without its number reads it from the url", async () => {
+    // The app hands chapters back from its snapshot as {id, title, url, lines}.
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(createTestHost({ responses, calls }));
+    const res = await source.getChapterPages!({ id: 3, title: "12", url: `${SERIES_URL}/chapter/12`, lines: [] });
+    expect(calls.map((c) => c.url)).toEqual([
+      trpc("content.getChapterPages", { seriesSlug: "the-forgotten-field", chapterNumber: 12 }),
+    ]);
+    expect(res.pages).toHaveLength(pagesData.pages.length);
+    // The url wins over a number that disagrees, and a decimal one still refuses.
+    calls.length = 0;
+    await source.getChapterPages!({ id: 3, title: "12", url: `${SERIES_URL}/chapter/12`, number: 7, lines: [] });
+    expect(calls[0].url).toBe(trpc("content.getChapterPages", { seriesSlug: "the-forgotten-field", chapterNumber: 12 }));
+    await expect(
+      source.getChapterPages!({ id: 4, title: "10.5", url: `${SERIES_URL}/chapter/10.5`, lines: [] }),
+    ).rejects.toThrow("manga-time: decimal chapter numbers aren't supported by the site's reader");
+    // No /chapter/<n> segment: the number field is the fallback.
+    calls.length = 0;
+    await source.getChapterPages!({ id: 5, title: "1", url: `${SERIES_URL}`, number: 1, lines: [] });
+    expect(calls[0].url).toBe(trpc("content.getChapterPages", { seriesSlug: "the-forgotten-field", chapterNumber: 1 }));
+  });
+
   it("canHandle matches the site's hosts only", () => {
     const source = createSource(createTestHost());
     expect(source.canHandle(SERIES_URL)).toBe(true);
