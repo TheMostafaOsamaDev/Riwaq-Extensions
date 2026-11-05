@@ -121,6 +121,13 @@ describe("onma", () => {
     expect(chapters.some((c) => c.lock)).toBe(false);
   });
 
+  it("an Arabic chapter slug parses to its own number", async () => {
+    const a = (slug: string) => `<li><h5 class="chapter-title-rtl"><a href="${SERIES}/${slug}">${slug}</a></h5></li>`;
+    const html = `<div class="single-managa"><div class="panel-heading">T</div></div><ul class="chapters">${a("١٢")}${a("الفصل-12")}</ul>`;
+    const novel = await createSource(createTestHost({ responses: { [SERIES]: html } })).getNovel(SERIES);
+    expect(novel.volumes[0].chapters.map((c) => c.number)).toEqual([12, 12]);
+  });
+
   it("series details", async () => {
     const novel = await createSource(createTestHost({ responses })).getNovel(SERIES);
     expect(novel.title).toBe("One Piece");

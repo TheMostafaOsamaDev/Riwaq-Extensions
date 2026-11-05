@@ -143,6 +143,16 @@ describe("lava-scans", () => {
     expect(chapters[2].title).toBe("Chapter 2.5");
   });
 
+  it("an Arabic chapter slug parses to its own number", async () => {
+    // No data-num, so the number comes from the (percent-encoded) URL.
+    const li = (slug: string) =>
+      `<li><div class="eph-num"><a href="https://lavascans.com/manga/x/${slug}/"><span class="chapternum">${slug}</span></a></div></li>`;
+    const html = `<html><body><h1 class="entry-title">T</h1><div id="chapterlist"><ul>${li("١٢")}${li("الفصل-12")}</ul></div></body></html>`;
+    const source = createSource(createTestHost({ responses: { [SERIES]: html } }));
+    const chapters = (await source.getNovel(SERIES)).volumes[0].chapters;
+    expect(chapters.map((c) => c.number)).toEqual([12, 12]);
+  });
+
   it("stock MangaThemesia cards are read from .bsx", async () => {
     const html = `<div class="bsx"><a href="https://lavascans.com/manga/a/" title="A Title"><div class="limit"><img src="https://lavascans.com/c.jpg"></div><div class="bigor"><div class="tt"> A Title </div></div></a></div>`;
     const res = await createSource(createTestHost({ responses: { "?s=": html } })).search("a", 1);

@@ -22,7 +22,7 @@ import {
   type SourceSection,
   type SourceVolume,
 } from "@riwaq/extension-api";
-import { chapterIdFromUrl, createCheckedRequest, lockedError, pagesAsLines, parseChapterNumber } from "./helpers";
+import { chapterIdFromUrl, chapterNumberFromUrl, createCheckedRequest, lockedError, pagesAsLines } from "./helpers";
 import { mangaStrings } from "./strings";
 
 export interface MadaraConfig {
@@ -102,12 +102,11 @@ export function createMadaraSource(host: SourceHost, config: MadaraConfig): Sour
       const href = a?.getAttribute("href");
       if (!href) continue;
       const url = abs(href);
-      const slug = url.split(/[?#]/)[0].split("/").filter(Boolean).pop() ?? "";
       const chapter: SourceChapter = {
         id: chapterIdFromUrl(url),
         title: sanitizeText(a?.textContent),
         url,
-        number: parseChapterNumber(slug),
+        number: chapterNumberFromUrl(url),
         lines: [],
       };
       if (isLocked(li)) chapter.lock = { reason: "locked", openUrl: url };

@@ -26,6 +26,21 @@ export function parseChapterNumber(text: string): number | undefined {
   return Number(m[2] === undefined ? m[1] : `${m[1]}.${m[2]}`);
 }
 
+/** The chapter number in a chapter URL's last path segment. An absolute URL
+ *  carries that segment percent-encoded (`الفصل-12` is `%D8%A7…-12`, whose
+ *  escapes would read as 8), so it is decoded first; an invalid escape leaves
+ *  the raw text. */
+export function chapterNumberFromUrl(url: string): number | undefined {
+  const segment = url.split(/[?#]/)[0].split("/").filter(Boolean).pop() ?? "";
+  let text = segment;
+  try {
+    text = decodeURIComponent(segment);
+  } catch {
+    // Keep the raw segment.
+  }
+  return parseChapterNumber(text);
+}
+
 /** FNV-1a 32-bit over the URL's UTF-16 code units, masked to 31 bits; never 0. */
 export function chapterIdFromUrl(url: string): number {
   let h = 0x811c9dc5;

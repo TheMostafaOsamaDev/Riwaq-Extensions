@@ -23,7 +23,7 @@ import {
   type SourceSearchResult,
   type SourceSection,
 } from "@riwaq/extension-api";
-import { chapterIdFromUrl, createCheckedRequest, lockedError, pagesAsLines, parseChapterNumber } from "./helpers";
+import { chapterIdFromUrl, chapterNumberFromUrl, createCheckedRequest, lockedError, pagesAsLines } from "./helpers";
 import { mangaStrings } from "./strings";
 
 export interface ThemesiaConfig {
@@ -115,7 +115,6 @@ export function createThemesiaSource(host: SourceHost, config: ThemesiaConfig): 
       const href = a?.getAttribute("href");
       if (!href) continue;
       const url = abs(href);
-      const slug = url.split(/[?#]/)[0].split("/").filter(Boolean).pop() ?? "";
       const label = sanitizeText(
         li.querySelector(".chapternum, .ch-num")?.textContent || a?.textContent,
       );
@@ -128,7 +127,7 @@ export function createThemesiaSource(host: SourceHost, config: ThemesiaConfig): 
         number:
           (li.getAttribute("data-num") ?? li.getAttribute("data-ch")) && Number.isFinite(attrNumber)
             ? attrNumber
-            : parseChapterNumber(slug),
+            : chapterNumberFromUrl(url),
         lines: [],
       };
       const locked =

@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { SourceChapter } from "@riwaq/extension-api";
 import { createTestHost } from "@riwaq/extension-api/testing";
-import { chapterIdFromUrl, createCheckedRequest, lockedError, pagesAsLines, parseChapterNumber, withoutQuery } from "./helpers";
+import {
+  chapterIdFromUrl,
+  chapterNumberFromUrl,
+  createCheckedRequest,
+  lockedError,
+  pagesAsLines,
+  parseChapterNumber,
+  withoutQuery,
+} from "./helpers";
 import { mangaStrings } from "./strings";
 
 describe("parseChapterNumber", () => {
@@ -16,6 +24,22 @@ describe("parseChapterNumber", () => {
     expect(parseChapterNumber("1155-5")).toBe(1155.5);
     expect(parseChapterNumber("")).toBeUndefined();
     expect(parseChapterNumber("FREE")).toBeUndefined();
+  });
+});
+
+describe("chapterNumberFromUrl", () => {
+  it("reads the last path segment, percent-decoded", () => {
+    // `new URL()` percent-encodes Arabic, so the raw segment of
+    // `/manga/x/الفصل-12/` is `%D8%A7…-12`: its escapes would read as 8.
+    expect(chapterNumberFromUrl(new URL("https://s.test/manga/x/الفصل-12/").href)).toBe(12);
+    expect(chapterNumberFromUrl(new URL("https://s.test/manga/x/١٢/").href)).toBe(12);
+    expect(chapterNumberFromUrl("https://s.test/manga/x/1155-5/")).toBe(1155.5);
+    expect(chapterNumberFromUrl("https://s.test/manga/x/7?style=list#top")).toBe(7);
+    expect(chapterNumberFromUrl("https://s.test/manga/x/")).toBeUndefined();
+  });
+
+  it("an invalid escape falls back to the raw segment", () => {
+    expect(chapterNumberFromUrl("https://s.test/manga/x/%zz-4")).toBe(4);
   });
 });
 

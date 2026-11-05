@@ -126,6 +126,20 @@ describe("3asq", () => {
     expect(new Set(chapters.map((c) => c.id)).size).toBe(chapters.length);
   });
 
+  it("an Arabic chapter slug parses to its own number", async () => {
+    // The href is percent-encoded once it is absolute; its escapes must not
+    // be read as digits.
+    const li = (slug: string) => `<li class="wp-manga-chapter"><a href="${SERIES}${slug}/">${slug}</a></li>`;
+    const host = createTestHost({ responses: { [AJAX1]: li("١٢") + li("الفصل-12") } });
+    const chapters = await createSource(host).getVolumeChapters!(SERIES, {
+      id: 1,
+      title: "p",
+      key: "1",
+      chapters: [],
+    });
+    expect(chapters.map((c) => c.number)).toEqual([12, 12]);
+  });
+
   it("a premium chapter is parsed with a lock", async () => {
     const li = (cls: string, n: number) =>
       `<li class="wp-manga-chapter ${cls}"><a href="${SERIES}${n}/">${n}</a></li>`;

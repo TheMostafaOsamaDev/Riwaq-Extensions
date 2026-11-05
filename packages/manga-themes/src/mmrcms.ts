@@ -32,11 +32,11 @@ import {
 } from "@riwaq/extension-api";
 import {
   chapterIdFromUrl,
+  chapterNumberFromUrl,
   createCheckedRequest,
   htmlToText,
   lockedError,
   pagesAsLines,
-  parseChapterNumber,
 } from "./helpers";
 import { mangaStrings } from "./strings";
 
@@ -189,7 +189,7 @@ export function createMmrcmsSource(host: SourceHost, config: MmrcmsConfig): Sour
           id: chapterIdFromUrl(chapterUrl),
           title: sanitizeText(a.textContent) || last,
           url: chapterUrl,
-          number: parseChapterNumber(last),
+          number: chapterNumberFromUrl(chapterUrl),
           lines: [],
         });
       }
