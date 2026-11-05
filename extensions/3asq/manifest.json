@@ -1,0 +1,15 @@
+{
+  "id": "3asq",
+  "name": "مانجا العاشق",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "contentTypes": ["manga"],
+  "language": "ar",
+  "baseUrl": "https://3asq.online",
+  "icon": "icon.png",
+  "description": {
+    "en": "Manga translated into Arabic, from 3asq.",
+    "ar": "مانجا مترجمة إلى العربية من موقع مانجا العاشق."
+  },
+  "author": "Riwaq"
+}

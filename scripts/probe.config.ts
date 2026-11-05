@@ -42,6 +42,8 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      // Manga extensions import the shared template package.
+      "@riwaq/manga-themes": new URL("../packages/manga-themes/src", import.meta.url).pathname,
       "@riwaq/extension-api/testing": new URL("../packages/extension-api/src/testing.ts", import.meta.url).pathname,
       "@riwaq/extension-api": new URL("../packages/extension-api/src/index.ts", import.meta.url).pathname,
     },

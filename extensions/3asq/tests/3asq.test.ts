@@ -1,0 +1,186 @@
+// Fixtures in tests/fixtures were captured live from https://3asq.online on
+// 2026-11-05 with a browser UA and `Accept-Language: ar,en;q=0.8`:
+//   home.html        GET  /manga/?m_orderby=latest
+//   series.html      GET  /manga/one-piece/
+//   chapters-t1.html POST /manga/one-piece/ajax/chapters/?t=1 (X-Requested-With)
+//   chapters-t2.html POST /manga/one-piece/ajax/chapters/?t=2
+//   chapter.html     GET  /manga/one-piece/1197/
+//   search.html      GET  /?s=one&post_type=wp-manga&paged=1
+import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { parseHtml } from "@riwaq/extension-api";
+import { createTestHost } from "@riwaq/extension-api/testing";
+import { parseChapterNumber } from "@riwaq/manga-themes";
+import createSource from "../src/index";
+
+// fileURLToPath rather than `new URL(rel, import.meta.url)`: see the note in
+// extensions/cenele/tests/cenele.test.ts (happy-dom patches global URL).
+const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
+const read = (name: string) => readFileSync(join(FIXTURES_DIR, name), "utf8");
+
+const homeHtml = read("home.html");
+const seriesHtml = read("series.html");
+const chaptersT1 = read("chapters-t1.html");
+const chaptersT2 = read("chapters-t2.html");
+const chapterHtml = read("chapter.html");
+const searchHtml = read("search.html");
+
+const SERIES = "https://3asq.online/manga/one-piece/";
+const AJAX1 = `${SERIES}ajax/chapters/?t=1`;
+const AJAX2 = `${SERIES}ajax/chapters/?t=2`;
+
+/** Order matters: the host answers the first key a URL contains. */
+const responses = {
+  [AJAX1]: chaptersT1,
+  [AJAX2]: chaptersT2,
+  "/1197/": chapterHtml,
+  "m_orderby=latest": homeHtml,
+  "m_orderby=views": homeHtml,
+  "post_type=wp-manga": searchHtml,
+  [SERIES]: seriesHtml,
+};
+
+function chapterLinks(html: string): string[] {
+  return [...parseHtml(html).querySelectorAll("li.wp-manga-chapter > a")].map(
+    (a) => a.getAttribute("href") ?? "",
+  );
+}
+
+describe("3asq", () => {
+  it("home sections are latest then popular", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const sections = await createSource(createTestHost({ responses, calls })).getHomeSections();
+    expect(sections.map((s) => s.id)).toEqual(["latest", "popular"]);
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://3asq.online/manga/?m_orderby=latest",
+      "https://3asq.online/manga/?m_orderby=views",
+    ]);
+    const expected = parseHtml(homeHtml).querySelectorAll(".page-item-detail").length;
+    expect(expected).toBeGreaterThan(0);
+    for (const s of sections) {
+      expect(s.cards.length).toBe(expected);
+      for (const c of s.cards) {
+        expect(c.url).toMatch(/^https:\/\/3asq\.online\/manga\/[^/]+\/$/);
+        expect(c.title).not.toBe("");
+        expect(c.coverUrl).toMatch(/^https:\/\/3asq\.online\/wp-content\/uploads\//);
+        expect(c.contentType).toBe("manga");
+      }
+    }
+  });
+
+  it("getNovel builds lazy volumes from the chapter pager", async () => {
+    const source = createSource(createTestHost({ responses }));
+    expect(source.hasLazyVolumes).toBe(true);
+    const novel = await source.getNovel(SERIES);
+    const pages = Math.max(
+      ...[...parseHtml(chaptersT1).querySelectorAll("[data-page]")].map((a) =>
+        Number(a.getAttribute("data-page")),
+      ),
+    );
+    expect(pages).toBeGreaterThan(2);
+    expect(novel.volumes).toHaveLength(pages);
+    expect(novel.title).toBe("One Piece");
+    expect(novel.direction).toBe("rtl");
+    expect(novel.language).toBe("ar");
+    expect(novel.contentType).toBe("manga");
+    expect(novel.coverUrl).toMatch(/v1-1\.jpg$/);
+    expect(novel.tags.length).toBeGreaterThan(0);
+
+    const newest = novel.volumes[pages - 1];
+    expect(newest.chapters.map((c) => c.url)).toEqual(chapterLinks(chaptersT1));
+    expect(newest.key).toBe("1");
+    for (const v of novel.volumes.slice(0, -1)) expect(v.chapters).toEqual([]);
+    expect(novel.volumes[0].key).toBe(String(pages));
+    expect(novel.volumes[0].chapterCount).toBeUndefined();
+    expect(novel.volumes[1].chapterCount).toBe(50);
+    expect(novel.volumes[1].key).toBe(String(pages - 1));
+    expect(novel.volumes.map((v) => v.id)).toEqual(novel.volumes.map((_, i) => i + 1));
+  });
+
+  it("getVolumeChapters loads one page", async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const source = createSource(createTestHost({ responses, calls }));
+    const chapters = await source.getVolumeChapters!(SERIES, {
+      id: 11,
+      title: "Part 11",
+      key: "2",
+      chapters: [],
+    });
+    expect(chapters.map((c) => c.url)).toEqual(chapterLinks(chaptersT2));
+    expect(calls).toEqual([{ url: AJAX2, method: "POST", body: undefined }]);
+  });
+
+  it("a decimal chapter slug becomes a decimal number", async () => {
+    const source = createSource(createTestHost({ responses }));
+    const chapters = await source.getVolumeChapters!(SERIES, {
+      id: 12,
+      title: "Part 12",
+      key: "1",
+      chapters: [],
+    });
+    const decimal = chapters.find((c) => c.url.endsWith("/1155-5/"));
+    expect(decimal?.number).toBe(1155.5);
+    expect(chapters.every((c) => c.number === parseChapterNumber(c.url.split("/").filter(Boolean).pop()!))).toBe(true);
+    expect(new Set(chapters.map((c) => c.id)).size).toBe(chapters.length);
+  });
+
+  it("getChapterPages lists the reading images in order", async () => {
+    const source = createSource(createTestHost({ responses }));
+    const expected = [...parseHtml(chapterHtml).querySelectorAll(".reading-content img")].map((i) =>
+      (i.getAttribute("data-src") ?? i.getAttribute("data-lazy-src") ?? i.getAttribute("src") ?? "").trim(),
+    );
+    expect(expected.length).toBeGreaterThan(5);
+    const res = await source.getChapterPages!({
+      id: 1,
+      title: "1197",
+      url: `${SERIES}1197/`,
+      lines: [],
+    });
+    expect(res.pages.map((p) => p.url)).toEqual(expected);
+    expect(res.pages.every((p) => p.url.startsWith("https://") && p.headers === undefined)).toBe(true);
+    const lines = await source.getChapterContent({ id: 1, title: "1197", url: `${SERIES}1197/`, lines: [] });
+    expect(lines.map((l) => l.content)).toEqual(expected);
+  });
+
+  it("a locked chapter is never fetched", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const source = createSource(createTestHost({ responses, calls }));
+    await expect(
+      source.getChapterPages!({
+        id: 1,
+        title: "x",
+        url: `${SERIES}1197/`,
+        lock: { reason: "paid", openUrl: `${SERIES}1197/` },
+        lines: [],
+      }),
+    ).rejects.toThrow("3asq: chapter is locked");
+    expect(calls).toEqual([]);
+  });
+
+  it("search returns manga cards", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const res = await createSource(createTestHost({ responses, calls })).search("one", 1);
+    expect(calls[0].url).toBe("https://3asq.online/?s=one&post_type=wp-manga&paged=1");
+    expect(res.page).toBe(1);
+    expect(res.cards.length).toBe(parseHtml(searchHtml).querySelectorAll(".c-tabs-item__content").length);
+    expect(res.cards.length).toBeGreaterThan(0);
+    expect(res.hasMore).toBe(parseHtml(searchHtml).querySelector(".nav-previous a") !== null);
+    for (const c of res.cards) {
+      expect(c.url).toMatch(/\/manga\/[^/]+\/$/);
+      expect(c.title).not.toBe("");
+      expect(c.coverUrl).toMatch(/^https:\/\//);
+      expect(c.contentType).toBe("manga");
+    }
+  });
+
+  it("a Cloudflare challenge is reported, not parsed", async () => {
+    const host = createTestHost({
+      responses: { "3asq.online": "<html>Just a moment...</html>" },
+      status: { "3asq.online": 403 },
+      headers: { "3asq.online": { "cf-mitigated": "challenge" } },
+    });
+    await expect(createSource(host).getHomeSections()).rejects.toThrow("3asq: blocked by a Cloudflare check");
+  });
+});
