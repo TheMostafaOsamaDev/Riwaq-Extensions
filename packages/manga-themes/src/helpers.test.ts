@@ -66,6 +66,8 @@ describe("mangaStrings", () => {
     expect(mangaStrings("en").part(3)).toBe("Part 3");
     expect(mangaStrings("ar")).toMatchObject({ latest: "آخر التحديثات", popular: "الأكثر مشاهدة" });
     expect(mangaStrings("ar").part(3)).toBe("الجزء 3");
+    expect(mangaStrings("en").chapter(12.5)).toBe("Chapter 12.5");
+    expect(mangaStrings("ar").chapter("7")).toBe("الفصل 7");
   });
 });
 

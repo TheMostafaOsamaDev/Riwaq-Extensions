@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { createTestHost } from "@riwaq/extension-api/testing";
+import { chapterIdFromUrl } from "@riwaq/manga-themes";
 import createSource from "../src/index";
 
 // fileURLToPath rather than `new URL(rel, import.meta.url)`: see the note in
@@ -114,6 +115,32 @@ describe("manga-dar", () => {
     expect(new Set(chapters.map((c) => c.id)).size).toBe(chapters.length);
     expect(chapters.at(-1)).toMatchObject({ url: CHAPTER, number: 390 });
     expect(chapters.some((c) => c.lock)).toBe(false);
+  });
+
+  it("chapter ids fall back to the url hash and no row with a url is dropped", async () => {
+    const u = (n: number) => `${SITE}/manga/x/${n}/`;
+    const rows = [
+      [2 ** 31, "3", u(3), 0, 3],
+      [1.5, "2", u(2), 0, 2],
+      [null, "", u(9), 0, 9],
+      [42, "1", u(1), 0, 1],
+    ];
+    const html = `<h1>X</h1><script type="application/json" id="mdg-manga-chapters-json">${JSON.stringify({ rows })}</script>`;
+    const mk = (locale: "en" | "ar") =>
+      createSource(createTestHost({ locale, responses: { [`${SITE}/manga/x/`]: html } }));
+    const en = (await mk("en").getNovel(`${SITE}/manga/x/`)).volumes[0].chapters;
+    expect(en).toHaveLength(4);
+    const byUrl = (url: string) => en.find((c) => c.url === url)!;
+    expect(byUrl(u(3)).id).toBe(chapterIdFromUrl(u(3)));
+    expect(byUrl(u(2)).id).toBe(chapterIdFromUrl(u(2)));
+    expect(byUrl(u(9)).id).toBe(chapterIdFromUrl(u(9)));
+    expect(byUrl(u(1)).id).toBe(42);
+    // Titles are localised and never a URL.
+    expect(byUrl(u(3)).title).toBe("Chapter 3");
+    expect(byUrl(u(9)).title).toBe("Chapter 9");
+    expect(en.every((c) => !c.title.includes("http"))).toBe(true);
+    const ar = (await mk("ar").getNovel(`${SITE}/manga/x/`)).volumes[0].chapters;
+    expect(ar.find((c) => c.url === u(3))!.title).toBe("الفصل 3");
   });
 
   it("series details", async () => {

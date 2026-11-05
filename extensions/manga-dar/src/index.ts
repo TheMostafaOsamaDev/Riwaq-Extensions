@@ -32,6 +32,7 @@ import {
   type SourceSection,
 } from "@riwaq/extension-api";
 import {
+  chapterIdFromUrl,
   createCheckedRequest,
   htmlToText,
   lockedError,
@@ -44,7 +45,7 @@ const ID = "manga-dar";
 const BASE_URL = "https://mangadar.com";
 const HOSTNAME = "mangadar.com";
 
-type ChapterRow = [number, string, string, ...unknown[]];
+type ChapterRow = [unknown, unknown, unknown, ...unknown[]];
 
 export default function createSource(host: SourceHost): Source {
   const t = mangaStrings(host.locale);
@@ -185,20 +186,26 @@ export default function createSource(host: SourceHost): Source {
       const rows = chapterRows(html, url);
 
       const chapters: SourceChapter[] = [];
-      const seen = new Set<number>();
-      for (const row of rows) {
+      const seen = new Set<string>();
+      for (const [index, row] of rows.entries()) {
         const [rowId, label, href] = row;
-        if (typeof href !== "string" || !href) continue;
-        const chapterUrl = absoluteUrl(href, url);
-        const id = Number(rowId);
-        if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue;
-        seen.add(id);
-        const text = String(label ?? "");
+        if (typeof href !== "string" || !href.trim()) continue;
+        const chapterUrl = absoluteUrl(href.trim(), url);
+        // The site's own id when it is a positive integer below 2^31, else a url hash.
+        const id =
+          typeof rowId === "number" && Number.isInteger(rowId) && rowId > 0 && rowId < 2 ** 31
+            ? rowId
+            : chapterIdFromUrl(chapterUrl);
+        if (seen.has(chapterUrl)) continue;
+        seen.add(chapterUrl);
+        const text = String(label || row[4] || "").trim();
+        const number = parseChapterNumber(text);
+        const shown = number ?? text;
         chapters.push({
           id,
-          title: text ? `الفصل ${text}` : chapterUrl,
+          title: t.chapter(shown === "" ? rows.length - index : shown),
           url: chapterUrl,
-          number: parseChapterNumber(text),
+          number,
           lines: [],
         });
       }
