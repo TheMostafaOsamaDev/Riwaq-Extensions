@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { API_VERSION } from "./manifest";
 import type { ExtensionManifest } from "./manifest";
-import { assertNoDuplicateIds, runBuild } from "./build";
+import { assertNoDuplicateIds, PUBLISH_MANGA_EXTENSIONS, runBuild } from "./build";
 import type { RepoIndex } from "./build";
 
 // A real, tiny, valid 1x1 PNG — real bytes rather than a text file wearing
@@ -224,7 +224,7 @@ describe("index fields for contract v2", () => {
       writeFixtureExtension(extensionsDir, "fixture-novel", {
         manifestOverrides: { apiVersion: 1 },
       });
-      const { index } = await runBuild({ extensionsDir, distDir });
+      const { index } = await runBuild({ extensionsDir, distDir, publishMangaExtensions: true });
       const manga = index.extensions.find((e) => e.id === "fixture-manga")!;
       expect(manga.contentTypes).toEqual(["manga"]);
       expect(manga.requestsPerSecond).toBe(1);
@@ -239,6 +239,61 @@ describe("index fields for contract v2", () => {
       writeFixtureExtension(extensionsDir, "fixture-a");
       const { index } = await runBuild({ extensionsDir, distDir });
       expect(index.apiVersion).toBe(2);
+    });
+  });
+});
+
+describe("manga extensions are held back until the app can use them", () => {
+  it("the flag is off", () => {
+    // Stage 3 of the app's manga work turns this on (see the README).
+    expect(PUBLISH_MANGA_EXTENSIONS).toBe(false);
+  });
+
+  it("a manga-only extension is bundled but left out of dist/ and the index; a novel one is published", async () => {
+    await withTempDirs(async ({ extensionsDir, distDir }) => {
+      writeFixtureExtension(extensionsDir, "fixture-manga", { manifestOverrides: { contentTypes: ["manga"] } });
+      writeFixtureExtension(extensionsDir, "fixture-both", { manifestOverrides: { contentTypes: ["novel", "manga"] } });
+      writeFixtureExtension(extensionsDir, "fixture-novel");
+      // A previous build's output for a held-back id does not survive.
+      mkdirSync(join(distDir, "fixture-manga"), { recursive: true });
+      writeFileSync(join(distDir, "fixture-manga", "index.js"), "stale");
+      const logs: string[] = [];
+      const log = console.log;
+      console.log = (...args: unknown[]) => void logs.push(args.join(" "));
+      let index: RepoIndex;
+      try {
+        ({ index } = await runBuild({ extensionsDir, distDir }));
+      } finally {
+        console.log = log;
+      }
+      expect(index.extensions.map((e) => e.id).sort()).toEqual(["fixture-both", "fixture-novel"]);
+      const onDisk = JSON.parse(readFileSync(join(distDir, "index.min.json"), "utf8")) as RepoIndex;
+      expect(onDisk.extensions.map((e) => e.id)).not.toContain("fixture-manga");
+      expect(existsSync(join(distDir, "fixture-manga"))).toBe(false);
+      expect(existsSync(join(distDir, "fixture-novel", "index.js"))).toBe(true);
+      expect(existsSync(join(distDir, "fixture-both", "index.js"))).toBe(true);
+      expect(logs.filter((l) => l.includes("fixture-manga"))).toHaveLength(1);
+      expect(logs.find((l) => l.includes("fixture-manga"))).toMatch(/held back/);
+    });
+  });
+
+  it("a held-back extension still has to bundle", async () => {
+    await withTempDirs(async ({ extensionsDir, distDir }) => {
+      writeFixtureExtension(extensionsDir, "broken-manga", {
+        manifestOverrides: { contentTypes: ["manga"] },
+        sourceBody: `export function createSource() { return {}; }\n`,
+      });
+      await expect(runBuild({ extensionsDir, distDir })).rejects.toThrow(/broken-manga.*default export/s);
+      expect(existsSync(join(distDir, "broken-manga"))).toBe(false);
+    });
+  });
+
+  it("with the flag on, a manga-only extension is published", async () => {
+    await withTempDirs(async ({ extensionsDir, distDir }) => {
+      writeFixtureExtension(extensionsDir, "fixture-manga", { manifestOverrides: { contentTypes: ["manga"] } });
+      const { index } = await runBuild({ extensionsDir, distDir, publishMangaExtensions: true });
+      expect(index.extensions.map((e) => e.id)).toEqual(["fixture-manga"]);
+      expect(existsSync(join(distDir, "fixture-manga", "index.js"))).toBe(true);
     });
   });
 });

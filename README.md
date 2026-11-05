@@ -102,7 +102,12 @@ implemented`, a starter `src/strings.ts`, and a test file already using
 scaffold compiles, and its stub test file exercises every "not implemented" method.
 
 A new extension starts at `"apiVersion": 1` and is a novel extension. A manga extension
-sets `"apiVersion": 2` and `"contentTypes": ["manga"]` in its manifest itself.
+sets `"apiVersion": 2` and `"contentTypes": ["manga"]` in its manifest itself. Until the
+app can open manga, `PUBLISH_MANGA_EXTENSIONS` in `scripts/build.ts` is `false`: an
+extension whose `contentTypes` lacks `"novel"` is still validated, typechecked, tested
+and bundled, but `pnpm build` leaves it out of `dist/` and `dist/index.min.json` (and
+says so), so released apps never list it; stage 3 of the app's manga work turns the flag
+on.
 
 `pnpm validate` and `pnpm build` deliberately do **not** pass yet: the manifest's
 `name`, `author` and `description` still carry literal `"TODO: ..."` placeholders, and
