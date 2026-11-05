@@ -147,6 +147,34 @@ describe("azora", () => {
     expect(new Set(chapters.map((c) => c.id)).size).toBe(chapters.length);
   });
 
+  it("the description is plain text, one paragraph per line", async () => {
+    const novel = await createSource(createTestHost({ responses })).getNovel(SERIES);
+    const html = postJson.post.postContent as string;
+    const paragraphs = [...html.matchAll(/<p>(.*?)<\/p>/gs)].map((m) => m[1].trim()).filter(Boolean);
+    expect(html).toContain("<p>");
+    expect(paragraphs.length).toBeGreaterThan(1);
+    expect(novel.description).toBeDefined();
+    expect(novel.description).not.toContain("<");
+    expect(novel.description).not.toMatch(/&\w+;/);
+    const lines = novel.description!.split("\n");
+    expect(lines).toHaveLength(paragraphs.length);
+    expect(lines[0]).toBe(paragraphs[0].replace(/<[^>]*>/g, "").trim());
+
+    // Entities, <br> and the older plain-text form.
+    const withPost = (postContent: string) =>
+      JSON.stringify({ ...postJson, post: { ...postJson.post, postContent } });
+    const get = async (postContent: string) =>
+      (await createSource(createTestHost({ responses: { ...responses, "/api/post?": withPost(postContent) } })).getNovel(SERIES))
+        .description;
+    expect(await get("<p>a &amp; b</p><p>c<br>d</p>")).toBe("a & b\nc\nd");
+    expect(await get("one\r\ntwo")).toBe("one\ntwo");
+  });
+
+  it("a malformed series URL is an azora error", async () => {
+    const source = createSource(createTestHost({ responses }));
+    await expect(source.getNovel(`${SITE}/series/%E0%A4%A`)).rejects.toThrow("azora: ");
+  });
+
   it("locked chapters carry a lock and refuse pages without a request", async () => {
     const calls: Array<{ url: string; method: string }> = [];
     const source = createSource(createTestHost({ responses, calls }));

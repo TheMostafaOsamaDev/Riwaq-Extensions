@@ -15,6 +15,7 @@
 //   - Cards, series and chapters carry site URLs
 //     (`<baseUrl>/series/<slug>[/<chapter-slug>]`); the API stays internal.
 import {
+  parseHtml,
   sanitizeText,
   type NovelCard,
   type PageRef,
@@ -71,6 +72,23 @@ interface IkenImage {
 }
 
 const isNovel = (p: IkenPost) => p.isNovel === true || (p.seriesType ?? "").toUpperCase() === "NOVEL";
+
+/** `postContent` is HTML (`<p>…</p>`) on newer posts and plain text on older
+ *  ones. Returns plain text: tags gone, entities decoded, one paragraph or
+ *  `<br>` per line, blank lines dropped. */
+function htmlToText(raw: string | undefined): string {
+  if (!raw) return "";
+  const doc = parseHtml(raw);
+  for (const br of doc.querySelectorAll("br")) br.replaceWith("\n");
+  for (const block of doc.querySelectorAll("p, div, li, h1, h2, h3, h4, h5, h6, blockquote")) {
+    block.append("\n");
+  }
+  return (doc.body.textContent ?? "")
+    .split(/\r\n?|\n/)
+    .map((line) => sanitizeText(line))
+    .filter(Boolean)
+    .join("\n");
+}
 
 export function createIkenSource(host: SourceHost, config: IkenConfig): Source {
   const { id } = config;
@@ -164,7 +182,12 @@ export function createIkenSource(host: SourceHost, config: IkenConfig): Source {
     },
 
     async getNovel(url): Promise<SourceNovel> {
-      const slug = decodeURIComponent(url.split(/[?#]/)[0].split("/").filter(Boolean).pop() ?? "");
+      let slug = "";
+      try {
+        slug = decodeURIComponent(url.split(/[?#]/)[0].split("/").filter(Boolean).pop() ?? "");
+      } catch {
+        // A malformed escape is not a series URL; reported below.
+      }
       if (!slug) throw new Error(`${id}: ${url} is not a series page`);
       const data = await api<{ post?: IkenPost }>(`/api/post?postSlug=${encodeURIComponent(slug)}`);
       const post = data.post;
@@ -192,7 +215,7 @@ export function createIkenSource(host: SourceHost, config: IkenConfig): Source {
         language: "ar",
         direction: "rtl",
         coverUrl: post.featuredImage || undefined,
-        description: (post.postContent ?? "").replace(/\r\n?/g, "\n").trim() || undefined,
+        description: htmlToText(post.postContent) || undefined,
         tags: (post.genres ?? []).map((g) => sanitizeText(g.name)).filter(Boolean),
         status: sanitizeText(post.seriesStatus) || undefined,
         meta: [],
