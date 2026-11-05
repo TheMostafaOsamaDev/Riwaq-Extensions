@@ -15,7 +15,6 @@
 //   - Cards, series and chapters carry site URLs
 //     (`<baseUrl>/series/<slug>[/<chapter-slug>]`); the API stays internal.
 import {
-  parseHtml,
   sanitizeText,
   type NovelCard,
   type PageRef,
@@ -26,7 +25,7 @@ import {
   type SourceSearchResult,
   type SourceSection,
 } from "@riwaq/extension-api";
-import { createCheckedRequest, lockedError, pagesAsLines } from "./helpers";
+import { createCheckedRequest, htmlToText, lockedError, pagesAsLines } from "./helpers";
 import { mangaStrings } from "./strings";
 
 export interface IkenConfig {
@@ -72,23 +71,6 @@ interface IkenImage {
 }
 
 const isNovel = (p: IkenPost) => p.isNovel === true || (p.seriesType ?? "").toUpperCase() === "NOVEL";
-
-/** `postContent` is HTML (`<p>…</p>`) on newer posts and plain text on older
- *  ones. Returns plain text: tags gone, entities decoded, one paragraph or
- *  `<br>` per line, blank lines dropped. */
-function htmlToText(raw: string | undefined): string {
-  if (!raw) return "";
-  const doc = parseHtml(raw);
-  for (const br of doc.querySelectorAll("br")) br.replaceWith("\n");
-  for (const block of doc.querySelectorAll("p, div, li, h1, h2, h3, h4, h5, h6, blockquote")) {
-    block.append("\n");
-  }
-  return (doc.body.textContent ?? "")
-    .split(/\r\n?|\n/)
-    .map((line) => sanitizeText(line))
-    .filter(Boolean)
-    .join("\n");
-}
 
 export function createIkenSource(host: SourceHost, config: IkenConfig): Source {
   const { id } = config;

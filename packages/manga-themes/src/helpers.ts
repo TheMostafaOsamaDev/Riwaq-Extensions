@@ -1,5 +1,7 @@
 import {
   createFetcher,
+  parseHtml,
+  sanitizeText,
   type ChapterPages,
   type FetchOptions,
   type FetchResponse,
@@ -72,4 +74,20 @@ export function createCheckedRequest(
     if (resp.status !== 200) throw new Error(`${id}: ${url} answered HTTP ${resp.status}`);
     return resp;
   };
+}
+
+/** HTML (or plain text) to plain text: tags gone, entities decoded, one paragraph or
+ *  `<br>` per line, blank lines dropped. */
+export function htmlToText(raw: string | undefined): string {
+  if (!raw) return "";
+  const doc = parseHtml(raw);
+  for (const br of doc.querySelectorAll("br")) br.replaceWith("\n");
+  for (const block of doc.querySelectorAll("p, div, li, h1, h2, h3, h4, h5, h6, blockquote")) {
+    block.append("\n");
+  }
+  return (doc.body.textContent ?? "")
+    .split(/\r\n?|\n/)
+    .map((line) => sanitizeText(line))
+    .filter(Boolean)
+    .join("\n");
 }

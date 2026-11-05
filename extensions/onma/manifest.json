@@ -1,0 +1,15 @@
+{
+  "id": "onma",
+  "name": "مانجا اون لاين",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "contentTypes": ["manga"],
+  "language": "ar",
+  "baseUrl": "https://onma.me",
+  "icon": "icon.png",
+  "description": {
+    "en": "Manga translated into Arabic, from Manga Online (Onma).",
+    "ar": "مانجا مترجمة إلى العربية من موقع مانجا اون لاين."
+  },
+  "author": "Riwaq"
+}
