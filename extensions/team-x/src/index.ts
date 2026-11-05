@@ -108,9 +108,10 @@ export default function createSource(host: SourceHost): Source {
       const siteId = Number(link?.getAttribute("data-bs-whatever"));
       if (locked && Number.isInteger(siteId) && siteId > 0 && siteId < 2 ** 31) id = siteId;
 
-      const base = label || `الفصل ${numberAttr}`;
+      const base = label || t.chapter(numberAttr);
       const name = sanitizeText(card.querySelector(".chapter-title")?.textContent);
-      const dull = new Set([numberAttr, label, `الفصل ${numberAttr}`, `الفصل رقم ${numberAttr}`]);
+      // The site's own wordings of "chapter N" add nothing to the label.
+      const dull = new Set([numberAttr, label, base, `الفصل ${numberAttr}`, `الفصل رقم ${numberAttr}`]);
       const chapter: SourceChapter = {
         id,
         title: name && !dull.has(name) ? `${base} - ${name}` : base,

@@ -8,8 +8,9 @@
 //
 // "Changed" means "changed in a way that reaches a published bundle",
 // which is wider than `extensions/`: build.ts bundles, so
-// packages/extension-api is inlined verbatim into every served bundle
-// (all seven today). See SHARED_BUNDLE_PATHS.
+// packages/extension-api is inlined verbatim into every served bundle, and
+// packages/manga-themes into every bundle that imports it. See
+// SHARED_BUNDLE_PATHS.
 //
 // `decideChangedExtensionIds` and `decideVersionBumps` are pure functions
 // over already-collected data and are what check-version-bump.test.ts
@@ -77,14 +78,15 @@ export interface VersionBumpCheckResult {
  *  already-published `(id, version)` pair. A reader that treats that pair
  *  as immutable and cacheable would never see the new code.
  *
- *  Deliberately coarse: one changed file anywhere under `packages/` marks
- *  EVERY extension changed. Resolving which extensions actually import
- *  the touched module would need a real import graph, and with a single
- *  shared package that every extension depends on, the answer is "all of
- *  them" anyway. Over-reporting costs a version bump nobody strictly
- *  needed; under-reporting silently overwrites a published version. */
+ *  Deliberately coarse: one changed file under `packages/` marks EVERY
+ *  extension changed, with one exception: a `packages/manga-themes/`
+ *  change marks only the extensions that import it (MANGA_THEMES_PATH
+ *  below), i.e. the manga ones. Resolving which extensions use the
+ *  touched part of `packages/extension-api` would need a real import graph,
+ *  and as every extension depends on it, the answer is "all of them"
+ *  anyway. Over-reporting costs a version bump nobody strictly needed;
+ *  under-reporting silently overwrites a published version. */
 const SHARED_BUNDLE_PATHS = ["packages/", "scripts/build.ts"];
-// (packages/manga-themes/ is the exception, scoped by import; see below.)
 
 /** Bundled only into extensions whose `src/**\/*.ts` import the specifier
  *  MANGA_THEMES_SPECIFIER; the caller collects that list. */
@@ -220,9 +222,8 @@ function listExtensionIds(): string[] {
     .sort();
 }
 
-/** Extension ids whose published bundle changed between `mergeBase` and
- *  HEAD. The diff is deliberately NOT scoped to `extensions` alone — see
- *  SHARED_BUNDLE_PATHS for what else ends up inside a bundle. */
+/** Every extension whose `src/` imports MANGA_THEMES_SPECIFIER: the only
+ *  bundles a `packages/manga-themes/` change reaches. */
 function findMangaThemesImporters(): string[] {
   const hasImport = (dir: string): boolean =>
     readdirSync(dir, { withFileTypes: true }).some((e) => {
@@ -236,6 +237,9 @@ function findMangaThemesImporters(): string[] {
   });
 }
 
+/** Extension ids whose published bundle changed between `mergeBase` and
+ *  HEAD. The diff is deliberately NOT scoped to `extensions` alone — see
+ *  SHARED_BUNDLE_PATHS for what else ends up inside a bundle. */
 function getChangedExtensionIds(mergeBase: string): string[] {
   const output = git([
     "diff",

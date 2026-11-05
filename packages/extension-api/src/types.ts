@@ -23,8 +23,9 @@
 // persisted for resume / debugging without losing fidelity.
 
 /** Major version of this contract. A manifest declares the `apiVersion` it
- *  was built against; the host refuses to construct an extension whose
- *  major does not match this value. */
+ *  was built against; the host accepts any version in
+ *  `SUPPORTED_API_VERSIONS` and refuses to construct an extension that
+ *  declares another. */
 export const API_VERSION = 2;
 
 /** Every contract major a host built against this package still accepts.

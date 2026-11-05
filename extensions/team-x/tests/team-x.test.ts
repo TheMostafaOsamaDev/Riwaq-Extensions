@@ -183,6 +183,19 @@ describe("team-x", () => {
     expect(lockedA.id).toBe(b.volumes[0].chapters.find((c) => c.lock)!.id);
   });
 
+  it("a chapter without a label gets a localised title", async () => {
+    const card = (n: number, name = "") =>
+      `<div class="chapter-card" data-number="${n}"><a href="${SITE}/series/x/${n}" class="chapter-link">` +
+      `<div class="chapter-info"><div class="chapter-number"></div><div class="chapter-title">${name}</div></div></a></div>`;
+    const html = `<div class="author-info-title"><h1>X</h1></div>${card(8, "النهاية")}${card(7)}`;
+    const titles = async (locale: "en" | "ar") =>
+      (
+        await createSource(createTestHost({ locale, responses: { [`${SITE}/series/x`]: html } })).getNovel(`${SITE}/series/x`)
+      ).volumes[0].chapters.map((c) => c.title);
+    expect(await titles("en")).toEqual(["Chapter 7", "Chapter 8 - النهاية"]);
+    expect(await titles("ar")).toEqual(["الفصل 7", "الفصل 8 - النهاية"]);
+  });
+
   it("chapter pages are the inline images, in order, without fetching bytes", async () => {
     const calls: Array<{ url: string; method: string }> = [];
     const source = createSource(createTestHost({ responses, calls }));

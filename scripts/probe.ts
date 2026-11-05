@@ -217,20 +217,22 @@ it(`probes ${ID} against its live site`, { timeout: 300_000 }, async () => {
     if (!open) {
       console.log("  SKIP  getChapterPages — no unlocked chapter");
     } else {
+      // One verdict, after the first page image has been fetched too: a
+      // page list whose images don't load is a failed getChapterPages.
       try {
         const res = await source.getChapterPages(open);
-        pass(
-          "getChapterPages",
-          `${res.pages.length} pages, expiresAt=${res.expiresAt === undefined ? "none" : new Date(res.expiresAt).toISOString()}`,
-        );
         const first = res.pages[0];
         if (!first) throw new Error("no pages returned");
         const r = await curl(first.url, { headers: first.headers });
         const type = r.headers["content-type"] ?? "";
         if (r.status !== 200 || !type.startsWith("image/")) {
-          throw new Error(`pages[0] answered ${r.status} ${type || "(no content-type)"}`);
+          throw new Error(`${res.pages.length} pages, but pages[0] answered ${r.status} ${type || "(no content-type)"}`);
         }
-        pass("page image", `${r.status} ${type}, ${r.body.byteLength} bytes`);
+        pass(
+          "getChapterPages",
+          `${res.pages.length} pages, expiresAt=${res.expiresAt === undefined ? "none" : new Date(res.expiresAt).toISOString()}; ` +
+            `pages[0] ${r.status} ${type}, ${r.body.byteLength} bytes`,
+        );
       } catch (e) {
         fail("getChapterPages", e);
       }
