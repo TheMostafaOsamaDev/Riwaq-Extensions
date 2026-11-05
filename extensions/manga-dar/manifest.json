@@ -1,0 +1,15 @@
+{
+  "id": "manga-dar",
+  "name": "مانجا دار",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "contentTypes": ["manga"],
+  "language": "ar",
+  "baseUrl": "https://mangadar.com",
+  "icon": "icon.png",
+  "description": {
+    "en": "Manga translated into Arabic, from MangaDar.",
+    "ar": "مانجا مترجمة إلى العربية من موقع مانجا دار."
+  },
+  "author": "Riwaq"
+}
