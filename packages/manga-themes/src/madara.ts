@@ -10,11 +10,9 @@
 //   - A chapter page lists its images under `.reading-content`.
 import {
   absoluteUrl,
-  createFetcher,
   parseHtml,
-  sanitizeText,
   type FetchOptions,
-  type FetchResponse,
+  sanitizeText,
   type NovelCard,
   type Source,
   type SourceChapter,
@@ -24,7 +22,7 @@ import {
   type SourceSection,
   type SourceVolume,
 } from "@riwaq/extension-api";
-import { chapterIdFromUrl, lockedError, pagesAsLines, parseChapterNumber } from "./helpers";
+import { chapterIdFromUrl, createCheckedRequest, lockedError, pagesAsLines, parseChapterNumber } from "./helpers";
 import { mangaStrings } from "./strings";
 
 export interface MadaraConfig {
@@ -57,18 +55,8 @@ export function createMadaraSource(host: SourceHost, config: MadaraConfig): Sour
   const seriesPath = config.seriesPath ?? "manga";
   const hostname = new URL(baseUrl).hostname;
   const t = mangaStrings(host.locale);
-  const fetcher = createFetcher(host, { id });
 
-  /** GET/POST through the retrying fetcher; a Cloudflare challenge and any
-   *  other non-200 become errors instead of being parsed as content. */
-  async function request(url: string, init?: FetchOptions): Promise<FetchResponse> {
-    const resp = await fetcher(url, init);
-    if (resp.status === 403 && (resp.headers["cf-mitigated"] ?? "").toLowerCase() === "challenge") {
-      throw new Error(`${id}: blocked by a Cloudflare check`);
-    }
-    if (resp.status !== 200) throw new Error(`${id}: ${url} answered HTTP ${resp.status}`);
-    return resp;
-  }
+  const request = createCheckedRequest(host, id);
 
   const abs = (href: string, base = baseUrl + "/") => absoluteUrl(href, base);
 

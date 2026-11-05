@@ -1,4 +1,12 @@
-import type { ChapterPages, SourceChapter, SourceLine } from "@riwaq/extension-api";
+import {
+  createFetcher,
+  type ChapterPages,
+  type FetchOptions,
+  type FetchResponse,
+  type SourceChapter,
+  type SourceHost,
+  type SourceLine,
+} from "@riwaq/extension-api";
 
 /** Arabic-Indic (U+0660-0669) and Persian (U+06F0-06F9) digits to 0-9. */
 function foldDigits(text: string): string {
@@ -47,4 +55,21 @@ export function withoutQuery(url: string, keep: string[] = []): string {
 
 export function lockedError(id: string, _chapter: SourceChapter): Error {
   return new Error(`${id}: chapter is locked`);
+}
+
+/** GET/POST through the retrying fetcher; a Cloudflare challenge and any other
+ *  non-200 become `<id>: ...` errors instead of being parsed as content. */
+export function createCheckedRequest(
+  host: SourceHost,
+  id: string,
+): (url: string, init?: FetchOptions) => Promise<FetchResponse> {
+  const fetcher = createFetcher(host, { id });
+  return async (url, init) => {
+    const resp = await fetcher(url, init);
+    if (resp.status === 403 && (resp.headers["cf-mitigated"] ?? "").toLowerCase() === "challenge") {
+      throw new Error(`${id}: blocked by a Cloudflare check`);
+    }
+    if (resp.status !== 200) throw new Error(`${id}: ${url} answered HTTP ${resp.status}`);
+    return resp;
+  };
 }

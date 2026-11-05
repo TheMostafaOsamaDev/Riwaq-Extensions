@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SourceChapter } from "@riwaq/extension-api";
-import { chapterIdFromUrl, lockedError, pagesAsLines, parseChapterNumber, withoutQuery } from "./helpers";
+import { createTestHost } from "@riwaq/extension-api/testing";
+import { chapterIdFromUrl, createCheckedRequest, lockedError, pagesAsLines, parseChapterNumber, withoutQuery } from "./helpers";
 import { mangaStrings } from "./strings";
 
 describe("parseChapterNumber", () => {
@@ -65,5 +66,30 @@ describe("mangaStrings", () => {
     expect(mangaStrings("en").part(3)).toBe("Part 3");
     expect(mangaStrings("ar")).toMatchObject({ latest: "آخر التحديثات", popular: "الأكثر مشاهدة" });
     expect(mangaStrings("ar").part(3)).toBe("الجزء 3");
+  });
+});
+
+describe("createCheckedRequest", () => {
+  it("names a Cloudflare challenge", async () => {
+    const host = createTestHost({
+      responses: { "x.test": "" },
+      status: { "x.test": 403 },
+      headers: { "x.test": { "cf-mitigated": "challenge" } },
+    });
+    await expect(createCheckedRequest(host, "demo")("https://x.test/a")).rejects.toThrow(
+      "demo: blocked by a Cloudflare check",
+    );
+  });
+
+  it("turns any other non-200 into a prefixed error", async () => {
+    const host = createTestHost({ responses: { "x.test": "" }, status: { "x.test": 404 } });
+    await expect(createCheckedRequest(host, "demo")("https://x.test/a")).rejects.toThrow(
+      "demo: https://x.test/a answered HTTP 404",
+    );
+  });
+
+  it("returns a 200 response", async () => {
+    const host = createTestHost({ responses: { "x.test": "ok" } });
+    expect((await createCheckedRequest(host, "demo")("https://x.test/a")).text).toBe("ok");
   });
 });

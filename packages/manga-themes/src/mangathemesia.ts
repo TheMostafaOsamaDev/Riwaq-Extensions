@@ -13,10 +13,8 @@
 // (Lava Scans: `.manga-card-v`, `.legend-card`, `.ch-item`).
 import {
   absoluteUrl,
-  createFetcher,
   parseHtml,
   sanitizeText,
-  type FetchResponse,
   type NovelCard,
   type Source,
   type SourceChapter,
@@ -25,7 +23,7 @@ import {
   type SourceSearchResult,
   type SourceSection,
 } from "@riwaq/extension-api";
-import { chapterIdFromUrl, lockedError, pagesAsLines, parseChapterNumber } from "./helpers";
+import { chapterIdFromUrl, createCheckedRequest, lockedError, pagesAsLines, parseChapterNumber } from "./helpers";
 import { mangaStrings } from "./strings";
 
 export interface ThemesiaConfig {
@@ -82,18 +80,8 @@ export function createThemesiaSource(host: SourceHost, config: ThemesiaConfig): 
   const seriesPath = config.seriesPath ?? "manga";
   const hostname = new URL(baseUrl).hostname;
   const t = mangaStrings(host.locale);
-  const fetcher = createFetcher(host, { id });
 
-  /** GET through the retrying fetcher; a Cloudflare challenge and any other
-   *  non-200 become errors instead of being parsed as content. */
-  async function request(url: string): Promise<FetchResponse> {
-    const resp = await fetcher(url);
-    if (resp.status === 403 && (resp.headers["cf-mitigated"] ?? "").toLowerCase() === "challenge") {
-      throw new Error(`${id}: blocked by a Cloudflare check`);
-    }
-    if (resp.status !== 200) throw new Error(`${id}: ${url} answered HTTP ${resp.status}`);
-    return resp;
-  }
+  const request = createCheckedRequest(host, id);
 
   const abs = (href: string, base = baseUrl + "/") => absoluteUrl(href, base);
 
