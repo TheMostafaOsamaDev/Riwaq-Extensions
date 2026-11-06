@@ -1,0 +1,15 @@
+{
+  "id": "kawaii-manga",
+  "name": "كواي مانجا",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "contentTypes": ["manga"],
+  "language": "ar",
+  "baseUrl": "https://kawaiimanga.org",
+  "icon": "icon.png",
+  "description": {
+    "en": "Manga translated into Arabic, from Kawaii Manga.",
+    "ar": "مانجا مترجمة إلى العربية من موقع كواي مانجا."
+  },
+  "author": "Riwaq"
+}

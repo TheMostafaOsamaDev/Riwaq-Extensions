@@ -1,0 +1,15 @@
+{
+  "id": "azora",
+  "name": "ازورا مانجا",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "contentTypes": ["manga"],
+  "language": "ar",
+  "baseUrl": "https://azorafly.com",
+  "icon": "icon.png",
+  "description": {
+    "en": "Manga translated into Arabic, from Azora.",
+    "ar": "مانجا مترجمة إلى العربية من موقع ازورا مانجا."
+  },
+  "author": "Riwaq"
+}

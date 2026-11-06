@@ -152,6 +152,21 @@ describe("decideChangedExtensionIds", () => {
     ).toEqual(["cenele", "sunovels"]);
   });
 
+  it("a manga-themes change marks only the extensions that import it", () => {
+    expect(
+      decideChangedExtensionIds(["packages/manga-themes/src/helpers.ts"], ALL, ["kolnovel", "cenele"]),
+    ).toEqual(["cenele", "kolnovel"]);
+    expect(decideChangedExtensionIds(["packages/manga-themes/src/helpers.ts"], ALL)).toEqual([]);
+    // extension-api still wins over a narrower path in the same diff.
+    expect(
+      decideChangedExtensionIds(
+        ["packages/manga-themes/src/helpers.ts", "packages/extension-api/src/dom.ts"],
+        ALL,
+        ["cenele"],
+      ),
+    ).toEqual(ALL);
+  });
+
   it("marks EVERY extension changed when a shared package changed", () => {
     // A one-line edit here changes all four SERVED bundles while touching
     // nothing under extensions/. Scoping the diff to `-- extensions` (what

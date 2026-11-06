@@ -8,8 +8,9 @@
 //
 // "Changed" means "changed in a way that reaches a published bundle",
 // which is wider than `extensions/`: build.ts bundles, so
-// packages/extension-api is inlined verbatim into every served bundle
-// (all seven today). See SHARED_BUNDLE_PATHS.
+// packages/extension-api is inlined verbatim into every served bundle, and
+// packages/manga-themes into every bundle that imports it. See
+// SHARED_BUNDLE_PATHS.
 //
 // `decideChangedExtensionIds` and `decideVersionBumps` are pure functions
 // over already-collected data and are what check-version-bump.test.ts
@@ -19,7 +20,7 @@
 // exported unit tests of its own (see the brief: "test the comparison
 // logic, not git").
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { loadManifest } from "./manifest";
@@ -77,13 +78,20 @@ export interface VersionBumpCheckResult {
  *  already-published `(id, version)` pair. A reader that treats that pair
  *  as immutable and cacheable would never see the new code.
  *
- *  Deliberately coarse: one changed file anywhere under `packages/` marks
- *  EVERY extension changed. Resolving which extensions actually import
- *  the touched module would need a real import graph, and with a single
- *  shared package that every extension depends on, the answer is "all of
- *  them" anyway. Over-reporting costs a version bump nobody strictly
- *  needed; under-reporting silently overwrites a published version. */
+ *  Deliberately coarse: one changed file under `packages/` marks EVERY
+ *  extension changed, with one exception: a `packages/manga-themes/`
+ *  change marks only the extensions that import it (MANGA_THEMES_PATH
+ *  below), i.e. the manga ones. Resolving which extensions use the
+ *  touched part of `packages/extension-api` would need a real import graph,
+ *  and as every extension depends on it, the answer is "all of them"
+ *  anyway. Over-reporting costs a version bump nobody strictly needed;
+ *  under-reporting silently overwrites a published version. */
 const SHARED_BUNDLE_PATHS = ["packages/", "scripts/build.ts"];
+
+/** Bundled only into extensions whose `src/**\/*.ts` import the specifier
+ *  MANGA_THEMES_SPECIFIER; the caller collects that list. */
+const MANGA_THEMES_PATH = "packages/manga-themes/";
+const MANGA_THEMES_SPECIFIER = "@riwaq/manga-themes";
 
 /** True when `path` is one of the shared inputs above. Prefix match for
  *  the directory entry, exact match for the file. */
@@ -103,11 +111,19 @@ function isSharedBundlePath(path: string): boolean {
 export function decideChangedExtensionIds(
   changedPaths: string[],
   allExtensionIds: string[],
+  mangaThemesImporters: string[] = [],
 ): string[] {
   const ids = new Set<string>();
   for (const raw of changedPaths) {
     const path = raw.trim();
     if (path.length === 0) continue;
+    // packages/manga-themes is bundled only into the extensions that import
+    // it (see MANGA_THEMES_PATH), so it is narrower than the "packages/"
+    // entry in SHARED_BUNDLE_PATHS and is checked first.
+    if (path.startsWith(MANGA_THEMES_PATH)) {
+      for (const id of mangaThemesImporters) ids.add(id);
+      continue;
+    }
     if (isSharedBundlePath(path)) return [...allExtensionIds].sort();
     const match = /^extensions\/([^/]+)\//.exec(path);
     if (match) ids.add(match[1]);
@@ -206,6 +222,21 @@ function listExtensionIds(): string[] {
     .sort();
 }
 
+/** Every extension whose `src/` imports MANGA_THEMES_SPECIFIER: the only
+ *  bundles a `packages/manga-themes/` change reaches. */
+function findMangaThemesImporters(): string[] {
+  const hasImport = (dir: string): boolean =>
+    readdirSync(dir, { withFileTypes: true }).some((e) => {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) return hasImport(full);
+      return e.name.endsWith(".ts") && readFileSync(full, "utf8").includes(MANGA_THEMES_SPECIFIER);
+    });
+  return listExtensionIds().filter((id) => {
+    const src = join(EXTENSIONS_DIR, id, "src");
+    return existsSync(src) && hasImport(src);
+  });
+}
+
 /** Extension ids whose published bundle changed between `mergeBase` and
  *  HEAD. The diff is deliberately NOT scoped to `extensions` alone — see
  *  SHARED_BUNDLE_PATHS for what else ends up inside a bundle. */
@@ -219,7 +250,11 @@ function getChangedExtensionIds(mergeBase: string): string[] {
     "packages",
     "scripts/build.ts",
   ]);
-  return decideChangedExtensionIds(output.split("\n"), listExtensionIds());
+  return decideChangedExtensionIds(
+    output.split("\n"),
+    listExtensionIds(),
+    findMangaThemesImporters(),
+  );
 }
 
 function loadCurrentVersions(ids: string[]): Map<string, string> {

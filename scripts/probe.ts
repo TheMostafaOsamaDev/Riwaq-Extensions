@@ -17,7 +17,7 @@
 // promises — cenele's WordPress nonces are session-scoped and break
 // without it.
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -40,7 +40,20 @@ afterAll(() => rmSync(JAR_DIR, { recursive: true, force: true }));
 // `curl: (23)` before any byte of the site was read.
 let headerFileSeq = 0;
 
+// A manifest `requestsPerSecond` caps how fast the app may hit the site, so
+// the probe spaces its own requests the same way (set once the manifest is
+// read, before the first call).
+let minGapMs = 0;
+let lastRequestAt = 0;
+async function throttle(): Promise<void> {
+  if (minGapMs <= 0) return;
+  const wait = lastRequestAt + minGapMs - Date.now();
+  lastRequestAt = Math.max(Date.now(), lastRequestAt + minGapMs);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
 async function curl(url: string, opts: { method?: string; headers?: Record<string, string>; body?: string } | undefined) {
+  await throttle();
   const headerFile = join(JAR_DIR, `headers-${++headerFileSeq}.txt`);
   const args = [
     "-sS", "--compressed", "--max-time", "60", "-L",
@@ -125,6 +138,16 @@ it(`probes ${ID} against its live site`, { timeout: 300_000 }, async () => {
     }
   };
 
+  const manifestPath = join(__dirname, "..", "extensions", ID, "manifest.json");
+  if (existsSync(manifestPath)) {
+    const rps = (JSON.parse(readFileSync(manifestPath, "utf8")) as { requestsPerSecond?: number })
+      .requestsPerSecond;
+    if (typeof rps === "number" && rps > 0) {
+      minGapMs = Math.ceil(1000 / rps);
+      console.log(`  ----  spacing requests ${minGapMs} ms apart (requestsPerSecond=${rps})`);
+    }
+  }
+
   const mod = await import(`../extensions/${ID}/src/index.ts`);
   const source: Source = mod.default(host);
   console.log(`\n=== ${ID} — live probe ===`);
@@ -186,6 +209,33 @@ it(`probes ${ID} against its live site`, { timeout: 300_000 }, async () => {
       pass("getChapterContent", `${lines.length} lines, ${text.reduce((n, l) => n + l.content.length, 0)} chars`);
     } catch (e) {
       fail("getChapterContent", e);
+    }
+  }
+
+  if (typeof source.getChapterPages === "function") {
+    const open = novel.volumes.flatMap((v) => v.chapters).find((c) => !c.lock);
+    if (!open) {
+      console.log("  SKIP  getChapterPages — no unlocked chapter");
+    } else {
+      // One verdict, after the first page image has been fetched too: a
+      // page list whose images don't load is a failed getChapterPages.
+      try {
+        const res = await source.getChapterPages(open);
+        const first = res.pages[0];
+        if (!first) throw new Error("no pages returned");
+        const r = await curl(first.url, { headers: first.headers });
+        const type = r.headers["content-type"] ?? "";
+        if (r.status !== 200 || !type.startsWith("image/")) {
+          throw new Error(`${res.pages.length} pages, but pages[0] answered ${r.status} ${type || "(no content-type)"}`);
+        }
+        pass(
+          "getChapterPages",
+          `${res.pages.length} pages, expiresAt=${res.expiresAt === undefined ? "none" : new Date(res.expiresAt).toISOString()}; ` +
+            `pages[0] ${r.status} ${type}, ${r.body.byteLength} bytes`,
+        );
+      } catch (e) {
+        fail("getChapterPages", e);
+      }
     }
   }
 

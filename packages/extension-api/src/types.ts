@@ -23,9 +23,20 @@
 // persisted for resume / debugging without losing fidelity.
 
 /** Major version of this contract. A manifest declares the `apiVersion` it
- *  was built against; the host refuses to construct an extension whose
- *  major does not match this value. */
-export const API_VERSION = 1;
+ *  was built against; the host accepts any version in
+ *  `SUPPORTED_API_VERSIONS` and refuses to construct an extension that
+ *  declares another. */
+export const API_VERSION = 2;
+
+/** Every contract major a host built against this package still accepts.
+ *  Version 2 only adds optional fields and one optional method to version
+ *  1, so a version-1 extension keeps running unchanged. */
+export const SUPPORTED_API_VERSIONS: readonly number[] = [1, 2];
+
+/** What a source's entries are. A source declares the types it serves in
+ *  its manifest (`contentTypes`, default `["novel"]`); `manga` needs
+ *  `apiVersion` 2. */
+export type ContentType = "novel" | "manga";
 
 // ── chapter-body shapes (unchanged from the original importer) ─────────────
 
@@ -40,11 +51,44 @@ export interface SourceLine {
   content: string;
 }
 
+/** Why a chapter cannot be read in the app (paid, region-locked, …), and
+ *  where the reader can open it on the source's own site. */
+export interface ChapterLock {
+  reason: string;
+  openUrl: string;
+}
+
+/** One page image of a manga chapter. */
+export interface PageRef {
+  /** Absolute URL of the page image. */
+  url: string;
+  /** Headers the host must send when fetching `url` (e.g. a Referer). */
+  headers?: Record<string, string>;
+  /** Intrinsic pixel size, when the source knows it before fetching. */
+  width?: number;
+  height?: number;
+  /** Stable identity for caching when `url` carries a changing token. */
+  cacheKey?: string;
+}
+
+/** The page list of one manga chapter. */
+export interface ChapterPages {
+  pages: PageRef[];
+  /** Epoch milliseconds after which the page URLs stop working. */
+  expiresAt?: number;
+}
+
 export interface SourceChapter {
   /** Source-assigned numeric id, stable across one scrape session. */
   id: number;
   title: string;
   url: string;
+  /** Chapter number as the source numbers it (may be fractional: 10.5). */
+  number?: number;
+  /** Group that released the chapter, when the source names one. */
+  scanlator?: string;
+  /** Set when the chapter cannot be read in the app. */
+  lock?: ChapterLock;
   /** Empty until getChapterContent populates it. */
   lines: SourceLine[];
 }
@@ -83,6 +127,10 @@ export interface NovelCard {
   subtitle?: string;
   /** Tiny chip-style genre/tag labels, when the listing surfaces them. */
   badges?: string[];
+  /** Defaults to "novel" when absent. */
+  contentType?: ContentType;
+  /** True when the entry is adult content. */
+  nsfw?: boolean;
 }
 
 /** A row on a source's homepage. KolNovel for example surfaces "Latest
@@ -159,6 +207,10 @@ export interface SourceNovel {
   /** Volumes with their chapter listings, but without chapter content
    *  populated. */
   volumes: SourceVolume[];
+  /** Defaults to "novel" when absent. */
+  contentType?: ContentType;
+  /** True when the entry is adult content. */
+  nsfw?: boolean;
 }
 
 // ── locale + PDF extraction ─────────────────────────────────────────────────
@@ -350,6 +402,11 @@ export interface Source {
 
   /** Populate `lines` for one chapter. */
   getChapterContent(chapter: SourceChapter): Promise<SourceLine[]>;
+
+  /** Optional, manga sources (`apiVersion` 2). The page images of one
+   *  chapter, in reading order. A manga source implements this instead of
+   *  `getChapterContent`'s text lines. */
+  getChapterPages?(chapter: SourceChapter): Promise<ChapterPages>;
 
   /** Optional. When a source emits image SourceLines whose `content` is NOT
    *  a host-fetchable URL (e.g. images extracted from a downloaded PDF), the

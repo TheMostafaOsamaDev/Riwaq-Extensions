@@ -1,0 +1,16 @@
+{
+  "id": "swat-manga",
+  "name": "سوات مانجا",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "contentTypes": ["manga"],
+  "language": "ar",
+  "baseUrl": "https://meshmanga.com",
+  "icon": "icon.png",
+  "requestsPerSecond": 1,
+  "description": {
+    "en": "Manga translated into Arabic, from Swat Manga.",
+    "ar": "مانجا مترجمة إلى العربية من موقع سوات مانجا."
+  },
+  "author": "Riwaq"
+}

@@ -1,0 +1,15 @@
+{
+  "id": "team-x",
+  "name": "Team-X",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "contentTypes": ["manga"],
+  "language": "ar",
+  "baseUrl": "https://olympustaff.com",
+  "icon": "icon.png",
+  "description": {
+    "en": "Manga, manhwa and manhua translated into Arabic, from Team-X (Olympus Staff).",
+    "ar": "مانجا ومانهوا ومانهوا صينية مترجمة إلى العربية من موقع Team-X."
+  },
+  "author": "Riwaq"
+}

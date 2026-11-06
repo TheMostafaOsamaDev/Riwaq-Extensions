@@ -1,7 +1,8 @@
 // Bundles every extensions/<id> into dist/<id>/index.js, copies
 // manifest.json + icon.png alongside it, and writes dist/index.min.json —
 // the catalogue the app fetches to discover, install and update
-// extensions.
+// extensions. Manga-only extensions are bundled but not published while
+// PUBLISH_MANGA_EXTENSIONS is off.
 //
 // @riwaq/extension-api is bundled INTO every extension, not marked
 // external: the host only injects `host` capabilities at runtime, so the
@@ -18,12 +19,16 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadManifest, API_VERSION } from "./manifest";
+import type { ContentType } from "../packages/extension-api/src/index";
 import type { ExtensionManifest } from "./manifest";
 
 // Deliberately not `fileURLToPath(new URL("..", import.meta.url))`: under
@@ -39,7 +44,17 @@ import type { ExtensionManifest } from "./manifest";
 const REPO_ROOT = join(fileURLToPath(import.meta.url), "..", "..");
 const DEFAULT_EXTENSIONS_DIR = join(REPO_ROOT, "extensions");
 const DEFAULT_DIST_DIR = join(REPO_ROOT, "dist");
+const MANGA_THEMES_DIR = join(REPO_ROOT, "packages/manga-themes/src");
 const EXTENSION_API_ENTRY = join(REPO_ROOT, "packages/extension-api/src/index.ts");
+
+/** Whether extensions that serve no novels (`contentTypes` without
+ *  `"novel"`) are published. Released apps list every catalogue entry, and
+ *  until stage 3 of the app's manga work they would show a manga source with
+ *  a disabled Install and a false "update the app" notice. While this is
+ *  false such an extension is still validated and bundled here (and
+ *  typechecked and tested by CI), so it keeps working, but it is written to
+ *  neither dist/<id>/ nor dist/index.min.json. Stage 3 turns it on. */
+export const PUBLISH_MANGA_EXTENSIONS = false;
 
 /** A bundle over this size almost certainly means a heavy dependency
  *  slipped in that belongs on `host` instead — pdf.js is the specific
@@ -57,6 +72,9 @@ export interface RepoIndexEntry {
   baseUrl: string;
   description: Record<string, string>;
   author: string;
+  contentTypes: ContentType[];
+  /** Present only when the manifest sets it. */
+  requestsPerSecond?: number;
   /** Relative to index.min.json itself, e.g. "cenele/index.js" — never a
    *  leading slash or an absolute URL, so a fork or mirror of this repo
    *  works without editing any URL. */
@@ -78,6 +96,8 @@ export interface RunBuildOptions {
   extensionsDir?: string;
   /** Defaults to <repoRoot>/dist. */
   distDir?: string;
+  /** Defaults to PUBLISH_MANGA_EXTENSIONS. */
+  publishMangaExtensions?: boolean;
 }
 
 export interface RunBuildResult {
@@ -189,7 +209,13 @@ async function bundleOne(
       minify: true,
       legalComments: "none",
       outfile: join(distDir, id, "index.js"),
-      alias: { "@riwaq/extension-api": EXTENSION_API_ENTRY },
+      // Subpaths (`@riwaq/manga-themes/<file>`) resolve through esbuild's
+      // alias prefix matching against the directory; the bare specifier
+      // needs the barrel file.
+      alias: {
+        "@riwaq/extension-api": EXTENSION_API_ENTRY,
+        "@riwaq/manga-themes": MANGA_THEMES_DIR,
+      },
       write: false,
     });
     contents = result.outputFiles[0].contents;
@@ -230,6 +256,10 @@ async function bundleOne(
     baseUrl: manifest.baseUrl,
     description: manifest.description,
     author: manifest.author,
+    contentTypes: manifest.contentTypes,
+    ...(manifest.requestsPerSecond !== undefined && {
+      requestsPerSecond: manifest.requestsPerSecond,
+    }),
     code: `${id}/index.js`,
     icon: `${id}/icon.png`,
     sha256,
@@ -254,12 +284,31 @@ export async function runBuild(options: RunBuildOptions = {}): Promise<RunBuildR
   }));
   assertNoDuplicateIds(loaded);
 
-  // Pass 2: bundle each extension now that every manifest is known good.
+  // Pass 2: bundle each extension now that every manifest is known good. A
+  // held-back one (see PUBLISH_MANGA_EXTENSIONS) is bundled and checked in a
+  // scratch directory that is then thrown away.
+  const publishManga = options.publishMangaExtensions ?? PUBLISH_MANGA_EXTENSIONS;
   const entries: RepoIndexEntry[] = [];
+  const heldBack: string[] = [];
   for (const { dirName, manifest } of loaded) {
-    const entry = await bundleOne(dirName, manifest, extensionsDir, distDir);
-    entries.push(entry);
-    console.log(`  built ${entry.id}@${entry.version} (${(entry.size / 1024).toFixed(1)} KB)`);
+    if (publishManga || manifest.contentTypes.includes("novel")) {
+      const entry = await bundleOne(dirName, manifest, extensionsDir, distDir);
+      entries.push(entry);
+      console.log(`  built ${entry.id}@${entry.version} (${(entry.size / 1024).toFixed(1)} KB)`);
+      continue;
+    }
+    // Nor does an earlier build's output for it survive in dist/.
+    rmSync(join(distDir, manifest.id), { recursive: true, force: true });
+    const scratch = mkdtempSync(join(tmpdir(), "riwaq-held-back-"));
+    try {
+      await bundleOne(dirName, manifest, extensionsDir, scratch);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+    heldBack.push(manifest.id);
+  }
+  if (heldBack.length > 0) {
+    console.log(`  held back (manga only; PUBLISH_MANGA_EXTENSIONS is off): ${heldBack.join(", ")}`);
   }
 
   const index: RepoIndex = {

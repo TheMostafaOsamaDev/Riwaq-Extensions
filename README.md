@@ -101,6 +101,14 @@ implemented`, a starter `src/strings.ts`, and a test file already using
 `createTestHost`. Run `pnpm typecheck && pnpm test` right now and both pass — the
 scaffold compiles, and its stub test file exercises every "not implemented" method.
 
+A new extension starts at `"apiVersion": 1` and is a novel extension. A manga extension
+sets `"apiVersion": 2` and `"contentTypes": ["manga"]` in its manifest itself. Until the
+app can open manga, `PUBLISH_MANGA_EXTENSIONS` in `scripts/build.ts` is `false`: an
+extension whose `contentTypes` lacks `"novel"` is still validated, typechecked, tested
+and bundled, but `pnpm build` leaves it out of `dist/` and `dist/index.min.json` (and
+says so), so released apps never list it; stage 3 of the app's manga work turns the flag
+on.
+
 `pnpm validate` and `pnpm build` deliberately do **not** pass yet: the manifest's
 `name`, `author` and `description` still carry literal `"TODO: ..."` placeholders, and
 `scripts/manifest.ts` refuses any manifest field that still contains one. Without that
@@ -145,6 +153,7 @@ interface Source {
   getVolumeChapters?(novelUrl: string, volume: SourceVolume): Promise<SourceChapter[]>;
   searchChapters?(novelUrl: string, query: string): Promise<SourceChapter[]>;
   resolveImage?(ref: string): Promise<{ bytes: Uint8Array; mimeType: string; extension: string } | null>;
+  getChapterPages?(chapter: SourceChapter): Promise<ChapterPages>; // manga, apiVersion 2
 }
 ```
 
@@ -164,6 +173,13 @@ return that information from `createSource` — the interface has nowhere to put
 | `getVolumeChapters` | only if `hasLazyVolumes` | novel URL, a `SourceVolume` | `SourceChapter[]` | Populates one volume the UI expanded. |
 | `searchChapters` | no | novel URL, query | `SourceChapter[]` | In-novel chapter search, if the site has one. |
 | `resolveImage` | no | an opaque ref | bytes/mimeType/extension or `null` | Only for image `SourceLine`s whose `content` isn't a directly-fetchable URL (e.g. an image pulled out of a PDF). |
+| `getChapterPages` | no (manga) | a `SourceChapter` | `ChapterPages` | The page images of one manga chapter, in reading order. Implemented by extensions that declare `contentTypes: ["manga"]`. |
+
+**What "apiVersion 2 only adds" means for authors.** Version 2 adds optional fields and
+one optional method to version 1 and changes nothing else: every v1 field and method keeps
+its meaning, so a novel extension written against v1 needs no code change and stays on
+`"apiVersion": 1`. Only an extension that serves manga has to declare `"apiVersion": 2`.
+The host accepts both versions.
 
 **`search` is required, and there is no suggestion API.** The app has exactly one search
 interaction: the user types and presses Enter, and `search(query, page)` fills the
@@ -182,13 +198,16 @@ The shapes these methods pass around, trimmed to their fields (see
 
 | Shape | Fields |
 |---|---|
-| `NovelCard` | `url`, `title`, `coverUrl?`, `subtitle?`, `badges?: string[]` |
+| `NovelCard` | `url`, `title`, `coverUrl?`, `subtitle?`, `badges?: string[]`, `contentType?: "novel" \| "manga"` (default `"novel"`), `nsfw?: boolean` |
 | `SourceSection` | `id`, `title`, `cards: NovelCard[]`, `viewMoreUrl?` |
 | `SourceSearchResult` | `cards: NovelCard[]`, `hasMore: boolean`, `query`, `page` |
-| `SourceNovel` | `title`, `author`, `originalTitle?`, `language`, `direction: "ltr" \| "rtl"`, `coverUrl?`, `description?`, `tags: string[]`, `status?`, `meta: SourceNovelMeta[]`, `volumes: SourceVolume[]` |
+| `SourceNovel` | `title`, `author`, `originalTitle?`, `language`, `direction: "ltr" \| "rtl"`, `coverUrl?`, `description?`, `tags: string[]`, `status?`, `meta: SourceNovelMeta[]`, `volumes: SourceVolume[]`, `contentType?`, `nsfw?` (as on `NovelCard`) |
 | `SourceNovelMeta` | `label`, `value`, `url?` — free-form key/value rows (translator, year, type, …) |
 | `SourceVolume` | `id`, `title`, `chapters: SourceChapter[]`, `chapterCount?`, `key?` (opaque token for `getVolumeChapters`) |
-| `SourceChapter` | `id`, `title`, `url`, `lines: SourceLine[]` (empty until `getChapterContent` runs) |
+| `SourceChapter` | `id`, `title`, `url`, `number?` (the source's chapter number, may be fractional), `scanlator?`, `lock?: ChapterLock`, `lines: SourceLine[]` (empty until `getChapterContent` runs) |
+| `ChapterLock` | `reason`, `openUrl` — why the chapter can't be read in the app, and where to open it on the site |
+| `ChapterPages` | `pages: PageRef[]`, `expiresAt?` (epoch ms after which the page URLs stop working) |
+| `PageRef` | `url`, `headers?` (sent when fetching the image), `width?`, `height?`, `cacheKey?` (stable identity when `url` carries a changing token) |
 | `SourceLine` | `type: "text" \| "image"`, `content: string` |
 
 ## Manifest reference
@@ -202,12 +221,14 @@ plus one call-out below the table for a convention it does *not* enforce.
 | `id` | string | yes | kebab-case (lowercase letters, digits, hyphens) and **must equal the directory name** under `extensions/` | `"cenele"` |
 | `name` | string | yes | non-empty | `"فضاء الروايات"` |
 | `version` | string | yes | valid [semver](https://semver.org) | `"1.0.0"` |
-| `apiVersion` | number | yes | must be exactly `1` (the current `API_VERSION`) | `1` |
+| `apiVersion` | number | yes | `1` or `2` (`SUPPORTED_API_VERSIONS`); a `manga` extension needs `2` | `1` |
 | `language` | string | yes | non-empty BCP-47-ish tag | `"ar"` |
 | `baseUrl` | string | yes | must be an `https:` URL | `"https://cenele.com"` |
 | `icon` | string | yes | must be **literally** `"icon.png"` — a PNG file next to `manifest.json` | `"icon.png"` |
 | `description` | object | yes | a locale map; **must include an `en` key** — a description without `en` is rejected outright | `{ "en": "…", "ar": "…" }` |
 | `author` | string | yes | non-empty | `"Riwaq"` |
+| `contentTypes` | string[] | no | non-empty, no duplicates, each `"novel"` or `"manga"`; defaults to `["novel"]` | `["manga"]` |
+| `requestsPerSecond` | number | no | `0 < n ≤ 10`; the ceiling on how fast the host calls this site | `1` |
 
 **The icon's 128×128 size is checked by `pnpm validate`, not by `validateManifest`.**
 The manifest rule above is only that `icon` is literally the string `"icon.png"`;
@@ -273,6 +294,13 @@ interface SourceHost {
   app's message catalogue, so use this to pick from your own `strings.ts` catalogue for
   the handful of strings you synthesize yourself (a volume with no title, a section with
   no heading). See `extensions/kolnovel/src/strings.ts` for the pattern.
+- **Manga hosts.** For a manga extension the host calls `getChapterPages(chapter)` and
+  fetches each `PageRef.url` itself, sending `PageRef.headers`; it paces requests to the
+  site at the manifest's `requestsPerSecond` and caches by `cacheKey` when set. It treats
+  `ChapterPages.expiresAt` as the moment to ask again for fresh URLs. A chapter with a
+  `lock` is not opened in the app; the host shows `lock.reason` and links to `lock.openUrl`.
+  `contentTypes` and `requestsPerSecond` are also copied into each entry of the built
+  `index.min.json`, whose top-level `apiVersion` is now `2`.
 - **`pdf.extractChapter(bytes, options)`** — parses a downloaded PDF's pages into
   `SourceLine[]`. `options.mintImageRef` is called once per image the PDF contains; it
   returns an opaque ref string you attach to an image `SourceLine`, and your extension's

@@ -1,0 +1,15 @@
+{
+  "id": "manga-time",
+  "name": "مانجا تايم",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "contentTypes": ["manga"],
+  "language": "ar",
+  "baseUrl": "https://mangatime.org",
+  "icon": "icon.png",
+  "description": {
+    "en": "Manga, manhwa and manhua translated into Arabic, from Manga Time.",
+    "ar": "مانجا ومانهوا ومانهوا صينية مترجمة إلى العربية من موقع مانجا تايم."
+  },
+  "author": "Riwaq"
+}

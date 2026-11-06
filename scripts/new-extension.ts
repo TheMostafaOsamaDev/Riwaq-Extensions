@@ -12,7 +12,8 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { relative, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { API_VERSION, KEBAB_CASE_RE } from "./manifest";
+import { KEBAB_CASE_RE } from "./manifest";
+import { SUPPORTED_API_VERSIONS } from "../packages/extension-api/src/index";
 
 // See build.ts for why this is not `fileURLToPath(new URL("..", import.meta.url))`.
 const REPO_ROOT = join(fileURLToPath(import.meta.url), "..", "..");
@@ -33,7 +34,9 @@ function manifestJson(id: string): string {
     id,
     name: "TODO: Display Name",
     version: "0.1.0",
-    apiVersion: API_VERSION,
+    // A new extension is a novel one, and a novel extension stays on the
+    // oldest contract so apps that predate v2 can still install it.
+    apiVersion: SUPPORTED_API_VERSIONS[0],
     language: "en",
     baseUrl: "https://example.com",
     icon: "icon.png",

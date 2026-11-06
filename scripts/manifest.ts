@@ -18,7 +18,8 @@
 // undeclared virtual-store link that happens to resolve in today's
 // node_modules but has no guarantee of surviving a fresh, from-scratch
 // CI install.
-import { API_VERSION } from "../packages/extension-api/src/index";
+import { API_VERSION, SUPPORTED_API_VERSIONS } from "../packages/extension-api/src/index";
+import type { ContentType } from "../packages/extension-api/src/index";
 import { readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
@@ -41,8 +42,8 @@ export interface ExtensionManifest {
   name: string;
   /** Semver (e.g. "1.0.0"). Bumped whenever the extension's source changes. */
   version: string;
-  /** Major version of @riwaq/extension-api this extension targets. Must
-   *  equal the contract package's own API_VERSION. */
+  /** Major version of @riwaq/extension-api this extension targets. Must be
+   *  one of SUPPORTED_API_VERSIONS (1 or 2). */
   apiVersion: number;
   /** BCP-47 language tag, e.g. "ar", "en". */
   language: string;
@@ -52,7 +53,15 @@ export interface ExtensionManifest {
   icon: string;
   description: ManifestDescription;
   author: string;
+  /** What the extension serves. Optional in the JSON; defaults to
+   *  ["novel"]. Non-empty, no duplicates; "manga" needs apiVersion 2. */
+  contentTypes: ContentType[];
+  /** Ceiling on the host's request rate to this site, in requests per
+   *  second: 0 < n <= 10. Absent means the host's default. */
+  requestsPerSecond?: number;
 }
+
+const CONTENT_TYPES: readonly ContentType[] = ["novel", "manga"];
 
 // Exported so scripts/new-extension.ts can refuse a non-kebab-case id with
 // the exact same rule this validator enforces, instead of a second regex
@@ -140,12 +149,50 @@ export function validateManifest(raw: unknown, source: string): ExtensionManifes
   }
 
   const apiVersion = raw.apiVersion;
-  if (typeof apiVersion !== "number" || !Number.isInteger(apiVersion) || apiVersion !== API_VERSION) {
+  if (
+    typeof apiVersion !== "number" ||
+    !Number.isInteger(apiVersion) ||
+    !SUPPORTED_API_VERSIONS.includes(apiVersion)
+  ) {
     fail(
       source,
       "apiVersion",
-      `must be the integer ${API_VERSION}, got ${JSON.stringify(apiVersion ?? null)}`,
+      `must be one of the integers ${SUPPORTED_API_VERSIONS.join(", ")}, got ${JSON.stringify(apiVersion ?? null)}`,
     );
+  }
+
+  let contentTypes: ContentType[] = ["novel"];
+  if (raw.contentTypes !== undefined) {
+    const list = raw.contentTypes;
+    if (
+      !Array.isArray(list) ||
+      list.length === 0 ||
+      !list.every((t) => CONTENT_TYPES.includes(t as ContentType)) ||
+      new Set(list).size !== list.length
+    ) {
+      fail(
+        source,
+        "contentTypes",
+        `must be a non-empty array of unique values from ${JSON.stringify(CONTENT_TYPES)}, got ${JSON.stringify(list)}`,
+      );
+    }
+    contentTypes = list as ContentType[];
+  }
+  if (contentTypes.includes("manga") && apiVersion < 2) {
+    fail(source, "apiVersion", `must be 2 or higher for a manga extension, got ${apiVersion}`);
+  }
+
+  let requestsPerSecond: number | undefined;
+  if (raw.requestsPerSecond !== undefined) {
+    const n = raw.requestsPerSecond;
+    if (typeof n !== "number" || !Number.isFinite(n) || n <= 0 || n > 10) {
+      fail(
+        source,
+        "requestsPerSecond",
+        `must be a number greater than 0 and at most 10, got ${JSON.stringify(n)}`,
+      );
+    }
+    requestsPerSecond = n;
   }
 
   const name = requireNonEmptyString(raw, "name", source);
@@ -193,6 +240,8 @@ export function validateManifest(raw: unknown, source: string): ExtensionManifes
     icon,
     description: description as ManifestDescription,
     author,
+    contentTypes,
+    ...(requestsPerSecond !== undefined && { requestsPerSecond }),
   };
 }
 

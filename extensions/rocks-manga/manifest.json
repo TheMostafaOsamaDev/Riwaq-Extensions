@@ -1,0 +1,15 @@
+{
+  "id": "rocks-manga",
+  "name": "روكس مانجا",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "contentTypes": ["manga"],
+  "language": "ar",
+  "baseUrl": "https://rocksmanga.com",
+  "icon": "icon.png",
+  "description": {
+    "en": "Manga translated into Arabic, from Rocks Manga.",
+    "ar": "مانجا مترجمة إلى العربية من موقع روكس مانجا."
+  },
+  "author": "Riwaq"
+}
